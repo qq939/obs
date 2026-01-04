@@ -25,18 +25,22 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         
         # 滚动删除逻辑
         try:
-            files = [os.path.join(UPLOAD_DIR, f) for f in os.listdir(UPLOAD_DIR) 
+            files = [f for f in os.listdir(UPLOAD_DIR) 
                      if os.path.isfile(os.path.join(UPLOAD_DIR, f)) and not f.startswith('.')]
             
-            if len(files) >= 100:
-                files.sort(key=lambda x: os.path.getctime(x))
-                while len(files) >= 100:
-                    oldest_file = files.pop(0)
-                    try:
-                        os.remove(oldest_file)
-                        print(f"滚动删除文件: {oldest_file}")
-                    except Exception as e:
-                        print(f"删除旧文件失败: {e}")
+            # 如果是新文件（不在列表中），才需要检查数量
+            if filename not in files:
+                if len(files) >= 20:
+                    files_paths = [os.path.join(UPLOAD_DIR, f) for f in files]
+                    files_paths.sort(key=lambda x: os.path.getctime(x))
+                    
+                    while len(files_paths) >= 20:
+                        oldest_file = files_paths.pop(0)
+                        try:
+                            os.remove(oldest_file)
+                            print(f"滚动删除文件: {oldest_file}")
+                        except Exception as e:
+                            print(f"删除旧文件失败: {e}")
         except Exception as e:
             print(f"检查文件数量失败: {e}")
 

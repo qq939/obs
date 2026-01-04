@@ -43,8 +43,8 @@ def setup_teardown():
 
 def test_upload_and_rolling_deletion():
     print("Starting upload test...")
-    # Upload 105 files
-    for i in range(105):
+    # Upload 25 files (limit is 20)
+    for i in range(25):
         filename = f"file_{i}.txt"
         content = f"content {i}"
         
@@ -60,17 +60,44 @@ def test_upload_and_rolling_deletion():
     # Check total files
     files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
     print(f"Total files remaining: {len(files)}")
-    assert len(files) == 100
+    assert len(files) == 20
     
     # Check expected files
-    # We uploaded 0 to 104 (105 files).
+    # We uploaded 0 to 24 (25 files).
     # 5 files should be deleted. 0, 1, 2, 3, 4 should be gone.
-    # 5 to 104 should be there.
+    # 5 to 24 should be there.
     
     assert not os.path.exists(os.path.join(TEST_DIR, "file_0.txt")), "file_0 should be deleted"
     assert not os.path.exists(os.path.join(TEST_DIR, "file_4.txt")), "file_4 should be deleted"
     assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt")), "file_5 should exist"
-    assert os.path.exists(os.path.join(TEST_DIR, "file_104.txt")), "file_104 should exist"
+    assert os.path.exists(os.path.join(TEST_DIR, "file_24.txt")), "file_24 should exist"
+
+def test_overwrite_existing_file():
+    print("Testing overwrite logic...")
+    # Ensure we are at capacity (should be 20 from previous test)
+    files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
+    assert len(files) == 20
+    
+    # The oldest file currently is file_5.txt (since 0-4 deleted)
+    assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt"))
+    
+    # Overwrite an EXISTING file (e.g., file_10.txt)
+    # This should NOT trigger deletion of file_5.txt
+    filename = "file_10.txt"
+    content = "new content for file 10"
+    resp = requests.put(f"{BASE_URL}/{filename}", data=content.encode())
+    assert resp.status_code == 201
+    
+    # Verify count is still 20
+    files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
+    assert len(files) == 20
+    
+    # Verify file_5.txt still exists (because we overwrote, didn't add new)
+    assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt")), "file_5 should NOT be deleted on overwrite"
+    
+    # Verify file_10 content changed
+    with open(os.path.join(TEST_DIR, "file_10.txt"), "r") as f:
+        assert f.read() == content
 
 def test_homepage_list():
     print("Testing homepage...")
@@ -79,7 +106,7 @@ def test_homepage_list():
     html = resp.text
     
     # Check if latest file is in HTML
-    assert "file_104.txt" in html
+    assert "file_24.txt" in html
     # Check if deleted file is NOT in HTML
     assert "file_0.txt" not in html
     assert "file_4.txt" not in html
