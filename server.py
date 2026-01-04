@@ -209,10 +209,10 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 # 启动服务器
 if __name__ == "__main__":
     with socketserver.TCPServer(("", PORT), FileHandler) as httpd:
-        print(f"文件托管服务器启动: http://localhost:{PORT}")
-        print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav")
-        print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}")
+        print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
+        print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
+        print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}", flush=True)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\n服务器已停止")
+            print("\n服务器已停止", flush=True)
