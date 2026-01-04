@@ -41,8 +41,8 @@ RUN mkdir -p /var/log/ && chmod 777 /var/log/
 RUN cd /app && /app/venv/bin/pip install --upgrade pip && \
     /app/venv/bin/pip install -r /app/requirements.txt
 
-# Make port 5010 available to the world outside this container
-EXPOSE 5010
+# Make port 8088 available to the world outside this container
+EXPOSE 8088
 
 # Use the Python interpreter from the virtual environment to run the application
 CMD ["/bin/sh", "-c", "/app/venv/bin/python /app/server.py >> /var/log/obs.log 2>&1"]
