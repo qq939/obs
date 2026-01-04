@@ -45,5 +45,5 @@ RUN cd /app && /app/venv/bin/pip install --upgrade pip && \
 EXPOSE 5010
 
 # Use the Python interpreter from the virtual environment to run the application
-CMD ["/bin/sh", "-c", "/app/venv/bin/python /app/server.py >> /var/log/teacher2.log 2>&1"]
+CMD ["/bin/sh", "-c", "/app/venv/bin/python /app/server.py >> /var/log/obs.log 2>&1"]
     
