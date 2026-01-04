@@ -6,8 +6,8 @@ from urllib.parse import urlparse
 from http import HTTPStatus
 
 # 服务器配置
-PORT = 8088  # 端口号（可修改，如 8080）
-UPLOAD_DIR = "obs"  # 上传文件保存目录
+PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")  # 上传文件保存目录
 
 # 创建上传目录（如果不存在）
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -20,23 +20,32 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         if not filename:
             return False, "文件名不能为空"
 
-        save_path = os.path.join(UPLOAD_DIR, filename)
-        if os.path.isdir(UPLOAD_DIR):  # 先判断是否为有效目录
-            try:
-                shutil.rmtree(UPLOAD_DIR)
-                print(f"成功删除目录：{UPLOAD_DIR}")
-            except PermissionError:
-                print(f"权限不足，无法删除：{UPLOAD_DIR}")
-            except Exception as e:
-                print(f"删除失败：{str(e)}")
-        else:
-            print(f"目录不存在或不是目录：{UPLOAD_DIR}")
+        # 确保目录存在
         os.makedirs(UPLOAD_DIR, exist_ok=True)
+        
+        # 滚动删除逻辑
+        try:
+            files = [os.path.join(UPLOAD_DIR, f) for f in os.listdir(UPLOAD_DIR) 
+                     if os.path.isfile(os.path.join(UPLOAD_DIR, f)) and not f.startswith('.')]
+            
+            if len(files) >= 100:
+                files.sort(key=lambda x: os.path.getctime(x))
+                while len(files) >= 100:
+                    oldest_file = files.pop(0)
+                    try:
+                        os.remove(oldest_file)
+                        print(f"滚动删除文件: {oldest_file}")
+                    except Exception as e:
+                        print(f"删除旧文件失败: {e}")
+        except Exception as e:
+            print(f"检查文件数量失败: {e}")
+
+        save_path = os.path.join(UPLOAD_DIR, filename)
 
         try:
             with open(save_path, "wb") as f:
                 f.write(file_data)
-            file_url = f"http://{self.headers.get('Host', 'obs.dimond.top')}/{UPLOAD_DIR}/{filename}"
+            file_url = f"http://{self.headers.get('Host', 'obs.dimond.top')}/{filename}"
             return True, file_url
         except Exception as e:
             return False, f"保存失败: {str(e)}"
@@ -72,13 +81,59 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         filename = os.path.basename(parsed_path.path)
 
         if not filename:
-            # 根路径返回提示信息
+            # 根路径返回文件列表
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(f"文件托管服务器\n".encode())
-            self.wfile.write(f"上传文件: curl --upload-file 本地文件 http://obs.dimond.top/文件名\n".encode())
-            self.wfile.write(f"访问文件: http://{self.headers.get('Host')}/文件名\n".encode())
+            
+            # 获取文件列表
+            files_list = []
+            if os.path.exists(UPLOAD_DIR):
+                try:
+                    raw_files = [f for f in os.listdir(UPLOAD_DIR) if not f.startswith('.')]
+                    # 按时间倒序排序
+                    raw_files.sort(key=lambda x: os.path.getctime(os.path.join(UPLOAD_DIR, x)), reverse=True)
+                    files_list = raw_files
+                except Exception:
+                    files_list = []
+
+            # 构建HTML
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>文件托管服务</title>
+                <style>
+                    body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+                    h1 { color: #333; }
+                    ul { list-style: none; padding: 0; }
+                    li { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+                    a { text-decoration: none; color: #007bff; }
+                    a:hover { text-decoration: underline; }
+                    .empty { color: #999; font-style: italic; }
+                </style>
+            </head>
+            <body>
+                <h1>文件托管列表 (Max 100)</h1>
+                <p>上传命令示例: <code>curl --upload-file file.txt http://host/file.txt</code></p>
+                <ul>
+            """
+            
+            host = self.headers.get('Host', 'localhost')
+            if not files_list:
+                html += '<li class="empty">暂无文件</li>'
+            else:
+                for f in files_list:
+                    file_url = f"http://{host}/{f}"
+                    html += f'<li><a href="{file_url}" target="_blank">{f}</a> <span><a href="{file_url}" download>下载</a></span></li>'
+            
+            html += """
+                </ul>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode('utf-8'))
             return
 
         # 读取并返回文件
