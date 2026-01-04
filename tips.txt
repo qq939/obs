@@ -1,0 +1,25 @@
+# VSCode Mac Shortcuts & Tips
+
+## General
+- **Command Palette**: `Cmd + Shift + P`
+- **Quick Open**: `Cmd + P`
+- **Toggle Sidebar**: `Cmd + B`
+- **Toggle Terminal**: `Ctrl + ` `
+
+## Editing
+- **Multi-cursor**: `Opt + Click` or `Cmd + Opt + Up/Down`
+- **Move Line Up/Down**: `Opt + Up/Down`
+- **Copy Line Up/Down**: `Shift + Opt + Up/Down`
+- **Delete Line**: `Cmd + Shift + K`
+- **Comment/Uncomment**: `Cmd + /`
+
+## Intelligent Code Completion (IntelliSense)
+- **Trigger Suggestion**: `Ctrl + Space`
+- **Accept Suggestion**: `Tab` or `Enter`
+- **Quick Fix**: `Cmd + .`
+- **Go to Definition**: `F12` or `Cmd + Click`
+- **Peek Definition**: `Opt + F12`
+
+## Python Specific
+- **Run Python File**: `Run Button` (top right) or setup launch.json
+- **Format Document**: `Shift + Opt + F`
