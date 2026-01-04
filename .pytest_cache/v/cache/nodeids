@@ -1,0 +1,4 @@
+[
+  "test_server.py::test_homepage_list",
+  "test_server.py::test_upload_and_rolling_deletion"
+]
