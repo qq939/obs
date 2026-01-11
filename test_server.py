@@ -41,9 +41,9 @@ def setup_teardown():
     if os.path.exists(TEST_DIR):
         shutil.rmtree(TEST_DIR)
 
-def test_upload_and_rolling_deletion():
-    print("Starting upload test...")
-    # Upload 25 files (limit is 20)
+def test_upload_no_limit():
+    print("Starting upload test (no limit)...")
+    # Upload 25 files (previously limit was 20)
     for i in range(25):
         filename = f"file_{i}.txt"
         content = f"content {i}"
@@ -54,50 +54,52 @@ def test_upload_and_rolling_deletion():
             print(f"Failed to upload {filename}: {resp.status_code} {resp.text}")
         assert resp.status_code == 201
         
-        # Small sleep to ensure timestamp diff for sorting
-        time.sleep(0.02)
-        
     # Check total files
     files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
     print(f"Total files remaining: {len(files)}")
-    assert len(files) == 20
+    assert len(files) == 25, "Should have 25 files (no limit)"
     
-    # Check expected files
-    # We uploaded 0 to 24 (25 files).
-    # 5 files should be deleted. 0, 1, 2, 3, 4 should be gone.
-    # 5 to 24 should be there.
-    
-    assert not os.path.exists(os.path.join(TEST_DIR, "file_0.txt")), "file_0 should be deleted"
-    assert not os.path.exists(os.path.join(TEST_DIR, "file_4.txt")), "file_4 should be deleted"
-    assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt")), "file_5 should exist"
+    # Check all files exist (no rolling deletion)
+    assert os.path.exists(os.path.join(TEST_DIR, "file_0.txt")), "file_0 should exist"
+    assert os.path.exists(os.path.join(TEST_DIR, "file_4.txt")), "file_4 should exist"
     assert os.path.exists(os.path.join(TEST_DIR, "file_24.txt")), "file_24 should exist"
 
 def test_overwrite_existing_file():
     print("Testing overwrite logic...")
-    # Ensure we are at capacity (should be 20 from previous test)
+    # Ensure we have 25 files from previous test
     files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
-    assert len(files) == 20
-    
-    # The oldest file currently is file_5.txt (since 0-4 deleted)
-    assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt"))
+    assert len(files) == 25
     
     # Overwrite an EXISTING file (e.g., file_10.txt)
-    # This should NOT trigger deletion of file_5.txt
     filename = "file_10.txt"
     content = "new content for file 10"
     resp = requests.put(f"{BASE_URL}/{filename}", data=content.encode())
     assert resp.status_code == 201
     
-    # Verify count is still 20
+    # Verify count is still 25
     files = [f for f in os.listdir(TEST_DIR) if not f.startswith('.')]
-    assert len(files) == 20
+    assert len(files) == 25
     
-    # Verify file_5.txt still exists (because we overwrote, didn't add new)
-    assert os.path.exists(os.path.join(TEST_DIR, "file_5.txt")), "file_5 should NOT be deleted on overwrite"
-    
-    # Verify file_10 content changed
+    # Verify file content changed
     with open(os.path.join(TEST_DIR, "file_10.txt"), "r") as f:
         assert f.read() == content
+
+def test_delete_file():
+    print("Testing delete file...")
+    # Create a file to delete
+    filename = "to_be_deleted.txt"
+    resp = requests.put(f"{BASE_URL}/{filename}", data=b"delete me")
+    assert resp.status_code == 201
+    assert os.path.exists(os.path.join(TEST_DIR, filename))
+    
+    # DELETE request
+    resp = requests.delete(f"{BASE_URL}/{filename}")
+    assert resp.status_code == 200
+    assert not os.path.exists(os.path.join(TEST_DIR, filename))
+    
+    # Try deleting non-existent file
+    resp = requests.delete(f"{BASE_URL}/non_existent.txt")
+    assert resp.status_code == 404
 
 def test_homepage_list():
     print("Testing homepage...")
@@ -105,9 +107,7 @@ def test_homepage_list():
     assert resp.status_code == 200
     html = resp.text
     
-    # Check if latest file is in HTML
+    # Check if files are in HTML
+    assert "file_0.txt" in html
     assert "file_24.txt" in html
-    # Check if deleted file is NOT in HTML
-    assert "file_0.txt" not in html
-    assert "file_4.txt" not in html
-    assert "file_5.txt" in html
+    assert "file_10.txt" in html

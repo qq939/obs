@@ -12,14 +12,18 @@
 - **Copy Line Up/Down**: `Shift + Opt + Up/Down`
 - **Delete Line**: `Cmd + Shift + K`
 - **Comment/Uncomment**: `Cmd + /`
+- **Rename Symbol**: `F2` (Refactor rename variables/functions globally)
 
 ## Intelligent Code Completion (IntelliSense)
-- **Trigger Suggestion**: `Ctrl + Space`
-- **Accept Suggestion**: `Tab` or `Enter`
-- **Quick Fix**: `Cmd + .`
+- **Trigger Suggestion**: `Ctrl + Space` (Manually trigger completion list)
+- **Accept Suggestion**: `Tab` or `Enter` (When a suggestion is highlighted)
+- **Snippet Expansion**: Type a few letters (e.g., `def`, `for`, `class`) and press `Tab` to expand standard templates.
+- **Parameter Hints**: `Cmd + Shift + Space` (Show arguments for function call)
+- **Quick Fix**: `Cmd + .` (Auto-import, fix errors)
 - **Go to Definition**: `F12` or `Cmd + Click`
 - **Peek Definition**: `Opt + F12`
 
 ## Python Specific
 - **Run Python File**: `Run Button` (top right) or setup launch.json
 - **Format Document**: `Shift + Opt + F`
+- **Organize Imports**: `Shift + Opt + O`

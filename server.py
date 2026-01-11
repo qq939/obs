@@ -23,27 +23,6 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         # 确保目录存在
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         
-        # 滚动删除逻辑
-        try:
-            files = [f for f in os.listdir(UPLOAD_DIR) 
-                     if os.path.isfile(os.path.join(UPLOAD_DIR, f)) and not f.startswith('.')]
-            
-            # 如果是新文件（不在列表中），才需要检查数量
-            if filename not in files:
-                if len(files) >= 20:
-                    files_paths = [os.path.join(UPLOAD_DIR, f) for f in files]
-                    files_paths.sort(key=lambda x: os.path.getctime(x))
-                    
-                    while len(files_paths) >= 20:
-                        oldest_file = files_paths.pop(0)
-                        try:
-                            os.remove(oldest_file)
-                            print(f"滚动删除文件: {oldest_file}")
-                        except Exception as e:
-                            print(f"删除旧文件失败: {e}")
-        except Exception as e:
-            print(f"检查文件数量失败: {e}")
-
         save_path = os.path.join(UPLOAD_DIR, filename)
 
         try:
@@ -112,14 +91,32 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
                     h1 { color: #333; }
                     ul { list-style: none; padding: 0; }
-                    li { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+                    li { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
                     a { text-decoration: none; color: #007bff; }
                     a:hover { text-decoration: underline; }
                     .empty { color: #999; font-style: italic; }
+                    .actions { display: flex; gap: 10px; }
+                    .btn-delete { cursor: pointer; background: none; border: none; font-size: 1.2em; }
+                    .btn-delete:hover { opacity: 0.7; }
                 </style>
+                <script>
+                    async function deleteFile(filename) {
+                        if (!confirm(`确定要删除 ${filename} 吗？`)) return;
+                        try {
+                            const response = await fetch(`/${filename}`, { method: 'DELETE' });
+                            if (response.ok) {
+                                window.location.reload();
+                            } else {
+                                alert('删除失败');
+                            }
+                        } catch (e) {
+                            alert('删除出错: ' + e);
+                        }
+                    }
+                </script>
             </head>
             <body>
-                <h1>文件托管列表 (Max 100)</h1>
+                <h1>文件托管列表</h1>
                 <p>上传命令示例: <code>curl --upload-file file.txt http://host/file.txt</code></p>
                 <ul>
             """
@@ -130,7 +127,15 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 for f in files_list:
                     file_url = f"http://{host}/{f}"
-                    html += f'<li><a href="{file_url}" target="_blank">{f}</a> <span><a href="{file_url}" download>下载</a></span></li>'
+                    html += f'''
+                    <li>
+                        <a href="{file_url}" target="_blank">{f}</a> 
+                        <span class="actions">
+                            <a href="{file_url}" download>下载</a>
+                            <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
+                        </span>
+                    </li>
+                    '''
             
             html += """
                 </ul>
@@ -147,6 +152,27 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             return super().do_GET()  # 调用父类方法处理文件返回
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "not a file")
+
+    def do_DELETE(self):
+        """处理 DELETE 请求"""
+        parsed_path = urlparse(self.path)
+        filename = os.path.basename(parsed_path.path)
+
+        if not filename:
+             self.send_error(HTTPStatus.BAD_REQUEST, "文件名不能为空")
+             return
+             
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                self.send_response(HTTPStatus.OK)
+                self.end_headers()
+                self.wfile.write(b"Deleted")
+            except Exception as e:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Delete failed: {str(e)}")
+        else:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
 
     def do_POST(self):
         """处理 POST 上传（手动解析 multipart/form-data）"""
