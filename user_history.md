@@ -13,3 +13,7 @@
 13→## 2026-01-11
 14→**User Request:** 1、对存储文件数量不再做上限限制，不再设置滚动删除机制。2、如果上传同名文件，则实施替换。3、在网页端每个文件旁边增加垃圾桶图标，能够删除文件。
 15→**Action:** Updating `server.py` to remove file limits and rolling deletion. Ensuring overwrite on name collision. Adding delete endpoint and UI.
+16→
+17→## 2026-01-12
+18→**User Request:** 文件预览和下载的根地址都是obs.dimond.top，你写成0.0.0.0，根本访问不通。只有flask app是跑在0.0.0.0上的。
+19→**Action:** Fixed `server.py` to use `obs.dimond.top` as the hardcoded host for file URLs instead of dynamically using the request's Host header. Updated tests to verify this behavior.

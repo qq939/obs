@@ -121,7 +121,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                 <ul>
             """
             
-            host = self.headers.get('Host', 'localhost')
+            host = "obs.dimond.top"
             if not files_list:
                 html += '<li class="empty">暂无文件</li>'
             else:

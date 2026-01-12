@@ -111,3 +111,7 @@ def test_homepage_list():
     assert "file_0.txt" in html
     assert "file_24.txt" in html
     assert "file_10.txt" in html
+    
+    # Check if URL uses obs.dimond.top
+    assert "http://obs.dimond.top/file_0.txt" in html
+    assert "http://obs.dimond.top/file_24.txt" in html
