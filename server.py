@@ -117,7 +117,14 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             </head>
             <body>
                 <h1>文件托管列表</h1>
-                <p>上传命令示例: <code>curl --upload-file file.txt http://host/file.txt</code></p>
+                <p>上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+                <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
+                    <h3>上传文件</h3>
+                    <form action="/" method="post" enctype="multipart/form-data">
+                        <input type="file" name="file" required>
+                        <input type="submit" value="上传">
+                    </form>
+                </div>
                 <ul>
             """
             

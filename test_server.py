@@ -115,3 +115,8 @@ def test_homepage_list():
     # Check if URL uses obs.dimond.top
     assert "http://obs.dimond.top/file_0.txt" in html
     assert "http://obs.dimond.top/file_24.txt" in html
+
+    # Check if upload form exists
+    assert '<form action="/" method="post" enctype="multipart/form-data">' in html
+    assert '<input type="file" name="file" required>' in html
+    assert '<input type="submit" value="上传">' in html

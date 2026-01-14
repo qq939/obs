@@ -17,3 +17,7 @@
 17→## 2026-01-12
 18→**User Request:** 文件预览和下载的根地址都是obs.dimond.top，你写成0.0.0.0，根本访问不通。只有flask app是跑在0.0.0.0上的。
 19→**Action:** Fixed `server.py` to use `obs.dimond.top` as the hardcoded host for file URLs instead of dynamically using the request's Host header. Updated tests to verify this behavior.
+20→
+21→## 2026-01-14
+22→**User Request:** 在这行字“上传命令示例: curl --upload-file file.txt     http://obs.dimond.top"下方，增加一个文件上传模块
+23→**Action:** Added a file upload form to the homepage HTML in `server.py`. Updated `test_server.py` to verify the form's presence.
