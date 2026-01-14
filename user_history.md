@@ -21,3 +21,7 @@
 21→## 2026-01-14
 22→**User Request:** 在这行字“上传命令示例: curl --upload-file file.txt     http://obs.dimond.top"下方，增加一个文件上传模块
 23→**Action:** Added a file upload form to the homepage HTML in `server.py`. Updated `test_server.py` to verify the form's presence.
+24→
+25→## 2026-01-14 (Continued)
+26→**User Request:** 为啥不支持json文件下载？其他的格式都没问题 。
+27→**Action:** Identified that browsers render JSON by default. Modified `server.py` to add `Content-Disposition: attachment` header for file downloads, forcing them to be downloaded instead of displayed. Added regression test for JSON download.

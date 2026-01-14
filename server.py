@@ -155,8 +155,28 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         # 读取并返回文件
         file_path = os.path.join(UPLOAD_DIR, filename)
         if os.path.exists(file_path) and os.path.isfile(file_path):
-            self.path = file_path  # 指向上传目录中的文件
-            return super().do_GET()  # 调用父类方法处理文件返回
+            try:
+                f = open(file_path, 'rb')
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                return
+
+            try:
+                self.send_response(HTTPStatus.OK)
+                ctype = self.guess_type(file_path)
+                self.send_header("Content-Type", ctype)
+                
+                fs = os.fstat(f.fileno())
+                self.send_header("Content-Length", str(fs[6]))
+                self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
+                # 强制下载，解决 JSON 等文件在浏览器直接打开的问题
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.end_headers()
+                
+                shutil.copyfileobj(f, self.wfile)
+            finally:
+                f.close()
+            return
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "not a file")
 

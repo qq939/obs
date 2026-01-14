@@ -120,3 +120,27 @@ def test_homepage_list():
     assert '<form action="/" method="post" enctype="multipart/form-data">' in html
     assert '<input type="file" name="file" required>' in html
     assert '<input type="submit" value="上传">' in html
+
+def test_json_file_download():
+    print("Testing json file download...")
+    filename = "test.json"
+    content = '{"key": "value"}'
+    
+    # Upload json file
+    resp = requests.put(f"{BASE_URL}/{filename}", data=content.encode())
+    assert resp.status_code == 201
+    
+    # Download json file
+    resp = requests.get(f"{BASE_URL}/{filename}")
+    assert resp.status_code == 200
+    assert resp.text == content
+    
+    # Check Content-Type and Content-Disposition
+    # We want it to be downloadable, so it should have Content-Disposition attachment,
+    # OR at least application/json content type.
+    # The user says "doesn't support download", which implies it might be opening in browser 
+    # or failing.
+    print(f"Headers: {resp.headers}")
+    # We ideally want application/octet-stream or application/json with attachment
+    assert "attachment" in resp.headers.get("Content-Disposition", ""), "Should have Content-Disposition attachment"
+
