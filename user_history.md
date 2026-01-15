@@ -25,3 +25,7 @@
 25→## 2026-01-14 (Continued)
 26→**User Request:** 为啥不支持json文件下载？其他的格式都没问题 。
 27→**Action:** Identified that browsers render JSON by default. Modified `server.py` to add `Content-Disposition: attachment` header for file downloads, forcing them to be downloaded instead of displayed. Added regression test for JSON download.
+28→
+29→## 2026-01-15
+30→**User Request:** 打不开json文件，并且下载的时候后缀名是html，且无法成功下载。
+31→**Action:** Debugged and found that URL encoded filenames (especially with Chinese or spaces) were causing 404 errors because the server wasn't decoding them properly. Added `unquote` to `do_GET`, `do_PUT`, and `do_DELETE`. Also updated `Content-Disposition` header to use RFC 5987 standard (`filename*=UTF-8''...`) to correctly handle non-ASCII filenames in downloads. Added a comprehensive test case for special characters in filenames.

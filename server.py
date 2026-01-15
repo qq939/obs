@@ -2,7 +2,7 @@ import os
 import http.server
 import shutil
 import socketserver
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote, quote
 from http import HTTPStatus
 
 # 服务器配置
@@ -37,6 +37,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         # 解析 URL 中的文件名
         parsed_path = urlparse(self.path)
         filename = os.path.basename(parsed_path.path)
+        filename = unquote(filename)
 
         if not filename:
             self.send_error(HTTPStatus.BAD_REQUEST, "文件名不能为空")
@@ -62,7 +63,8 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         # 解析请求的文件名
         parsed_path = urlparse(self.path)
         filename = os.path.basename(parsed_path.path)
-
+        filename = unquote(filename)
+        
         if not filename:
             # 根路径返回文件列表
             self.send_response(HTTPStatus.OK)
@@ -154,6 +156,13 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 
         # 读取并返回文件
         file_path = os.path.join(UPLOAD_DIR, filename)
+        
+        # DEBUG
+        import sys
+        print(f"DEBUG: Checking {file_path}", file=sys.stderr)
+        if os.path.exists(UPLOAD_DIR):
+            print(f"DEBUG: Dir content: {os.listdir(UPLOAD_DIR)}", file=sys.stderr)
+            
         if os.path.exists(file_path) and os.path.isfile(file_path):
             try:
                 f = open(file_path, 'rb')
@@ -170,7 +179,9 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(fs[6]))
                 self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
                 # 强制下载，解决 JSON 等文件在浏览器直接打开的问题
-                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                # 使用 RFC 5987 标准支持非 ASCII 文件名
+                encoded_filename = quote(filename)
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_filename}")
                 self.end_headers()
                 
                 shutil.copyfileobj(f, self.wfile)
@@ -184,6 +195,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
         """处理 DELETE 请求"""
         parsed_path = urlparse(self.path)
         filename = os.path.basename(parsed_path.path)
+        filename = unquote(filename)
 
         if not filename:
              self.send_error(HTTPStatus.BAD_REQUEST, "文件名不能为空")

@@ -144,3 +144,31 @@ def test_json_file_download():
     # We ideally want application/octet-stream or application/json with attachment
     assert "attachment" in resp.headers.get("Content-Disposition", ""), "Should have Content-Disposition attachment"
 
+def test_special_chars_filename():
+    print("Testing special chars filename...")
+    # Test with Chinese characters and spaces
+    filename = "测试 文件.json"
+    content = '{"test": "中文"}'
+    
+    # URL encode filename for request
+    from urllib.parse import quote
+    encoded_filename = quote(filename)
+    
+    # Upload
+    resp = requests.put(f"{BASE_URL}/{encoded_filename}", data=content.encode('utf-8'))
+    assert resp.status_code == 201
+    
+    # Verify file exists on disk (decoded name)
+    assert os.path.exists(os.path.join(TEST_DIR, filename))
+    
+    # Download
+    resp = requests.get(f"{BASE_URL}/{encoded_filename}")
+    assert resp.status_code == 200
+    # Response content should match
+    assert resp.content.decode('utf-8') == content
+    
+    # Delete
+    resp = requests.delete(f"{BASE_URL}/{encoded_filename}")
+    assert resp.status_code == 200
+    assert not os.path.exists(os.path.join(TEST_DIR, filename))
+
