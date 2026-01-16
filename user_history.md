@@ -29,3 +29,7 @@
 29→## 2026-01-15
 30→**User Request:** 打不开json文件，并且下载的时候后缀名是html，且无法成功下载。
 31→**Action:** Debugged and found that URL encoded filenames (especially with Chinese or spaces) were causing 404 errors because the server wasn't decoding them properly. Added `unquote` to `do_GET`, `do_PUT`, and `do_DELETE`. Also updated `Content-Disposition` header to use RFC 5987 standard (`filename*=UTF-8''...`) to correctly handle non-ASCII filenames in downloads. Added a comprehensive test case for special characters in filenames.
+32→
+33→## 2026-01-16
+34→**User Request:** web side add a new function, that can sort files by file extention
+35→**Action:** Added sorting functionality to the web interface. Implemented `?sort=ext` parameter in `server.py` to sort files by extension (alphabetical) and added UI controls to switch between "Sort by Time" (default) and "Sort by Extension". Added `test_sort_by_extension` to `test_server.py` to verify the sorting logic.

@@ -172,3 +172,37 @@ def test_special_chars_filename():
     assert resp.status_code == 200
     assert not os.path.exists(os.path.join(TEST_DIR, filename))
 
+def test_sort_by_extension():
+    print("Testing sort by extension...")
+    # Clear directory first (optional, but cleaner if we rely on exact list)
+    # The fixture does this per module, but we are running sequentially.
+    # Let's just check relative order in the HTML response.
+    
+    # Upload files with different extensions
+    # 1. json (oldest)
+    requests.put(f"{BASE_URL}/1.json", data="content")
+    time.sleep(0.1)
+    # 2. txt
+    requests.put(f"{BASE_URL}/2.txt", data="content")
+    time.sleep(0.1)
+    # 3. csv (newest)
+    requests.put(f"{BASE_URL}/3.csv", data="content")
+    
+    # Default sort (Time DESC): 3.csv, 2.txt, 1.json
+    resp = requests.get(BASE_URL)
+    html = resp.text
+    pos_csv = html.find("3.csv")
+    pos_txt = html.find("2.txt")
+    pos_json = html.find("1.json")
+    
+    assert pos_csv < pos_txt < pos_json, "Default sort should be time DESC"
+    
+    # Sort by extension (ASC): 3.csv, 1.json, 2.txt
+    resp = requests.get(f"{BASE_URL}?sort=ext")
+    html = resp.text
+    pos_csv = html.find("3.csv")
+    pos_json = html.find("1.json")
+    pos_txt = html.find("2.txt")
+    
+    assert pos_csv < pos_json < pos_txt, "Sort by ext should be .csv, .json, .txt"
+

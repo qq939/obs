@@ -2,7 +2,7 @@ import os
 import http.server
 import shutil
 import socketserver
-from urllib.parse import urlparse, unquote, quote
+from urllib.parse import urlparse, unquote, quote, parse_qs
 from http import HTTPStatus
 
 # 服务器配置
@@ -71,13 +71,23 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             
+            # 解析排序参数
+            query_params = parse_qs(parsed_path.query)
+            sort_by = query_params.get('sort', ['time'])[0]
+
             # 获取文件列表
             files_list = []
             if os.path.exists(UPLOAD_DIR):
                 try:
                     raw_files = [f for f in os.listdir(UPLOAD_DIR) if not f.startswith('.')]
-                    # 按时间倒序排序
-                    raw_files.sort(key=lambda x: os.path.getctime(os.path.join(UPLOAD_DIR, x)), reverse=True)
+                    
+                    if sort_by == 'ext':
+                        # 按扩展名排序 (A-Z)
+                        raw_files.sort(key=lambda x: (os.path.splitext(x)[1].lower(), x))
+                    else:
+                        # 默认：按时间倒序排序
+                        raw_files.sort(key=lambda x: os.path.getctime(os.path.join(UPLOAD_DIR, x)), reverse=True)
+                        
                     files_list = raw_files
                 except Exception:
                     files_list = []
@@ -100,6 +110,9 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     .actions { display: flex; gap: 10px; }
                     .btn-delete { cursor: pointer; background: none; border: none; font-size: 1.2em; }
                     .btn-delete:hover { opacity: 0.7; }
+                    .sort-controls { margin-bottom: 20px; }
+                    .sort-controls a { margin-right: 15px; font-weight: bold; }
+                    .sort-controls a.active { color: #333; cursor: default; text-decoration: none; }
                 </style>
                 <script>
                     async function deleteFile(filename) {
@@ -127,8 +140,20 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                         <input type="submit" value="上传">
                     </form>
                 </div>
+                
+                <div class="sort-controls">
+                    排序方式: 
+                    <a href="?sort=time" class="{time_active}">按时间 (最新)</a>
+                    <a href="?sort=ext" class="{ext_active}">按扩展名 (A-Z)</a>
+                </div>
+
                 <ul>
             """
+            
+            # 动态设置 active 类
+            time_active = "active" if sort_by != 'ext' else ""
+            ext_active = "active" if sort_by == 'ext' else ""
+            html = html.replace("{time_active}", time_active).replace("{ext_active}", ext_active)
             
             host = "obs.dimond.top"
             if not files_list:
