@@ -30,7 +30,7 @@ DB_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 DB_NAME = os.environ.get("MYSQL_DATABASE", "obs")
 
 # Mock DB for testing
-MOCK_DB_DATA = {"content": "公告板"}
+MOCK_DB_DATA = {"content": ""}
 
 # WebSocket 客户端集合
 connected_clients = set()
@@ -73,7 +73,7 @@ def init_db():
             # 确保有一行数据
             cursor.execute("SELECT * FROM notice_board WHERE id=1")
             if not cursor.fetchone():
-                default_text = "公告板"
+                default_text = ""
                 cursor.execute("INSERT INTO notice_board (id, content) VALUES (1, %s)", (default_text,))
         conn.commit()
         print("Database initialized successfully.", flush=True)
@@ -140,7 +140,7 @@ async def ws_handler(websocket):
                             pass
                             
             elif msg_type == "reset":
-                default_text = "公告板"
+                default_text = ""
                 # 更新数据库
                 update_notice(default_text)
                 # 广播给所有客户端（包括发送者）

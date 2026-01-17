@@ -64,3 +64,9 @@
     -   Frontend: Replaced polling (`setInterval`) with `WebSocket` connection. Updates text area on receiving messages.
 4.  Changed default notice board text to "公告板".
 5.  Updated `test_server.py` to check for WebSocket integration in the HTML.
+
+**User Request:** 默认文字直接设为空吧，点击x也是清空所有文字
+**Action:**
+1.  Modified `server.py` to set the default notice board content to an empty string `""` (was "公告板") in both `init_db` and `MOCK_DB_DATA`.
+2.  Updated the "reset" logic in `ws_handler` to set content to an empty string instead of "公告板".
+3.  Verified changes with existing tests.
