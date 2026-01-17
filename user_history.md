@@ -32,4 +32,16 @@
 32→
 33→## 2026-01-16
 34→**User Request:** web side add a new function, that can sort files by file extention
-35→**Action:** Added sorting functionality to the web interface. Implemented `?sort=ext` parameter in `server.py` to sort files by extension (alphabetical) and added UI controls to switch between "Sort by Time" (default) and "Sort by Extension". Added `test_sort_by_extension` to `test_server.py` to verify the sorting logic.
+**Action:** Added sorting functionality to the web interface. Implemented `?sort=ext` parameter in `server.py` to sort files by extension (alphabetical) and added UI controls to switch between "Sort by Time" (default) and "Sort by Extension". Added `test_sort_by_extension` to `test_server.py` to verify the sorting logic.
+
+## 2026-01-17
+**User Request:** 当前OBS访问速度很慢，你看一下是哪个组件的问题，给我提供一下精简建议。
+**Action:** Identified that the server was using single-threaded `TCPServer`. Switched to `socketserver.ThreadingTCPServer` to handle requests concurrently, significantly improving performance for multiple users.
+
+**User Request:** 在上传文件模块上方增加公告板模块，支持自动保存、多端同步、数据库存储（MySQL），以及重置功能。
+**Action:**
+1.  Updated `requirements.txt` with `python-dotenv` and `pymysql`.
+2.  Modified `server.py` to connect to MySQL (using `.env` credentials). Implemented `init_db` to ensure `notice_board` table exists.
+3.  Added `/notice` API endpoints (GET/POST) to handle notice content.
+4.  Implemented the Notice Board UI in `server.py` with auto-save (every 1s), auto-sync (every 2s), and reset functionality.
+5.  Updated `test_server.py` with `MOCK_DB` mode to verify the API and UI without a real database connection in the test environment.

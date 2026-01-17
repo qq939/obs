@@ -214,6 +214,34 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     .sort-controls { margin-bottom: 20px; }
                     .sort-controls a { margin-right: 15px; font-weight: bold; }
                     .sort-controls a.active { color: #333; cursor: default; text-decoration: none; }
+                    
+                    /* 公告板样式 */
+                    .notice-board {
+                        margin: 20px 0; 
+                        padding: 10px; 
+                        border: 1px solid #eee; 
+                        background: #f9f9f9; 
+                        position: relative;
+                    }
+                    .notice-board textarea {
+                        width: 100%;
+                        height: 100px;
+                        border: 1px solid #ccc;
+                        resize: vertical;
+                        font-family: monospace;
+                        box-sizing: border-box; /* ensure padding doesn't overflow */
+                    }
+                    .btn-close-notice {
+                        position: absolute;
+                        top: 5px;
+                        right: 5px;
+                        border: none;
+                        background: transparent;
+                        cursor: pointer;
+                        font-size: 16px;
+                        color: #999;
+                    }
+                    .btn-close-notice:hover { color: #333; }
                 </style>
                 <script>
                     async function deleteFile(filename) {
@@ -229,10 +257,70 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                             alert('删除出错: ' + e);
                         }
                     }
+
+                    // Notice Board Logic
+                    document.addEventListener('DOMContentLoaded', () => {
+                        const noticeArea = document.getElementById('notice-content');
+                        let lastContent = "";
+
+                        // Load initial content
+                        fetch('/notice')
+                            .then(r => r.json())
+                            .then(d => {
+                                noticeArea.value = d.content;
+                                lastContent = d.content;
+                            });
+
+                        // Auto save every 1s
+                        setInterval(() => {
+                            const current = noticeArea.value;
+                            if (current !== lastContent) {
+                                fetch('/notice', {
+                                    method: 'POST',
+                                    headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({content: current})
+                                });
+                                lastContent = current;
+                            }
+                        }, 1000);
+
+                        // Auto sync (poll) every 2s (only if not focused)
+                        setInterval(() => {
+                            if (document.activeElement !== noticeArea) {
+                                fetch('/notice')
+                                    .then(r => r.json())
+                                    .then(d => {
+                                        if (d.content !== noticeArea.value && d.content !== lastContent) {
+                                            noticeArea.value = d.content;
+                                            lastContent = d.content;
+                                        }
+                                    });
+                            }
+                        }, 2000);
+                    });
+
+                    function resetNotice() {
+                        const defaultText = "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt";
+                        const noticeArea = document.getElementById('notice-content');
+                        noticeArea.value = defaultText;
+                        // Trigger save immediately
+                        fetch('/notice', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({content: defaultText})
+                        });
+                    }
                 </script>
             </head>
             <body>
                 <h1>文件托管列表</h1>
+                
+                <!-- 公告板模块 -->
+                <div class="notice-board">
+                    <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
+                    <textarea id="notice-content" placeholder="公告板..."></textarea>
+                </div>
+
                 <p>上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
                 <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
                     <h3>上传文件</h3>
@@ -340,6 +428,25 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
 
     def do_POST(self):
+        """处理 POST 请求"""
+        # 处理公告板更新
+        if self.path == '/notice':
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(body)
+                if 'content' in data:
+                    update_notice(data['content'])
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "ok"}).encode())
+                else:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing content")
+            except Exception as e:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+            return
+
         """处理 POST 上传（手动解析 multipart/form-data）"""
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
@@ -403,7 +510,11 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 
 # 启动服务器
 if __name__ == "__main__":
-    with socketserver.TCPServer(("", PORT), FileHandler) as httpd:
+    # 使用 ThreadingTCPServer 支持多线程并发处理请求
+    class ThreadingServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    with ThreadingServer(("", PORT), FileHandler) as httpd:
         print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
         print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
         print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}", flush=True)
