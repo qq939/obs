@@ -1,5 +1,8 @@
 pytest
 requests
 python-dotenv
-websockets
 pytest-asyncio
+fastapi
+uvicorn
+python-multipart
+aiofiles

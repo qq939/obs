@@ -1,29 +1,19 @@
-# VSCode Mac Shortcuts & Tips
+# VS Code Tips for Mac
 
-## General
-- **Command Palette**: `Cmd + Shift + P`
-- **Quick Open**: `Cmd + P`
-- **Toggle Sidebar**: `Cmd + B`
-- **Toggle Terminal**: `Ctrl + ` `
+1. **IntelliSense / Code Completion**:
+   - Trigger suggestion: `Ctrl + Space` (or just type and wait)
+   - Accept suggestion: `Tab` or `Enter`
 
-## Editing
-- **Multi-cursor**: `Opt + Click` or `Cmd + Opt + Up/Down`
-- **Move Line Up/Down**: `Opt + Up/Down`
-- **Copy Line Up/Down**: `Shift + Opt + Up/Down`
-- **Delete Line**: `Cmd + Shift + K`
-- **Comment/Uncomment**: `Cmd + /`
-- **Rename Symbol**: `F2` (Refactor rename variables/functions globally)
+2. **Navigation**:
+   - Go to file: `Cmd + P`
+   - Go to symbol: `Cmd + Shift + O`
+   - Go to definition: `F12` or `Cmd + Click`
 
-## Intelligent Code Completion (IntelliSense)
-- **Trigger Suggestion**: `Ctrl + Space` (Manually trigger completion list)
-- **Accept Suggestion**: `Tab` or `Enter` (When a suggestion is highlighted)
-- **Snippet Expansion**: Type a few letters (e.g., `def`, `for`, `class`) and press `Tab` to expand standard templates.
-- **Parameter Hints**: `Cmd + Shift + Space` (Show arguments for function call)
-- **Quick Fix**: `Cmd + .` (Auto-import, fix errors)
-- **Go to Definition**: `F12` or `Cmd + Click`
-- **Peek Definition**: `Opt + F12`
+3. **Editing**:
+   - Comment/Uncomment line: `Cmd + /`
+   - Multi-cursor: `Option + Click`
+   - Move line up/down: `Option + Up/Down`
+   - Copy line up/down: `Shift + Option + Up/Down`
 
-## Python Specific
-- **Run Python File**: `Run Button` (top right) or setup launch.json
-- **Format Document**: `Shift + Opt + F`
-- **Organize Imports**: `Shift + Opt + O`
+4. **Terminal**:
+   - Toggle terminal: `` Ctrl + ` ``

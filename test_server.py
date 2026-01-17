@@ -11,22 +11,20 @@ import json
 
 # Set env vars BEFORE importing server
 TEST_PORT = 8089
-TEST_WS_PORT = TEST_PORT + 1
+TEST_WS_PORT = TEST_PORT
 TEST_DIR = "test_obs"
 os.environ["PORT"] = str(TEST_PORT)
 os.environ["UPLOAD_DIR"] = TEST_DIR
 os.environ["MOCK_DB"] = "true"  # Enable mock database for testing
 
-from server import FileHandler
+from server import app
 
 BASE_URL = f"http://localhost:{TEST_PORT}"
-WS_URL = f"ws://localhost:{TEST_WS_PORT}"
+WS_URL = f"ws://localhost:{TEST_WS_PORT}/ws"
 
 def run_server():
-    # Allow address reuse to avoid "Address already in use" errors
-    socketserver.ThreadingTCPServer.allow_reuse_address = True
-    with socketserver.ThreadingTCPServer(("", TEST_PORT), FileHandler) as httpd:
-        httpd.serve_forever()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=TEST_PORT)
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_teardown():
@@ -34,17 +32,7 @@ def setup_teardown():
     if os.path.exists(TEST_DIR):
         shutil.rmtree(TEST_DIR)
     
-    # Start server (which also starts WS server in a thread)
-    # Import server module to ensure it runs global code (like starting WS thread)
-    import server
-    
-    # We need to manually start the main HTTP server since importing only defines classes/functions
-    # But server.py starts WS thread at module level if imported? 
-    # Let's check server.py again. 
-    # Yes: ws_thread.start() is at module level.
-    # So importing server starts the WS server on port 8090 (TEST_PORT + 1)
-    
-    # Start HTTP server
+    # Start server (FastAPI + Uvicorn)
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
