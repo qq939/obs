@@ -267,10 +267,15 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                         color: #999;
                     }
                     .btn-close-notice:hover { color: #333; }
-                    #ws-status {
-                        font-size: 12px;
-                        color: #999;
-                        margin-bottom: 5px;
+                    #ws-status-indicator {
+                        position: absolute;
+                        top: 5px;
+                        left: 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 50%;
+                        background-color: red; /* Default to disconnected */
+                        border: 1px solid #ccc;
                     }
                 </style>
                 <script>
@@ -291,28 +296,28 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     // Notice Board Logic
                     document.addEventListener('DOMContentLoaded', () => {
                         const noticeArea = document.getElementById('notice-content');
-                        const statusDiv = document.getElementById('ws-status');
+                        const statusIndicator = document.getElementById('ws-status-indicator');
                         
                         // WebSocket connection
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        // 使用当前页面端口 + 1 连接 WebSocket
-                        const wsPort = parseInt(window.location.port || (window.location.protocol === 'https:' ? 443 : 80)) + 1;
+                        // Hardcoded port 8089 as per user requirement "I only opened 8089"
+                        const wsPort = 8089;
                         const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`;
                         
                         let ws;
                         let isConnected = false;
 
                         function connect() {
-                            statusDiv.textContent = `Connecting to ${wsUrl}...`;
-                            statusDiv.style.color = '#999';
+                            statusIndicator.style.backgroundColor = 'yellow'; // Connecting
+                            statusIndicator.title = `Connecting to ${wsUrl}...`;
                             console.log('Connecting to WebSocket:', wsUrl);
                             ws = new WebSocket(wsUrl);
 
                             ws.onopen = () => {
                                 console.log('WebSocket connected');
                                 isConnected = true;
-                                statusDiv.textContent = 'Connected';
-                                statusDiv.style.color = 'green';
+                                statusIndicator.style.backgroundColor = 'green'; // Connected
+                                statusIndicator.title = 'Connected';
                             };
 
                             ws.onmessage = (event) => {
@@ -339,8 +344,8 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                             ws.onclose = () => {
                                 console.log('WebSocket disconnected, reconnecting...');
                                 isConnected = false;
-                                statusDiv.textContent = 'Disconnected (Reconnecting...)';
-                                statusDiv.style.color = 'red';
+                                statusIndicator.style.backgroundColor = 'red'; // Disconnected
+                                statusIndicator.title = 'Disconnected (Reconnecting...)';
                                 setTimeout(connect, 3000);
                             };
 
@@ -380,7 +385,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                 
                 <!-- 公告板模块 -->
                 <div class="notice-board">
-                    <div id="ws-status">Initializing...</div>
+                    <div id="ws-status-indicator" title="Connecting..."></div>
                     <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
                     <textarea id="notice-content" placeholder="公告板..."></textarea>
                 </div>

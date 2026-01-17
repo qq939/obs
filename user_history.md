@@ -92,3 +92,12 @@
 4.  Updated `server.py` HTML/JS to add a visible "WebSocket Status" indicator (Connecting/Connected/Disconnected) to help the user diagnose connection issues in the browser.
 5.  Updated `test_server.py` to use `asyncio.wait_for(..., timeout=5.0)` in WebSocket receive calls to prevent the test from hanging indefinitely if messages are dropped.
 6.  Verified changes with `test_server.py`, which passed successfully.
+
+**User Request:** Connecting to ws://obs.dimond.top:81????端口写错了吧，我只开放了8089.另外，指示器换成红黄绿灯放在左上角..log/obs (9).log
+**Action:**
+1.  Confirmed from user feedback that the WebSocket connection logic in JS was incorrect (`window.location.port` + 1), causing it to try port 81 (80+1) instead of the exposed 8089.
+2.  Modified `server.py` JS to hardcode the WebSocket port to `8089` as explicitly requested by the user ("I only opened 8089").
+3.  Updated the status indicator UI in `server.py`:
+    -   Replaced the text status with a small circle (red/yellow/green) in the top-left corner of the notice board.
+    -   Added tooltip (title) to the indicator to show detailed status on hover.
+4.  Verified the changes with `test_server.py`.
