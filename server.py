@@ -3,6 +3,7 @@ import shutil
 import json
 import asyncio
 import threading
+from datetime import datetime
 from urllib.parse import quote, unquote
 from typing import List, Optional
 
@@ -138,6 +139,23 @@ async def update_notice_http(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/save_notice")
+async def save_notice_file():
+    content = await get_notice()
+    if not content:
+        raise HTTPException(status_code=400, detail="Notice is empty")
+    
+    # Generate filename: YYYYMMDDHHMMSS公告板.txt
+    filename = datetime.now().strftime("%Y%m%d%H%M%S") + "公告板.txt"
+    save_path = os.path.join(UPLOAD_DIR, filename)
+    
+    try:
+        async with aiofiles.open(save_path, 'w', encoding='utf-8') as f:
+            await f.write(content)
+        return {"status": "ok", "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save notice: {str(e)}")
+
 @app.get("/")
 async def homepage(sort: str = Query("time", enum=["time", "ext"])):
     # 获取文件列表
@@ -217,15 +235,17 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 border: 1px solid #ccc;
             }
             .notice-tools {
-                text-align: right;
-                margin-top: 5px;
+                position: absolute;
+                bottom: 5px;
+                left: 5px;
             }
             .notice-tools button {
                 cursor: pointer;
-                padding: 2px 8px;
-                margin-left: 5px;
-                font-size: 12px;
+                background: none;
+                border: none;
+                font-size: 1.5em;
             }
+            .notice-tools button:hover { opacity: 0.7; }
         </style>
         <script>
             async function deleteFile(filename) {
@@ -242,33 +262,19 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 }
             }
 
-            async function copyNotice() {
-                const noticeArea = document.getElementById('notice-content');
+            async function saveNotice() {
                 try {
-                    await navigator.clipboard.writeText(noticeArea.value);
-                    alert('已复制到剪贴板');
-                } catch (err) {
-                    console.error('Failed to copy: ', err);
-                    alert('复制失败');
-                }
-            }
-
-            async function pasteNotice() {
-                const noticeArea = document.getElementById('notice-content');
-                try {
-                    const text = await navigator.clipboard.readText();
-                    const start = noticeArea.selectionStart;
-                    const end = noticeArea.selectionEnd;
-                    const value = noticeArea.value;
-                    
-                    const newValue = value.substring(0, start) + text + value.substring(end);
-                    noticeArea.value = newValue;
-                    
-                    noticeArea.selectionStart = noticeArea.selectionEnd = start + text.length;
-                    noticeArea.dispatchEvent(new Event('input'));
-                } catch (err) {
-                    console.error('Failed to paste: ', err);
-                    alert('粘贴失败 (请允许浏览器访问剪贴板)');
+                    const response = await fetch('/save_notice', { method: 'POST' });
+                    if (response.ok) {
+                        const data = await response.json();
+                        alert(`公告已保存为: ${data.filename}`);
+                        window.location.reload();
+                    } else {
+                        const err = await response.json();
+                        alert('保存失败: ' + (err.detail || '未知错误'));
+                    }
+                } catch (e) {
+                    alert('保存出错: ' + e);
                 }
             }
 
@@ -359,22 +365,20 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
         </script>
     </head>
     <body>
-        <h1>文件托管列表</h1>
-        
         <!-- 公告板模块 -->
         <div class="notice-board">
             <div id="ws-status-indicator" title="Connecting..."></div>
             <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
             <textarea id="notice-content" placeholder="公告板..."></textarea>
             <div class="notice-tools">
-                <button onclick="copyNotice()" title="复制内容">复制</button>
-                <button onclick="pasteNotice()" title="粘贴内容">粘贴</button>
+                <button onclick="saveNotice()" title="保存公告">✅</button>
             </div>
         </div>
 
-        <p>上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+        <h1>文件托管列表</h1>
+        <p style="font-size: 0.8em; margin-bottom: 10px;">上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+        
         <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
-            <h3>上传文件</h3>
             <form action="/" method="post" enctype="multipart/form-data">
                 <input type="file" name="file" required>
                 <input type="submit" value="上传">

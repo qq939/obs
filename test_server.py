@@ -134,15 +134,29 @@ def test_homepage_list():
     assert 'new WebSocket' in html
     assert "websocket_endpoint" in [route.name for route in app.routes]
 
-def test_notice_board_controls():
-    """Test that notice board has copy and paste buttons"""
-    response = requests.get(BASE_URL)
-    assert response.status_code == 200
-    html = response.text
-    assert "copyNotice()" in html
-    assert "pasteNotice()" in html
-    assert "复制" in html
-    assert "粘贴" in html
+def test_save_notice_feature():
+    """Test saving notice to a file"""
+    # 1. Update notice content
+    content = "This is a test notice for saving."
+    resp = requests.post(f"{BASE_URL}/notice", json={"content": content})
+    assert resp.status_code == 200
+    
+    # 2. Trigger save
+    resp = requests.post(f"{BASE_URL}/save_notice")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "filename" in data
+    filename = data["filename"]
+    assert filename.endswith("公告板.txt")
+    
+    # 3. Verify file exists in UPLOAD_DIR (TEST_DIR)
+    filepath = os.path.join(TEST_DIR, filename)
+    assert os.path.exists(filepath)
+    
+    # 4. Verify content matches
+    with open(filepath, 'r', encoding='utf-8') as f:
+        saved_content = f.read()
+    assert saved_content == content
 
 def test_json_file_download():
     print("Testing json file download...")
