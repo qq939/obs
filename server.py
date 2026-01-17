@@ -11,6 +11,7 @@ from http import HTTPStatus
 # 加载环境变量
 load_dotenv()
 load_dotenv("env")
+load_dotenv("time/.env")
 
 # 服务器配置
 PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
