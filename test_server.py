@@ -11,6 +11,7 @@ TEST_PORT = 8089
 TEST_DIR = "test_obs"
 os.environ["PORT"] = str(TEST_PORT)
 os.environ["UPLOAD_DIR"] = TEST_DIR
+os.environ["MOCK_DB"] = "true"  # Enable mock database for testing
 
 from server import FileHandler
 
@@ -18,8 +19,8 @@ BASE_URL = f"http://localhost:{TEST_PORT}"
 
 def run_server():
     # Allow address reuse to avoid "Address already in use" errors
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", TEST_PORT), FileHandler) as httpd:
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    with socketserver.ThreadingTCPServer(("", TEST_PORT), FileHandler) as httpd:
         httpd.serve_forever()
 
 @pytest.fixture(scope="module", autouse=True)

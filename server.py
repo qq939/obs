@@ -2,12 +2,104 @@ import os
 import http.server
 import shutil
 import socketserver
+import json
+import pymysql
+from dotenv import load_dotenv
 from urllib.parse import urlparse, unquote, quote, parse_qs
 from http import HTTPStatus
+
+# 加载环境变量
+load_dotenv()
 
 # 服务器配置
 PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")  # 上传文件保存目录
+
+# 数据库配置
+DB_HOST = os.environ.get("MYSQL_HOST", "localhost")
+DB_PORT = int(os.environ.get("MYSQL_PORT", 3306))
+DB_USER = os.environ.get("MYSQL_USER", "root")
+DB_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
+DB_NAME = os.environ.get("MYSQL_DATABASE", "obs")
+
+# Mock DB for testing
+MOCK_DB_DATA = {"content": "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt"}
+
+def get_db_connection():
+    if os.environ.get("MOCK_DB") == "true":
+        return None
+    try:
+        return pymysql.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor
+        )
+    except Exception as e:
+        print(f"Database connection failed: {e}")
+        return None
+
+def init_db():
+    if os.environ.get("MOCK_DB") == "true":
+        return
+
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cursor:
+            # 创建表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notice_board (
+                    id INT PRIMARY KEY DEFAULT 1,
+                    content TEXT
+                )
+            """)
+            # 确保有一行数据
+            cursor.execute("SELECT * FROM notice_board WHERE id=1")
+            if not cursor.fetchone():
+                default_text = "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt"
+                cursor.execute("INSERT INTO notice_board (id, content) VALUES (1, %s)", (default_text,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_notice():
+    if os.environ.get("MOCK_DB") == "true":
+        return MOCK_DB_DATA["content"]
+
+    conn = get_db_connection()
+    if not conn:
+        return "Database Error"
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT content FROM notice_board WHERE id=1")
+            result = cursor.fetchone()
+            return result['content'] if result else ""
+    finally:
+        conn.close()
+
+def update_notice(content):
+    if os.environ.get("MOCK_DB") == "true":
+        MOCK_DB_DATA["content"] = content
+        return True
+
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE notice_board SET content=%s WHERE id=1", (content,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+# 初始化数据库
+init_db()
 
 # 创建上传目录（如果不存在）
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -60,6 +152,15 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         """处理 GET 请求（访问已上传的文件）"""
+        # 处理公告板获取
+        if self.path == '/notice':
+            content = get_notice()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"content": content}).encode('utf-8'))
+            return
+
         # 解析请求的文件名
         parsed_path = urlparse(self.path)
         filename = os.path.basename(parsed_path.path)
