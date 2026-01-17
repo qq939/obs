@@ -4,9 +4,21 @@ import shutil
 import socketserver
 import json
 import pymysql
+import logging
+import traceback
 from dotenv import load_dotenv
 from urllib.parse import urlparse, unquote, quote, parse_qs
 from http import HTTPStatus
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # 输出到控制台
+        logging.FileHandler("server.log", encoding='utf-8')  # 输出到文件
+    ]
+)
 
 # 加载环境变量
 load_dotenv()
@@ -41,7 +53,8 @@ def get_db_connection():
             cursorclass=pymysql.cursors.DictCursor
         )
     except Exception as e:
-        print(f"Database connection failed: {e}")
+        logging.error(f"Database connection failed: {e}")
+        logging.error(traceback.format_exc())  # 打印完整堆栈
         return None
 
 def init_db():
@@ -50,6 +63,7 @@ def init_db():
 
     conn = get_db_connection()
     if not conn:
+        logging.warning("Skipping DB initialization due to connection failure.")
         return
     try:
         with conn.cursor() as cursor:
@@ -66,6 +80,10 @@ def init_db():
                 default_text = "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt"
                 cursor.execute("INSERT INTO notice_board (id, content) VALUES (1, %s)", (default_text,))
         conn.commit()
+        logging.info("Database initialized successfully.")
+    except Exception as e:
+        logging.error(f"Database initialization failed: {e}")
+        logging.error(traceback.format_exc())
     finally:
         conn.close()
 
