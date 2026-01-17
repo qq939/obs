@@ -45,3 +45,9 @@
 3.  Added `/notice` API endpoints (GET/POST) to handle notice content.
 4.  Implemented the Notice Board UI in `server.py` with auto-save (every 1s), auto-sync (every 2s), and reset functionality.
 5.  Updated `test_server.py` with `MOCK_DB` mode to verify the API and UI without a real database connection in the test environment.
+
+**User Request:** .log/obs (3).log 显示Database Error，但是日志完全看不出来啊
+**Action:**
+1.  Investigated the database connection issue and found that `MYSQL_HOST` in `.env` was set to `0.0.0.0`, which is invalid for client connections (should be `127.0.0.1` or `localhost`).
+2.  Updated `.env` to set `MYSQL_HOST=127.0.0.1`.
+3.  Improved logging in `server.py` by integrating the `logging` module. Configured it to write to both console and `server.log` file, including timestamps and full exception tracebacks to make future debugging easier.
