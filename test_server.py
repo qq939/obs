@@ -132,6 +132,17 @@ def test_homepage_list():
     
     # Check if WebSocket logic exists
     assert 'new WebSocket' in html
+    assert "websocket_endpoint" in [route.name for route in app.routes]
+
+def test_notice_board_controls():
+    """Test that notice board has copy and paste buttons"""
+    response = requests.get(BASE_URL)
+    assert response.status_code == 200
+    html = response.text
+    assert "copyNotice()" in html
+    assert "pasteNotice()" in html
+    assert "复制" in html
+    assert "粘贴" in html
 
 def test_json_file_download():
     print("Testing json file download...")

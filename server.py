@@ -216,6 +216,16 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 background-color: red; /* Default to disconnected */
                 border: 1px solid #ccc;
             }
+            .notice-tools {
+                text-align: right;
+                margin-top: 5px;
+            }
+            .notice-tools button {
+                cursor: pointer;
+                padding: 2px 8px;
+                margin-left: 5px;
+                font-size: 12px;
+            }
         </style>
         <script>
             async function deleteFile(filename) {
@@ -229,6 +239,36 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                     }
                 } catch (e) {
                     alert('删除出错: ' + e);
+                }
+            }
+
+            async function copyNotice() {
+                const noticeArea = document.getElementById('notice-content');
+                try {
+                    await navigator.clipboard.writeText(noticeArea.value);
+                    alert('已复制到剪贴板');
+                } catch (err) {
+                    console.error('Failed to copy: ', err);
+                    alert('复制失败');
+                }
+            }
+
+            async function pasteNotice() {
+                const noticeArea = document.getElementById('notice-content');
+                try {
+                    const text = await navigator.clipboard.readText();
+                    const start = noticeArea.selectionStart;
+                    const end = noticeArea.selectionEnd;
+                    const value = noticeArea.value;
+                    
+                    const newValue = value.substring(0, start) + text + value.substring(end);
+                    noticeArea.value = newValue;
+                    
+                    noticeArea.selectionStart = noticeArea.selectionEnd = start + text.length;
+                    noticeArea.dispatchEvent(new Event('input'));
+                } catch (err) {
+                    console.error('Failed to paste: ', err);
+                    alert('粘贴失败 (请允许浏览器访问剪贴板)');
                 }
             }
 
@@ -326,6 +366,10 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             <div id="ws-status-indicator" title="Connecting..."></div>
             <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
             <textarea id="notice-content" placeholder="公告板..."></textarea>
+            <div class="notice-tools">
+                <button onclick="copyNotice()" title="复制内容">复制</button>
+                <button onclick="pasteNotice()" title="粘贴内容">粘贴</button>
+            </div>
         </div>
 
         <p>上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>

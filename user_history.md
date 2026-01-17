@@ -12,3 +12,10 @@
 4.  Updated `test_server.py` to use `uvicorn` for testing the FastAPI server and adjusted tests to work with the new architecture.
 5.  Verified all functionality (file upload, delete, list, sorting, notice board sync) with `pytest`, achieving 100% pass rate.
 6.  Created `.trae/reference/ref.txt` and `tips.txt` as per workspace rules.
+
+**User Request:** /Users/jiang/Downloads/obs/.log/obs (10).log
+**Action:**
+1.  Analyzed the log file and identified `WARNING: No supported WebSocket library detected`.
+2.  Updated `requirements.txt` to replace `uvicorn` with `uvicorn[standard]` to ensure proper WebSocket support dependencies are installed.
+3.  Ran `uv pip install -r requirements.txt` to apply the changes.
+4.  Verified system stability by running `uv run pytest test_server.py`, which passed successfully.

@@ -2,6 +2,7 @@
   "test_server.py::test_delete_file",
   "test_server.py::test_homepage_list",
   "test_server.py::test_json_file_download",
+  "test_server.py::test_notice_board_controls",
   "test_server.py::test_overwrite_existing_file",
   "test_server.py::test_sort_by_extension",
   "test_server.py::test_special_chars_filename",
