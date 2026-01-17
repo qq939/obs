@@ -51,3 +51,6 @@
 1.  Investigated the database connection issue and found that `MYSQL_HOST` in `.env` was set to `0.0.0.0`, which is invalid for client connections (should be `127.0.0.1` or `localhost`).
 2.  Updated `.env` to set `MYSQL_HOST=127.0.0.1`.
 3.  Improved logging in `server.py` by integrating the `logging` module. Configured it to write to both console and `server.log` file, including timestamps and full exception tracebacks to make future debugging easier.
+
+**User Request:** 不要用logging，直接print flush=True
+**Action:** Reverted the `logging` module changes. Replaced `logging.error/info/warning` with `print(..., flush=True)` as requested by the user. Preserved the traceback printing for better debugging.
