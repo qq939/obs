@@ -514,7 +514,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     # 使用 ThreadingTCPServer 支持多线程并发处理请求
     class ThreadingServer(socketserver.ThreadingTCPServer):
-        allow_reuse_address = T
+        allow_reuse_address = True
     with ThreadingServer(("", PORT), FileHandler) as httpd:
         print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
         print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
