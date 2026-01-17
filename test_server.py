@@ -5,9 +5,13 @@ import threading
 import requests
 import pytest
 import socketserver
+import asyncio
+import websockets
+import json
 
 # Set env vars BEFORE importing server
 TEST_PORT = 8089
+TEST_WS_PORT = TEST_PORT + 1
 TEST_DIR = "test_obs"
 os.environ["PORT"] = str(TEST_PORT)
 os.environ["UPLOAD_DIR"] = TEST_DIR
@@ -16,6 +20,7 @@ os.environ["MOCK_DB"] = "true"  # Enable mock database for testing
 from server import FileHandler
 
 BASE_URL = f"http://localhost:{TEST_PORT}"
+WS_URL = f"ws://localhost:{TEST_WS_PORT}"
 
 def run_server():
     # Allow address reuse to avoid "Address already in use" errors
@@ -29,7 +34,17 @@ def setup_teardown():
     if os.path.exists(TEST_DIR):
         shutil.rmtree(TEST_DIR)
     
-    # Start server
+    # Start server (which also starts WS server in a thread)
+    # Import server module to ensure it runs global code (like starting WS thread)
+    import server
+    
+    # We need to manually start the main HTTP server since importing only defines classes/functions
+    # But server.py starts WS thread at module level if imported? 
+    # Let's check server.py again. 
+    # Yes: ws_thread.start() is at module level.
+    # So importing server starts the WS server on port 8090 (TEST_PORT + 1)
+    
+    # Start HTTP server
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
@@ -145,12 +160,7 @@ def test_json_file_download():
     assert resp.text == content
     
     # Check Content-Type and Content-Disposition
-    # We want it to be downloadable, so it should have Content-Disposition attachment,
-    # OR at least application/json content type.
-    # The user says "doesn't support download", which implies it might be opening in browser 
-    # or failing.
     print(f"Headers: {resp.headers}")
-    # We ideally want application/octet-stream or application/json with attachment
     assert "attachment" in resp.headers.get("Content-Disposition", ""), "Should have Content-Disposition attachment"
 
 def test_special_chars_filename():
@@ -183,18 +193,12 @@ def test_special_chars_filename():
 
 def test_sort_by_extension():
     print("Testing sort by extension...")
-    # Clear directory first (optional, but cleaner if we rely on exact list)
-    # The fixture does this per module, but we are running sequentially.
-    # Let's just check relative order in the HTML response.
     
     # Upload files with different extensions
-    # 1. json (oldest)
     requests.put(f"{BASE_URL}/1.json", data="content")
     time.sleep(0.1)
-    # 2. txt
     requests.put(f"{BASE_URL}/2.txt", data="content")
     time.sleep(0.1)
-    # 3. csv (newest)
     requests.put(f"{BASE_URL}/3.csv", data="content")
     
     # Default sort (Time DESC): 3.csv, 2.txt, 1.json
@@ -215,3 +219,52 @@ def test_sort_by_extension():
     
     assert pos_csv < pos_json < pos_txt, "Sort by ext should be .csv, .json, .txt"
 
+@pytest.mark.asyncio
+async def test_websocket_sync():
+    print("Testing WebSocket sync...")
+    
+    # Client 1 connects
+    async with websockets.connect(WS_URL) as ws1:
+        # Initial message
+        init_msg = await ws1.recv()
+        data = json.loads(init_msg)
+        assert data['type'] == 'init'
+        
+        # Client 1 updates notice
+        test_content = "Hello Sync World"
+        await ws1.send(json.dumps({"type": "update", "content": test_content}))
+        
+        # Client 2 connects
+        async with websockets.connect(WS_URL) as ws2:
+            # Should receive current content
+            init_msg = await ws2.recv()
+            data = json.loads(init_msg)
+            assert data['type'] == 'init'
+            assert data['content'] == test_content
+            
+            # Client 2 updates notice
+            new_content = "Updated by Client 2"
+            await ws2.send(json.dumps({"type": "update", "content": new_content}))
+            
+            # Client 1 should receive update
+            update_msg = await ws1.recv()
+            data = json.loads(update_msg)
+            assert data['type'] == 'update'
+            assert data['content'] == new_content
+            
+            # Client 2 resets notice
+            await ws2.send(json.dumps({"type": "reset"}))
+            
+            # Client 1 should receive empty update
+            reset_msg = await ws1.recv()
+            data = json.loads(reset_msg)
+            assert data['type'] == 'update'
+            assert data['content'] == ""
+            
+            # Client 2 should also receive the broadcast (as per our implementation)
+            reset_msg_2 = await ws2.recv()
+            data_2 = json.loads(reset_msg_2)
+            assert data_2['type'] == 'update'
+            assert data_2['content'] == ""
+            
+    print("WebSocket sync test passed!")

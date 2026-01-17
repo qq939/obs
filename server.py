@@ -3,7 +3,6 @@ import http.server
 import shutil
 import socketserver
 import json
-import pymysql
 import traceback
 import asyncio
 import threading
@@ -22,137 +21,83 @@ PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
 WS_PORT = PORT + 1  # WebSocket 端口
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")  # 上传文件保存目录
 
-# 数据库配置
-DB_HOST = os.environ.get("MYSQL_HOST", "localhost")
-DB_PORT = int(os.environ.get("MYSQL_PORT", 3306))
-DB_USER = os.environ.get("MYSQL_USER", "root")
-DB_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
-DB_NAME = os.environ.get("MYSQL_DATABASE", "obs")
-
-# Mock DB for testing
-MOCK_DB_DATA = {"content": ""}
+# 内存存储 Notice 内容
+NOTICE_CONTENT = ""
+NOTICE_LOCK = threading.Lock()
 
 # WebSocket 客户端集合
 connected_clients = set()
 
-def get_db_connection():
-    if os.environ.get("MOCK_DB") == "true":
-        return None
-    try:
-        return pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor
-        )
-    except Exception as e:
-        print(f"Database connection failed: {e}", flush=True)
-        print(traceback.format_exc(), flush=True)  # 打印完整堆栈
-        return None
-
-def init_db():
-    if os.environ.get("MOCK_DB") == "true":
-        return
-
-    conn = get_db_connection()
-    if not conn:
-        print("Skipping DB initialization due to connection failure.", flush=True)
-        return
-    try:
-        with conn.cursor() as cursor:
-            # 创建表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS notice_board (
-                    id INT PRIMARY KEY DEFAULT 1,
-                    content TEXT
-                )
-            """)
-            # 确保有一行数据
-            cursor.execute("SELECT * FROM notice_board WHERE id=1")
-            if not cursor.fetchone():
-                default_text = ""
-                cursor.execute("INSERT INTO notice_board (id, content) VALUES (1, %s)", (default_text,))
-        conn.commit()
-        print("Database initialized successfully.", flush=True)
-    except Exception as e:
-        print(f"Database initialization failed: {e}", flush=True)
-        print(traceback.format_exc(), flush=True)
-    finally:
-        conn.close()
-
 def get_notice():
-    if os.environ.get("MOCK_DB") == "true":
-        return MOCK_DB_DATA["content"]
-
-    conn = get_db_connection()
-    if not conn:
-        return "Database Error"
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT content FROM notice_board WHERE id=1")
-            result = cursor.fetchone()
-            return result['content'] if result else ""
-    finally:
-        conn.close()
+    global NOTICE_CONTENT
+    return NOTICE_CONTENT
 
 def update_notice(content):
-    if os.environ.get("MOCK_DB") == "true":
-        MOCK_DB_DATA["content"] = content
-        return True
-
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("UPDATE notice_board SET content=%s WHERE id=1", (content,))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    global NOTICE_CONTENT
+    with NOTICE_LOCK:
+        NOTICE_CONTENT = content
+    return True
 
 async def ws_handler(websocket):
     # 注册客户端
     connected_clients.add(websocket)
+    client_info = f"{websocket.remote_address}"
+    print(f"WebSocket Client connected: {client_info}", flush=True)
     try:
         # 发送当前公告内容给新连接的客户端
         current_content = get_notice()
         await websocket.send(json.dumps({"type": "init", "content": current_content}))
         
         async for message in websocket:
-            data = json.loads(message)
-            msg_type = data.get("type")
-            
-            if msg_type == "update":
-                new_content = data.get("content", "")
-                # 更新数据库
-                update_notice(new_content)
-                # 广播给其他客户端
-                broadcast_msg = json.dumps({"type": "update", "content": new_content})
-                for client in connected_clients:
-                    if client != websocket:
+            try:
+                data = json.loads(message)
+                msg_type = data.get("type")
+                
+                if msg_type == "update":
+                    new_content = data.get("content", "")
+                    # 更新内存
+                    update_notice(new_content)
+                    print(f"Notice updated by {client_info}. Length: {len(new_content)}", flush=True)
+                    
+                    # 广播给其他客户端
+                    broadcast_msg = json.dumps({"type": "update", "content": new_content})
+                    # copy set to avoid runtime error if size changes during iteration
+                    print(f"Broadcasting update to {len(connected_clients)} clients", flush=True)
+                    for client in list(connected_clients):
+                        if client != websocket:
+                            try:
+                                await client.send(broadcast_msg)
+                                print(f"Sent update to {client.remote_address}", flush=True)
+                            except websockets.exceptions.ConnectionClosed:
+                                pass
+                            except Exception as e:
+                                print(f"Error broadcasting to client: {e}", flush=True)
+                            
+                elif msg_type == "reset":
+                    default_text = ""
+                    # 更新内存
+                    update_notice(default_text)
+                    print(f"Notice reset by {client_info}", flush=True)
+                    
+                    # 广播给所有客户端（包括发送者）
+                    broadcast_msg = json.dumps({"type": "update", "content": default_text})
+                    for client in list(connected_clients):
                         try:
                             await client.send(broadcast_msg)
                         except websockets.exceptions.ConnectionClosed:
                             pass
-                            
-            elif msg_type == "reset":
-                default_text = ""
-                # 更新数据库
-                update_notice(default_text)
-                # 广播给所有客户端（包括发送者）
-                broadcast_msg = json.dumps({"type": "update", "content": default_text})
-                for client in connected_clients:
-                    try:
-                        await client.send(broadcast_msg)
-                    except websockets.exceptions.ConnectionClosed:
-                        pass
+                        except Exception as e:
+                            print(f"Error broadcasting reset: {e}", flush=True)
+                                
+            except json.JSONDecodeError:
+                print(f"Invalid JSON received from {client_info}", flush=True)
+            except Exception as e:
+                print(f"Error processing message from {client_info}: {e}", flush=True)
                         
     except websockets.exceptions.ConnectionClosed:
-        pass
+        print(f"WebSocket Client disconnected: {client_info}", flush=True)
+    except Exception as e:
+        print(f"WebSocket Handler Error for {client_info}: {e}", flush=True)
     finally:
         # 注销客户端
         connected_clients.remove(websocket)
@@ -168,9 +113,6 @@ def run_ws_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(serve())
-
-# 初始化数据库
-init_db()
 
 # 启动 WebSocket 服务器线程
 ws_thread = threading.Thread(target=run_ws_server, daemon=True)
@@ -347,6 +289,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                         let isConnected = false;
 
                         function connect() {
+                            console.log('Connecting to WebSocket:', wsUrl);
                             ws = new WebSocket(wsUrl);
 
                             ws.onopen = () => {
@@ -355,23 +298,23 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                             };
 
                             ws.onmessage = (event) => {
-                                const data = JSON.parse(event.data);
-                                if (data.type === 'init' || data.type === 'update') {
-                                    // 只有当内容不同时才更新，避免光标跳动（虽然 textarea 会重置光标，但这是基本优化）
-                                    // 如果当前用户正在输入，尽量不要覆盖，除非是强制同步
-                                    // 简单的协同编辑策略：直接覆盖
-                                    if (noticeArea.value !== data.content) {
-                                         // 保存当前光标位置
-                                        const start = noticeArea.selectionStart;
-                                        const end = noticeArea.selectionEnd;
-                                        
-                                        noticeArea.value = data.content;
-                                        
-                                        // 如果当前元素聚焦，尝试恢复光标（可能会有些问题，但比直接跳到最后好）
-                                        if (document.activeElement === noticeArea) {
-                                            noticeArea.setSelectionRange(start, end);
+                                console.log('WebSocket message received:', event.data);
+                                try {
+                                    const data = JSON.parse(event.data);
+                                    if (data.type === 'init' || data.type === 'update') {
+                                        if (noticeArea.value !== data.content) {
+                                            const start = noticeArea.selectionStart;
+                                            const end = noticeArea.selectionEnd;
+                                            
+                                            noticeArea.value = data.content;
+                                            
+                                            if (document.activeElement === noticeArea) {
+                                                noticeArea.setSelectionRange(start, end);
+                                            }
                                         }
                                     }
+                                } catch (e) {
+                                    console.error('Error parsing WebSocket message:', e);
                                 }
                             };
 
