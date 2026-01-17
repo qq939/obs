@@ -122,6 +122,14 @@ def test_homepage_list():
     assert '<input type="file" name="file" required>' in html
     assert '<input type="submit" value="上传">' in html
 
+    # Check if notice board exists
+    assert 'class="notice-board"' in html
+    assert 'id="notice-content"' in html
+    assert 'onclick="resetNotice()"' in html  # The 'x' button
+    
+    # Check if WebSocket logic exists
+    assert 'new WebSocket' in html
+
 def test_json_file_download():
     print("Testing json file download...")
     filename = "test.json"

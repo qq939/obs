@@ -2,3 +2,4 @@ pytest
 requests
 python-dotenv
 pymysql
+websockets

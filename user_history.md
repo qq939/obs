@@ -54,3 +54,13 @@
 
 **User Request:** 不要用logging，直接print flush=True
 **Action:** Reverted the `logging` module changes. Replaced `logging.error/info/warning` with `print(..., flush=True)` as requested by the user. Preserved the traceback printing for better debugging.
+
+**User Request:** 公告板的默认文字就是“公告板”，点“x”以后就恢复成默认文字。我想把公告板变成类似在线共享文档的那种，一个客户端编辑以后，另一个客户端马上同步，但是又不想造成过大的网络开销，用websocket实现
+**Action:**
+1.  Updated `requirements.txt` to include `websockets` library.
+2.  Modified `server.py` to run a WebSocket server (using `websockets` library) on a separate thread (port 8089/current+1).
+3.  Implemented real-time synchronization:
+    -   Backend: Broadcasts updates to all connected clients except the sender. Handles "reset" broadcast. Persists data to MySQL.
+    -   Frontend: Replaced polling (`setInterval`) with `WebSocket` connection. Updates text area on receiving messages.
+4.  Changed default notice board text to "公告板".
+5.  Updated `test_server.py` to check for WebSocket integration in the HTML.

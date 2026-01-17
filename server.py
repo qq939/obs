@@ -5,6 +5,9 @@ import socketserver
 import json
 import pymysql
 import traceback
+import asyncio
+import threading
+import websockets
 from dotenv import load_dotenv
 from urllib.parse import urlparse, unquote, quote, parse_qs
 from http import HTTPStatus
@@ -13,10 +16,10 @@ from http import HTTPStatus
 load_dotenv()
 load_dotenv("env")
 load_dotenv("asset/.env")
-print(os.environ.get("MYSQL_HOST"), flush=True)
 
 # 服务器配置
 PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
+WS_PORT = PORT + 1  # WebSocket 端口
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")  # 上传文件保存目录
 
 # 数据库配置
@@ -27,7 +30,10 @@ DB_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 DB_NAME = os.environ.get("MYSQL_DATABASE", "obs")
 
 # Mock DB for testing
-MOCK_DB_DATA = {"content": "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt"}
+MOCK_DB_DATA = {"content": "公告板"}
+
+# WebSocket 客户端集合
+connected_clients = set()
 
 def get_db_connection():
     if os.environ.get("MOCK_DB") == "true":
@@ -67,7 +73,7 @@ def init_db():
             # 确保有一行数据
             cursor.execute("SELECT * FROM notice_board WHERE id=1")
             if not cursor.fetchone():
-                default_text = "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt"
+                default_text = "公告板"
                 cursor.execute("INSERT INTO notice_board (id, content) VALUES (1, %s)", (default_text,))
         conn.commit()
         print("Database initialized successfully.", flush=True)
@@ -108,8 +114,67 @@ def update_notice(content):
     finally:
         conn.close()
 
+async def ws_handler(websocket):
+    # 注册客户端
+    connected_clients.add(websocket)
+    try:
+        # 发送当前公告内容给新连接的客户端
+        current_content = get_notice()
+        await websocket.send(json.dumps({"type": "init", "content": current_content}))
+        
+        async for message in websocket:
+            data = json.loads(message)
+            msg_type = data.get("type")
+            
+            if msg_type == "update":
+                new_content = data.get("content", "")
+                # 更新数据库
+                update_notice(new_content)
+                # 广播给其他客户端
+                broadcast_msg = json.dumps({"type": "update", "content": new_content})
+                for client in connected_clients:
+                    if client != websocket:
+                        try:
+                            await client.send(broadcast_msg)
+                        except websockets.exceptions.ConnectionClosed:
+                            pass
+                            
+            elif msg_type == "reset":
+                default_text = "公告板"
+                # 更新数据库
+                update_notice(default_text)
+                # 广播给所有客户端（包括发送者）
+                broadcast_msg = json.dumps({"type": "update", "content": default_text})
+                for client in connected_clients:
+                    try:
+                        await client.send(broadcast_msg)
+                    except websockets.exceptions.ConnectionClosed:
+                        pass
+                        
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        # 注销客户端
+        connected_clients.remove(websocket)
+
+def run_ws_server():
+    """在单独线程中运行 WebSocket 服务器"""
+    async def serve():
+        async with websockets.serve(ws_handler, "0.0.0.0", WS_PORT):
+            print(f"WebSocket 服务器启动: ws://localhost:{WS_PORT}", flush=True)
+            await asyncio.Future()  # 永久运行
+
+    # 创建新的事件循环
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(serve())
+
 # 初始化数据库
 init_db()
+
+# 启动 WebSocket 服务器线程
+ws_thread = threading.Thread(target=run_ws_server, daemon=True)
+ws_thread.start()
 
 # 创建上传目录（如果不存在）
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -271,55 +336,80 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     // Notice Board Logic
                     document.addEventListener('DOMContentLoaded', () => {
                         const noticeArea = document.getElementById('notice-content');
-                        let lastContent = "";
+                        
+                        // WebSocket connection
+                        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                        // 使用当前页面端口 + 1 连接 WebSocket
+                        const wsPort = parseInt(window.location.port || (window.location.protocol === 'https:' ? 443 : 80)) + 1;
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`;
+                        
+                        let ws;
+                        let isConnected = false;
 
-                        // Load initial content
-                        fetch('/notice')
-                            .then(r => r.json())
-                            .then(d => {
-                                noticeArea.value = d.content;
-                                lastContent = d.content;
-                            });
+                        function connect() {
+                            ws = new WebSocket(wsUrl);
 
-                        // Auto save every 1s
-                        setInterval(() => {
-                            const current = noticeArea.value;
-                            if (current !== lastContent) {
-                                fetch('/notice', {
-                                    method: 'POST',
-                                    headers: {'Content-Type': 'application/json'},
-                                    body: JSON.stringify({content: current})
-                                });
-                                lastContent = current;
-                            }
-                        }, 1000);
+                            ws.onopen = () => {
+                                console.log('WebSocket connected');
+                                isConnected = true;
+                            };
 
-                        // Auto sync (poll) every 2s (only if not focused)
-                        setInterval(() => {
-                            if (document.activeElement !== noticeArea) {
-                                fetch('/notice')
-                                    .then(r => r.json())
-                                    .then(d => {
-                                        if (d.content !== noticeArea.value && d.content !== lastContent) {
-                                            noticeArea.value = d.content;
-                                            lastContent = d.content;
+                            ws.onmessage = (event) => {
+                                const data = JSON.parse(event.data);
+                                if (data.type === 'init' || data.type === 'update') {
+                                    // 只有当内容不同时才更新，避免光标跳动（虽然 textarea 会重置光标，但这是基本优化）
+                                    // 如果当前用户正在输入，尽量不要覆盖，除非是强制同步
+                                    // 简单的协同编辑策略：直接覆盖
+                                    if (noticeArea.value !== data.content) {
+                                         // 保存当前光标位置
+                                        const start = noticeArea.selectionStart;
+                                        const end = noticeArea.selectionEnd;
+                                        
+                                        noticeArea.value = data.content;
+                                        
+                                        // 如果当前元素聚焦，尝试恢复光标（可能会有些问题，但比直接跳到最后好）
+                                        if (document.activeElement === noticeArea) {
+                                            noticeArea.setSelectionRange(start, end);
                                         }
-                                    });
-                            }
-                        }, 2000);
-                    });
+                                    }
+                                }
+                            };
 
-                    function resetNotice() {
-                        const defaultText = "上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt";
-                        const noticeArea = document.getElementById('notice-content');
-                        noticeArea.value = defaultText;
-                        // Trigger save immediately
-                        fetch('/notice', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({content: defaultText})
+                            ws.onclose = () => {
+                                console.log('WebSocket disconnected, reconnecting...');
+                                isConnected = false;
+                                setTimeout(connect, 3000);
+                            };
+
+                            ws.onerror = (err) => {
+                                console.error('WebSocket error:', err);
+                                ws.close();
+                            };
+                        }
+
+                        connect();
+
+                        // 监听输入事件，发送更新
+                        noticeArea.addEventListener('input', () => {
+                            if (ws && isConnected) {
+                                ws.send(JSON.stringify({
+                                    type: 'update',
+                                    content: noticeArea.value
+                                }));
+                            }
                         });
-                    }
+
+                        // 暴露重置函数给全局作用域
+                        window.resetNotice = function() {
+                            if (ws && isConnected) {
+                                ws.send(JSON.stringify({
+                                    type: 'reset'
+                                }));
+                            } else {
+                                alert('未连接到服务器，无法重置');
+                            }
+                        };
+                    });
                 </script>
             </head>
             <body>
