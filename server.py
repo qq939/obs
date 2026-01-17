@@ -13,7 +13,7 @@ from http import HTTPStatus
 load_dotenv()
 load_dotenv("env")
 load_dotenv("asset/.env")
-print(os.environ.get("MYSQL_HOST"))
+print(os.environ.get("MYSQL_HOST"), flush=True)
 
 # 服务器配置
 PORT = int(os.environ.get("PORT", 8088))  # 端口号（可修改，如 8080）
