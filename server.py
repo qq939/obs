@@ -61,17 +61,21 @@ async def ws_handler(websocket):
                     
                     # 广播给其他客户端
                     broadcast_msg = json.dumps({"type": "update", "content": new_content})
-                    # copy set to avoid runtime error if size changes during iteration
+                    # Use asyncio.gather to broadcast concurrently and avoid blocking
+                    send_tasks = []
                     print(f"Broadcasting update to {len(connected_clients)} clients", flush=True)
                     for client in list(connected_clients):
                         if client != websocket:
-                            try:
-                                await client.send(broadcast_msg)
-                                print(f"Sent update to {client.remote_address}", flush=True)
-                            except websockets.exceptions.ConnectionClosed:
-                                pass
-                            except Exception as e:
-                                print(f"Error broadcasting to client: {e}", flush=True)
+                            send_tasks.append(client.send(broadcast_msg))
+                    
+                    if send_tasks:
+                         results = await asyncio.gather(*send_tasks, return_exceptions=True)
+                         for i, result in enumerate(results):
+                             if isinstance(result, Exception):
+                                 # ConnectionClosed is normal, other exceptions are errors
+                                 if not isinstance(result, websockets.exceptions.ConnectionClosed):
+                                    print(f"Failed to send update to client: {result}", flush=True)
+
                             
                 elif msg_type == "reset":
                     default_text = ""
@@ -81,13 +85,17 @@ async def ws_handler(websocket):
                     
                     # 广播给所有客户端（包括发送者）
                     broadcast_msg = json.dumps({"type": "update", "content": default_text})
+                    # Use asyncio.gather
+                    send_tasks = []
                     for client in list(connected_clients):
-                        try:
-                            await client.send(broadcast_msg)
-                        except websockets.exceptions.ConnectionClosed:
-                            pass
-                        except Exception as e:
-                            print(f"Error broadcasting reset: {e}", flush=True)
+                        send_tasks.append(client.send(broadcast_msg))
+                    
+                    if send_tasks:
+                        results = await asyncio.gather(*send_tasks, return_exceptions=True)
+                        for i, result in enumerate(results):
+                             if isinstance(result, Exception):
+                                 if not isinstance(result, websockets.exceptions.ConnectionClosed):
+                                     print(f"Failed to send reset to client: {result}", flush=True)
                                 
             except json.JSONDecodeError:
                 print(f"Invalid JSON received from {client_info}", flush=True)
@@ -259,6 +267,11 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                         color: #999;
                     }
                     .btn-close-notice:hover { color: #333; }
+                    #ws-status {
+                        font-size: 12px;
+                        color: #999;
+                        margin-bottom: 5px;
+                    }
                 </style>
                 <script>
                     async function deleteFile(filename) {
@@ -278,6 +291,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                     // Notice Board Logic
                     document.addEventListener('DOMContentLoaded', () => {
                         const noticeArea = document.getElementById('notice-content');
+                        const statusDiv = document.getElementById('ws-status');
                         
                         // WebSocket connection
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -289,12 +303,16 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                         let isConnected = false;
 
                         function connect() {
+                            statusDiv.textContent = `Connecting to ${wsUrl}...`;
+                            statusDiv.style.color = '#999';
                             console.log('Connecting to WebSocket:', wsUrl);
                             ws = new WebSocket(wsUrl);
 
                             ws.onopen = () => {
                                 console.log('WebSocket connected');
                                 isConnected = true;
+                                statusDiv.textContent = 'Connected';
+                                statusDiv.style.color = 'green';
                             };
 
                             ws.onmessage = (event) => {
@@ -321,6 +339,8 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                             ws.onclose = () => {
                                 console.log('WebSocket disconnected, reconnecting...');
                                 isConnected = false;
+                                statusDiv.textContent = 'Disconnected (Reconnecting...)';
+                                statusDiv.style.color = 'red';
                                 setTimeout(connect, 3000);
                             };
 
@@ -360,6 +380,7 @@ class FileHandler(http.server.SimpleHTTPRequestHandler):
                 
                 <!-- 公告板模块 -->
                 <div class="notice-board">
+                    <div id="ws-status">Initializing...</div>
                     <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
                     <textarea id="notice-content" placeholder="公告板..."></textarea>
                 </div>

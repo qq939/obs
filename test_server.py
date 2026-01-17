@@ -237,7 +237,7 @@ async def test_websocket_sync():
         # Client 2 connects
         async with websockets.connect(WS_URL) as ws2:
             # Should receive current content
-            init_msg = await ws2.recv()
+            init_msg = await asyncio.wait_for(ws2.recv(), timeout=5.0)
             data = json.loads(init_msg)
             assert data['type'] == 'init'
             assert data['content'] == test_content
@@ -247,7 +247,7 @@ async def test_websocket_sync():
             await ws2.send(json.dumps({"type": "update", "content": new_content}))
             
             # Client 1 should receive update
-            update_msg = await ws1.recv()
+            update_msg = await asyncio.wait_for(ws1.recv(), timeout=5.0)
             data = json.loads(update_msg)
             assert data['type'] == 'update'
             assert data['content'] == new_content
@@ -256,13 +256,13 @@ async def test_websocket_sync():
             await ws2.send(json.dumps({"type": "reset"}))
             
             # Client 1 should receive empty update
-            reset_msg = await ws1.recv()
+            reset_msg = await asyncio.wait_for(ws1.recv(), timeout=5.0)
             data = json.loads(reset_msg)
             assert data['type'] == 'update'
             assert data['content'] == ""
             
             # Client 2 should also receive the broadcast (as per our implementation)
-            reset_msg_2 = await ws2.recv()
+            reset_msg_2 = await asyncio.wait_for(ws2.recv(), timeout=5.0)
             data_2 = json.loads(reset_msg_2)
             assert data_2['type'] == 'update'
             assert data_2['content'] == ""
