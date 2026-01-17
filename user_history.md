@@ -19,3 +19,12 @@
 2.  Updated `requirements.txt` to replace `uvicorn` with `uvicorn[standard]` to ensure proper WebSocket support dependencies are installed.
 3.  Ran `uv pip install -r requirements.txt` to apply the changes.
 4.  Verified system stability by running `uv run pytest test_server.py`, which passed successfully.
+
+**User Request:** 公告板需要支持复制和粘贴啊。
+**Action:**
+1.  Updated `server.py` to add "Copy" (复制) and "Paste" (粘贴) buttons to the notice board UI.
+2.  Implemented JavaScript functions `copyNotice()` using `navigator.clipboard.writeText` and `pasteNotice()` using `navigator.clipboard.readText`.
+    -   Note: Paste functionality requires browser permission and HTTPS (or localhost).
+3.  Updated CSS to style the new toolbar buttons.
+4.  Updated `test_server.py` to include a new test case `test_notice_board_controls` verifying the presence of these controls in the HTML response.
+5.  Verified changes with `uv run pytest test_server.py`, all tests passed.
