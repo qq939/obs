@@ -237,15 +237,16 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-tools {
                 position: absolute;
                 bottom: 5px;
-                left: 5px;
+                right: 5px;
             }
             .notice-tools button {
                 cursor: pointer;
                 background: none;
                 border: none;
-                font-size: 1.5em;
+                font-size: 16px;
+                color: #999;
             }
-            .notice-tools button:hover { opacity: 0.7; }
+            .notice-tools button:hover { color: #333; }
         </style>
         <script>
             async function deleteFile(filename) {
@@ -371,7 +372,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
             <textarea id="notice-content" placeholder="公告板..."></textarea>
             <div class="notice-tools">
-                <button onclick="saveNotice()" title="保存公告">✅</button>
+                <button onclick="saveNotice()" title="保存公告">✓</button>
             </div>
         </div>
 

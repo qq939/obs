@@ -28,3 +28,12 @@
 3.  Updated CSS to style the new toolbar buttons.
 4.  Updated `test_server.py` to include a new test case `test_notice_board_controls` verifying the presence of these controls in the HTML response.
 5.  Verified changes with `uv run pytest test_server.py`, all tests passed.
+
+**User Request:** 1、删掉复制和粘贴两个按钮和”上传文件“这四个字，太占地方了。2、这一行字字号缩小两号“上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt“并且放到”文件托管列表“下方。3、公告板左下角增加一个“✅”按钮，把公告板的内容保存在obs目录里，文件名：年月日时分秒公告板.txt，文件名不要有符号
+**Action:**
+1.  Modified `server.py` to remove the "Copy" and "Paste" buttons and the "上传文件" (Upload File) header.
+2.  Moved the `curl` upload command example below the "文件托管列表" (File Hosting List) title and reduced its font size (`0.8em`).
+3.  Added a "✅" button to the bottom-left of the notice board.
+4.  Implemented a backend endpoint `/save_notice` that saves the current notice content to a file in the `obs` directory with the format `YYYYMMDDHHMMSS公告板.txt`.
+5.  Updated `test_server.py` to verify the new "Save Notice" feature and removed obsolete tests for copy/paste buttons.
+6.  Verified all changes with `uv run pytest test_server.py`, all tests passed.
