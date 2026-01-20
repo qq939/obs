@@ -37,3 +37,10 @@
 4.  Implemented a backend endpoint `/save_notice` that saves the current notice content to a file in the `obs` directory with the format `YYYYMMDDHHMMSS公告板.txt`.
 5.  Updated `test_server.py` to verify the new "Save Notice" feature and removed obsolete tests for copy/paste buttons.
 6.  Verified all changes with `uv run pytest test_server.py`, all tests passed.
+
+**User Request:** 对号放到右下角，改成这个“✓”，和“x”的大小一致就行
+**Action:**
+1.  Modified `server.py` CSS to position the notice tools container to the bottom-right (`right: 5px`).
+2.  Updated the button icon from "✅" to "✓".
+3.  Adjusted the button font size to `16px` and color to `#999` (with hover effect) to visually match the existing "x" (close/reset) button.
+4.  Verified the changes with `uv run pytest test_server.py`.

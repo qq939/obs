@@ -1,5 +1,7 @@
 [
   "test_server.py::test_delete_file",
+  "test_server.py::test_flexible_upload",
+  "test_server.py::test_form_upload",
   "test_server.py::test_homepage_list",
   "test_server.py::test_json_file_download",
   "test_server.py::test_notice_board_controls",

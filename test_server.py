@@ -134,6 +134,65 @@ def test_homepage_list():
     assert 'new WebSocket' in html
     assert "websocket_endpoint" in [route.name for route in app.routes]
 
+def test_form_upload():
+    print("Testing standard form upload (POST /)...")
+    filename = "form_upload_test.txt"
+    content = "form upload content"
+    
+    # Create temporary file
+    with open(filename, "w") as f:
+        f.write(content)
+        
+    try:
+        with open(filename, "rb") as f:
+            files = {"file": (filename, f)}
+            resp = requests.post(BASE_URL, files=files)
+            
+        if resp.status_code != 201:
+            print(f"Form upload failed: {resp.status_code} {resp.text}")
+            
+        assert resp.status_code == 201
+        assert "文件上传成功" in resp.text
+        
+        # Verify file exists
+        assert os.path.exists(os.path.join(TEST_DIR, filename))
+        
+        # Verify content
+        with open(os.path.join(TEST_DIR, filename), "r") as f:
+            saved = f.read()
+        assert saved == content
+        
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+
+def test_flexible_upload():
+    print("Testing flexible form upload (wrong field name)...")
+    filename = "flex_upload_test.txt"
+    content = "flex upload content"
+    
+    with open(filename, "w") as f:
+        f.write(content)
+        
+    try:
+        with open(filename, "rb") as f:
+            # Use 'data' instead of 'file'
+            files = {"data": (filename, f)}
+            resp = requests.post(BASE_URL, files=files)
+            
+        if resp.status_code != 201:
+            print(f"Flexible upload failed: {resp.status_code} {resp.text}")
+            
+        assert resp.status_code == 201
+        assert "文件上传成功" in resp.text
+        
+        # Verify file exists
+        assert os.path.exists(os.path.join(TEST_DIR, filename))
+             
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
+
 def test_save_notice_feature():
     """Test saving notice to a file"""
     # 1. Update notice content

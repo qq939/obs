@@ -424,20 +424,37 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
     return HTMLResponse(content=html)
 
 @app.post("/")
-async def upload_file_form(file: UploadFile = File(...)):
-    filename = file.filename
-    if not filename:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-        
-    save_path = os.path.join(UPLOAD_DIR, filename)
+async def upload_file_form(request: Request):
+    # Flexible file upload handler
     try:
+        form = await request.form()
+        
+        # Find the first UploadFile field
+        upload_file: UploadFile = None
+        for key, value in form.items():
+            # Duck typing check for UploadFile (has filename and file attribute)
+            if hasattr(value, "filename") and hasattr(value, "file"):
+                upload_file = value
+                break
+        
+        if not upload_file:
+            # Fallback for "file" param if it was somehow passed differently or check body
+            raise HTTPException(status_code=422, detail="No file field found in form data")
+
+        filename = upload_file.filename
+        if not filename:
+            raise HTTPException(status_code=400, detail="Filename is empty")
+            
+        save_path = os.path.join(UPLOAD_DIR, filename)
+        
         async with aiofiles.open(save_path, 'wb') as out_file:
-            while content := await file.read(1024 * 1024):  # Read in chunks
+            while content := await upload_file.read(1024 * 1024):  # Read in chunks
                 await out_file.write(content)
         
         return Response(content=f"文件上传成功: http://obs.dimond.top/{filename}", media_type="text/plain", status_code=201)
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.put("/{filename}")
 async def upload_file_put(filename: str, request: Request):
