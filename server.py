@@ -207,11 +207,23 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
             .notice-board textarea {
                 width: 100%;
-                height: 100px;
+                height: 150px;
                 border: 1px solid #ccc;
                 resize: vertical;
                 font-family: monospace;
                 box-sizing: border-box; /* ensure padding doesn't overflow */
+            }
+            .notice-copy-btn {
+                width: 100%;
+                display: block;
+                margin-top: 8px;
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                background: #fff;
+                cursor: pointer;
+            }
+            .notice-copy-btn:hover {
+                background: #f2f2f2;
             }
             .btn-close-notice {
                 position: absolute;
@@ -276,6 +288,21 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                     }
                 } catch (e) {
                     alert('保存出错: ' + e);
+                }
+            }
+
+            function copyNoticeToClipboard() {
+                try {
+                    const content = document.getElementById('notice-content').value || '';
+                    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                        alert('当前环境不支持剪贴板 API');
+                        return;
+                    }
+                    navigator.clipboard.writeText(content)
+                        .then(() => alert('公告内容已复制到剪贴板'))
+                        .catch((e) => alert('复制失败: ' + e));
+                } catch (e) {
+                    alert('复制出错: ' + e);
                 }
             }
 
@@ -376,8 +403,9 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             </div>
         </div>
 
-        <h1>文件托管列表</h1>
-        <p style="font-size: 0.8em; margin-bottom: 10px;">上传命令示例: <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+        <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
+
+        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
         
         <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
             <form action="/" method="post" enctype="multipart/form-data">

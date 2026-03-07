@@ -107,7 +107,7 @@ def test_delete_file():
 
 def test_homepage_list():
     print("Testing homepage...")
-    resp = requests.get(BASE_URL)
+    resp = requests.get(BASE_URL, timeout=5)
     assert resp.status_code == 200
     html = resp.text
     
@@ -134,6 +134,18 @@ def test_homepage_list():
     assert 'new WebSocket' in html
     assert "websocket_endpoint" in [route.name for route in app.routes]
 
+def test_homepage_ui_changes():
+    print("Testing homepage UI changes...")
+    resp = requests.get(BASE_URL, timeout=5)
+    assert resp.status_code == 200
+    html = resp.text
+    assert '<h1>文件托管列表</h1>' not in html
+    assert '文件托管：' in html
+    assert '上传命令示例' not in html
+    assert 'height: 150px' in html
+    assert 'resize: vertical' in html
+    assert 'class="notice-copy-btn"' in html
+    assert 'navigator.clipboard.writeText' in html
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"
