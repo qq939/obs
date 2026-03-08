@@ -150,6 +150,8 @@ def test_homepage_ui_changes():
     assert 'border-bottom: none' in html
     assert 'border-top: none' in html
     assert '公告内容已复制到剪贴板' not in html
+    # 复制按钮在公告板内部
+    assert html.find('class="notice-board"') < html.find('class="notice-copy-btn"')
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"

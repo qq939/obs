@@ -226,6 +226,16 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-copy-btn:hover {
                 background: #f2f2f2;
             }
+            .notice-copy-bar {
+                position: absolute;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                padding: 0 10px;
+            }
+            .notice-board {
+                padding-bottom: 50px; /* 留出底部复制按钮空间 */
+            }
             .btn-close-notice {
                 position: absolute;
                 top: 5px;
@@ -433,9 +443,10 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             <div class="notice-tools">
                 <button onclick="saveNotice()" title="保存公告">✓</button>
             </div>
+            <div class="notice-copy-bar">
+                <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
+            </div>
         </div>
-
-        <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
 
         <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
         
