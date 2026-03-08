@@ -152,10 +152,25 @@ def test_homepage_ui_changes():
     assert '公告内容已复制到剪贴板' not in html
     # 复制按钮在公告板内部
     assert html.find('class="notice-board"') < html.find('class="notice-copy-btn"')
-    # 保存对号按钮存在且不与底部栏重叠的样式已设置
-    assert 'title="保存公告"' in html
-    assert 'bottom: 55px' in html
-    assert 'z-index: 2' in html
+    # 保存对号按钮存在并与复制并排（10:1 比例通过 flex 判定）
+    assert 'class="notice-save-btn"' in html
+    assert 'flex: 10' in html
+    assert 'flex: 1' in html
+
+def test_notice_layout_compact_tiffany():
+    print("Testing compact layout and Tiffany blue...")
+    resp = requests.get(BASE_URL, timeout=5)
+    assert resp.status_code == 200
+    html = resp.text
+    # 复制栏不使用绝对定位，避免产生额外间隙
+    assert 'class="notice-copy-bar"' in html
+    assert 'position: static' in html
+    # 公告板不再有额外底部内边距70px
+    assert 'padding-bottom: 70px' not in html
+    # 复制按钮浅Tiffany蓝填充
+    assert 'background: #81D8D0' in html
+    # 对号按钮存在并在底部栏内
+    assert 'class="notice-save-btn"' in html
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"

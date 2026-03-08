@@ -214,27 +214,40 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 box-sizing: border-box; /* ensure padding doesn't overflow */
             }
             .notice-copy-btn {
-                width: 100%;
                 display: block;
                 margin-top: 0;
                 padding: 8px 12px;
                 border: 1px solid #ddd;
                 border-top: none;
-                background: #fff;
+                background: #81D8D0;
+                color: #fff;
                 cursor: pointer;
+                flex: 10;
             }
             .notice-copy-btn:hover {
+                background: #73cbc3;
+            }
+            .notice-save-btn {
+                display: block;
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                border-top: none;
+                background: #fff;
+                color: #333;
+                cursor: pointer;
+                flex: 1;
+            }
+            .notice-save-btn:hover {
                 background: #f2f2f2;
             }
             .notice-copy-bar {
-                position: absolute;
-                left: 0;
-                right: 0;
-                bottom: 0;
+                position: static;
                 padding: 0 10px;
+                display: flex;
+                gap: 6px;
             }
             .notice-board {
-                padding-bottom: 50px; /* 留出底部复制按钮空间 */
+                padding-bottom: 0;
             }
             .btn-close-notice {
                 position: absolute;
@@ -259,8 +272,8 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
             .notice-tools {
                 position: absolute;
-                bottom: 55px;
-                right: 5px;
+                bottom: 8px;
+                right: 8px;
                 z-index: 2;
             }
             .notice-tools button {
@@ -272,15 +285,13 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
             .notice-tools button:hover { color: #333; }
             .notice-copy-bar {
-                position: absolute;
-                left: 0;
-                right: 0;
-                bottom: 0;
+                position: static;
                 padding: 0 10px;
-                z-index: 1;
+                display: flex;
+                gap: 6px;
             }
             .notice-board {
-                padding-bottom: 70px; /* 留出底部复制按钮空间 + 右上角工具按钮空间 */
+                padding-bottom: 0;
             }
         </style>
         <script>
@@ -452,11 +463,9 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             <div id="ws-status-indicator" title="Connecting..."></div>
             <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
             <textarea id="notice-content" placeholder="公告板..."></textarea>
-            <div class="notice-tools">
-                <button onclick="saveNotice()" title="保存公告">✓</button>
-            </div>
             <div class="notice-copy-bar">
                 <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
+                <button class="notice-save-btn" onclick="saveNotice()" title="保存公告">✓</button>
             </div>
         </div>
 
