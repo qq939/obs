@@ -154,8 +154,9 @@ def test_homepage_ui_changes():
     assert html.find('class="notice-board"') < html.find('class="notice-copy-btn"')
     # 保存对号按钮存在并与复制并排（10:1 比例通过 flex 判定）
     assert 'class="notice-save-btn"' in html
-    assert 'flex: 10' in html
+    assert 'flex: 20' in html
     assert 'flex: 1' in html
+    assert '>保存</button>' in html
 
 def test_notice_layout_compact_tiffany():
     print("Testing compact layout and Tiffany blue...")

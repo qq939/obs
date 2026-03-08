@@ -216,20 +216,20 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-copy-btn {
                 display: block;
                 margin-top: 0;
-                padding: 8px 12px;
+                padding: 4px 12px;
                 border: 1px solid #ddd;
                 border-top: none;
                 background: #81D8D0;
                 color: #fff;
                 cursor: pointer;
-                flex: 10;
+                flex: 20;
             }
             .notice-copy-btn:hover {
                 background: #73cbc3;
             }
             .notice-save-btn {
                 display: block;
-                padding: 8px 12px;
+                padding: 4px 12px;
                 border: 1px solid #ddd;
                 border-top: none;
                 background: #fff;
@@ -242,7 +242,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
             .notice-copy-bar {
                 position: static;
-                padding: 0 10px;
+                padding: 0;
                 display: flex;
                 gap: 6px;
             }
@@ -286,7 +286,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-tools button:hover { color: #333; }
             .notice-copy-bar {
                 position: static;
-                padding: 0 10px;
+                padding: 0;
                 display: flex;
                 gap: 6px;
             }
@@ -465,7 +465,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             <textarea id="notice-content" placeholder="公告板..."></textarea>
             <div class="notice-copy-bar">
                 <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
-                <button class="notice-save-btn" onclick="saveNotice()" title="保存公告">✓</button>
+                <button class="notice-save-btn" onclick="saveNotice()" title="保存公告">保存</button>
             </div>
         </div>
 
