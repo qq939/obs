@@ -152,6 +152,10 @@ def test_homepage_ui_changes():
     assert '公告内容已复制到剪贴板' not in html
     # 复制按钮在公告板内部
     assert html.find('class="notice-board"') < html.find('class="notice-copy-btn"')
+    # 保存对号按钮存在且不与底部栏重叠的样式已设置
+    assert 'title="保存公告"' in html
+    assert 'bottom: 55px' in html
+    assert 'z-index: 2' in html
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"

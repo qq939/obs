@@ -259,8 +259,9 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
             .notice-tools {
                 position: absolute;
-                bottom: 5px;
+                bottom: 55px;
                 right: 5px;
+                z-index: 2;
             }
             .notice-tools button {
                 cursor: pointer;
@@ -270,6 +271,17 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 color: #999;
             }
             .notice-tools button:hover { color: #333; }
+            .notice-copy-bar {
+                position: absolute;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                padding: 0 10px;
+                z-index: 1;
+            }
+            .notice-board {
+                padding-bottom: 70px; /* 留出底部复制按钮空间 + 右上角工具按钮空间 */
+            }
         </style>
         <script>
             async function deleteFile(filename) {
