@@ -293,16 +293,43 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
 
             function copyNoticeToClipboard() {
                 try {
-                    const content = document.getElementById('notice-content').value || '';
-                    if (!navigator.clipboard || !navigator.clipboard.writeText) {
-                        alert('当前环境不支持剪贴板 API');
-                        return;
+                    const contentEl = document.getElementById('notice-content');
+                    const content = contentEl.value || '';
+
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(content)
+                            .then(() => alert('公告内容已复制到剪贴板'))
+                            .catch(() => legacyCopy(contentEl, content));
+                    } else {
+                        legacyCopy(contentEl, content);
                     }
-                    navigator.clipboard.writeText(content)
-                        .then(() => alert('公告内容已复制到剪贴板'))
-                        .catch((e) => alert('复制失败: ' + e));
                 } catch (e) {
                     alert('复制出错: ' + e);
+                }
+            }
+
+            function legacyCopy(el, text) {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.top = '-1000px';
+                    ta.style.left = '-1000px';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    alert(ok ? '公告内容已复制到剪贴板' : '复制失败，请手动选择文本后复制');
+                } catch (err) {
+                    try {
+                        el.focus();
+                        el.select();
+                        const ok2 = document.execCommand('copy');
+                        alert(ok2 ? '公告内容已复制到剪贴板' : '复制失败，请手动选择文本后复制');
+                    } catch (err2) {
+                        alert('复制失败，请手动选择文本后复制');
+                    }
                 }
             }
 
