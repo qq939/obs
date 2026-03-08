@@ -168,8 +168,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 # 按扩展名排序 (A-Z)
                 raw_files.sort(key=lambda x: (os.path.splitext(x)[1].lower(), x))
             else:
-                # 默认：按时间倒序排序
-                raw_files.sort(key=lambda x: os.path.getctime(os.path.join(UPLOAD_DIR, x)), reverse=True)
+                raw_files.sort(key=lambda x: os.path.getmtime(os.path.join(UPLOAD_DIR, x)), reverse=True)
                 
             files_list = raw_files
         except Exception:
@@ -209,6 +208,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 width: 100%;
                 height: 150px;
                 border: 1px solid #ccc;
+                border-bottom: none;
                 resize: vertical;
                 font-family: monospace;
                 box-sizing: border-box; /* ensure padding doesn't overflow */
@@ -216,9 +216,10 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-copy-btn {
                 width: 100%;
                 display: block;
-                margin-top: 8px;
+                margin-top: 0;
                 padding: 8px 12px;
                 border: 1px solid #ddd;
+                border-top: none;
                 background: #fff;
                 cursor: pointer;
             }
@@ -298,7 +299,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
 
                     if (navigator.clipboard && navigator.clipboard.writeText) {
                         navigator.clipboard.writeText(content)
-                            .then(() => alert('公告内容已复制到剪贴板'))
+                            .then(() => {})
                             .catch(() => legacyCopy(contentEl, content));
                     } else {
                         legacyCopy(contentEl, content);
@@ -320,13 +321,17 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                     ta.select();
                     const ok = document.execCommand('copy');
                     document.body.removeChild(ta);
-                    alert(ok ? '公告内容已复制到剪贴板' : '复制失败，请手动选择文本后复制');
+                    if (!ok) {
+                        alert('复制失败，请手动选择文本后复制');
+                    }
                 } catch (err) {
                     try {
                         el.focus();
                         el.select();
                         const ok2 = document.execCommand('copy');
-                        alert(ok2 ? '公告内容已复制到剪贴板' : '复制失败，请手动选择文本后复制');
+                        if (!ok2) {
+                            alert('复制失败，请手动选择文本后复制');
+                        }
                     } catch (err2) {
                         alert('复制失败，请手动选择文本后复制');
                     }

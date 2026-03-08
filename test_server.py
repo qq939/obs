@@ -146,6 +146,10 @@ def test_homepage_ui_changes():
     assert 'resize: vertical' in html
     assert 'class="notice-copy-btn"' in html
     assert 'navigator.clipboard.writeText' in html
+    assert 'margin-top: 0' in html
+    assert 'border-bottom: none' in html
+    assert 'border-top: none' in html
+    assert '公告内容已复制到剪贴板' not in html
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"
