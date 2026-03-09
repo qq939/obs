@@ -172,6 +172,9 @@ def test_notice_layout_compact_tiffany():
     assert 'background: #81D8D0' in html
     # 对号按钮存在并在底部栏内
     assert 'class="notice-save-btn"' in html
+    # 边框色值统一为 #ccc，不应再出现 #ddd
+    assert 'border: 1px solid #ccc' in html
+    assert '#ddd' not in html
 def test_form_upload():
     print("Testing standard form upload (POST /)...")
     filename = "form_upload_test.txt"
@@ -328,6 +331,34 @@ def test_sort_by_extension():
     pos_txt = html.find("2.txt")
     
     assert pos_csv < pos_json < pos_txt, "Sort by ext should be .csv, .json, .txt"
+
+def test_range_download_and_resume():
+    print("Testing range download and resume...")
+    filename = "range_test.bin"
+    data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" * 10000
+    resp = requests.put(f"{BASE_URL}/{filename}", data=data)
+    assert resp.status_code == 201
+    total = len(data)
+    # First 100 bytes
+    resp = requests.get(f"{BASE_URL}/{filename}", headers={"Range": "bytes=0-99"})
+    assert resp.status_code == 206
+    assert resp.headers.get("Accept-Ranges") == "bytes"
+    assert resp.headers.get("Content-Range") == f"bytes 0-99/{total}"
+    part1 = resp.content
+    assert len(part1) == 100
+    # From 100 to end
+    resp = requests.get(f"{BASE_URL}/{filename}", headers={"Range": "bytes=100-"})
+    assert resp.status_code == 206
+    cr = resp.headers.get("Content-Range")
+    assert cr is not None and cr.startswith(f"bytes 100-")
+    part2 = resp.content
+    assert len(part2) == total - 100
+    # Combine
+    combined = part1 + part2
+    assert combined == data
+    # Invalid range
+    resp = requests.get(f"{BASE_URL}/{filename}", headers={"Range": f"bytes={total}-"})
+    assert resp.status_code == 416
 
 @pytest.mark.asyncio
 async def test_websocket_sync():

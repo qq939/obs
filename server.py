@@ -8,7 +8,7 @@ from urllib.parse import quote, unquote
 from typing import List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query
-from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import uvicorn
@@ -217,7 +217,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 display: block;
                 margin-top: 0;
                 padding: 4px 12px;
-                border: 1px solid #ddd;
+                border: 1px solid #ccc;
                 border-top: none;
                 background: #81D8D0;
                 color: #fff;
@@ -230,7 +230,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             .notice-save-btn {
                 display: block;
                 padding: 4px 12px;
-                border: 1px solid #ddd;
+                border: 1px solid #ccc;
                 border-top: none;
                 background: #fff;
                 color: #333;
@@ -566,17 +566,62 @@ async def upload_file_put(filename: str, request: Request):
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
 @app.get("/{filename}")
-async def download_file(filename: str):
+async def download_file(filename: str, request: Request):
     filename = unquote(filename)
     file_path = os.path.join(UPLOAD_DIR, filename)
     
     if os.path.exists(file_path) and os.path.isfile(file_path):
-        # 使用 RFC 5987 标准支持非 ASCII 文件名
         encoded_filename = quote(filename)
-        headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        file_size = os.path.getsize(file_path)
+        range_header = request.headers.get("range")
+        base_headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
         }
-        return FileResponse(file_path, headers=headers)
+        if range_header:
+            try:
+                unit, rng = range_header.strip().split("=")
+                if unit != "bytes":
+                    raise ValueError()
+                if "," in rng:
+                    raise ValueError()
+                if rng.startswith("-"):
+                    length = int(rng[1:])
+                    start = max(file_size - length, 0)
+                    end = file_size - 1
+                else:
+                    parts = rng.split("-")
+                    start = int(parts[0]) if parts[0] else 0
+                    end = int(parts[1]) if len(parts) > 1 and parts[1] != "" else file_size - 1
+                if start > end or start >= file_size:
+                    return Response(
+                        status_code=416,
+                        headers={**base_headers, "Content-Range": f"bytes */{file_size}"}
+                    )
+                async def iterfile(path, start_pos, end_pos, chunk_size=1024*1024):
+                    async with aiofiles.open(path, "rb") as f:
+                        await f.seek(start_pos)
+                        remain = end_pos - start_pos + 1
+                        while remain > 0:
+                            read_size = min(chunk_size, remain)
+                            data = await f.read(read_size)
+                            if not data:
+                                break
+                            remain -= len(data)
+                            yield data
+                headers = {
+                    **base_headers,
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(end - start + 1),
+                }
+                return StreamingResponse(iterfile(file_path, start, end), status_code=206, headers=headers, media_type="application/octet-stream")
+            except Exception:
+                return Response(
+                    status_code=416,
+                    headers={**base_headers, "Content-Range": f"bytes */{file_size}"}
+                )
+        else:
+            return FileResponse(file_path, headers=base_headers)
     else:
         raise HTTPException(status_code=404, detail="File not found")
 
