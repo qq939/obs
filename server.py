@@ -24,6 +24,28 @@ load_dotenv("asset/.env")
 PORT = int(os.environ.get("PORT", 8088))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")
 
+# 全局性能参数（使用位置见行内注释）
+# MAX_UPLOAD_SIZE: 上传大小限制（None 表示无限制）
+# 使用位置：upload_file_form 写入循环累计判断；upload_file_put 流式写入累计判断
+MAX_UPLOAD_SIZE = None
+# UPLOAD_CHUNK_SIZE: 表单上传读取分片大小（10MB）
+# 使用位置：upload_file_form 读取循环
+UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024
+# RANGE_DOWNLOAD_CHUNK_SIZE: Range 分片下载时的单次读取分片大小（10MB）
+# 使用位置：download_file -> iterfile(chunk_size=...)
+RANGE_DOWNLOAD_CHUNK_SIZE = 10 * 1024 * 1024
+# STREAM_DOWNLOAD_CHUNK_SIZE: 完整流式下载分片大小（40MB）
+# 使用位置：download_file 无 Range 分支的 StreamingResponse 生成器
+STREAM_DOWNLOAD_CHUNK_SIZE = 40 * 1024 * 1024
+# UVICORN 运行参数
+# 使用位置：__main__ 中的 uvicorn.run(...)
+UVICORN_CONFIG = {
+    "limit_concurrency": 1000,
+    "limit_max_requests": 10000,
+    "timeout_keep_alive": 300,
+    "backlog": 2048,
+}
+
 # 内存存储 Notice 内容
 NOTICE_CONTENT = ""
 NOTICE_LOCK = asyncio.Lock()
@@ -295,6 +317,7 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
             }
         </style>
         <script>
+            const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
                 try {
@@ -306,6 +329,36 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                     }
                 } catch (e) {
                     alert('删除出错: ' + e);
+                }
+            }
+
+            async function chunkedUpload(inputEl) {
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {
+                    alert('请先选择文件');
+                    return;
+                }
+                const filename = file.name;
+                const total = file.size;
+                let offset = 0;
+                try {
+                    while (offset < total) {
+                        const end = Math.min(offset + CHUNK_SIZE_BROWSER, total);
+                        const blob = file.slice(offset, end);
+                        const resp = await fetch(`/${encodeURIComponent(filename)}`, {
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        });
+                        if (resp.status !== 201) {
+                            const text = await resp.text();
+                            throw new Error(`分片上传失败: ${resp.status} ${text}`);
+                        }
+                        offset = end;
+                    }
+                    alert('分片上传成功');
+                    window.location.reload();
+                } catch (err) {
+                    alert('分片上传出错: ' + err.message);
                 }
             }
 
@@ -476,6 +529,10 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 <input type="file" name="file" required>
                 <input type="submit" value="上传">
             </form>
+            <div style="margin-top:8px;">
+                <input type="file" id="chunkFile">
+                <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
+            </div>
         </div>
         
         <div class="sort-controls">
@@ -540,8 +597,13 @@ async def upload_file_form(request: Request):
         save_path = os.path.join(UPLOAD_DIR, filename)
         
         async with aiofiles.open(save_path, 'wb') as out_file:
-            while content := await upload_file.read(1024 * 1024):  # Read in chunks
+            # 使用 10MB 分片读取并写入；若设置了 MAX_UPLOAD_SIZE，则进行累计校验
+            total_written = 0
+            while content := await upload_file.read(UPLOAD_CHUNK_SIZE):
                 await out_file.write(content)
+                total_written += len(content)
+                if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件过大")
         
         return Response(content=f"文件上传成功: http://obs.dimond.top/{filename}", media_type="text/plain", status_code=201)
         
@@ -557,8 +619,13 @@ async def upload_file_put(filename: str, request: Request):
     save_path = os.path.join(UPLOAD_DIR, filename)
     try:
         async with aiofiles.open(save_path, 'wb') as out_file:
+            # 保持与客户端流大小一致；若设置了 MAX_UPLOAD_SIZE，则进行累计校验
+            total_written = 0
             async for chunk in request.stream():
                 await out_file.write(chunk)
+                total_written += len(chunk)
+                if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件过大")
                 
         file_url = f"http://obs.dimond.top/{filename}"
         return Response(content=file_url, media_type="text/plain", status_code=201)
@@ -598,7 +665,7 @@ async def download_file(filename: str, request: Request):
                         status_code=416,
                         headers={**base_headers, "Content-Range": f"bytes */{file_size}"}
                     )
-                async def iterfile(path, start_pos, end_pos, chunk_size=1024*1024):
+                async def iterfile(path, start_pos, end_pos, chunk_size=RANGE_DOWNLOAD_CHUNK_SIZE):
                     async with aiofiles.open(path, "rb") as f:
                         await f.seek(start_pos)
                         remain = end_pos - start_pos + 1
@@ -621,7 +688,19 @@ async def download_file(filename: str, request: Request):
                     headers={**base_headers, "Content-Range": f"bytes */{file_size}"}
                 )
         else:
-            return FileResponse(file_path, headers=base_headers)
+            # 使用 40MB 分片进行完整流式下载
+            async def iter_all(path, chunk_size=STREAM_DOWNLOAD_CHUNK_SIZE):
+                async with aiofiles.open(path, "rb") as f:
+                    while True:
+                        data = await f.read(chunk_size)
+                        if not data:
+                            break
+                        yield data
+            headers = {
+                **base_headers,
+                "Content-Length": str(file_size),
+            }
+            return StreamingResponse(iter_all(file_path), status_code=200, headers=headers, media_type="application/octet-stream")
     else:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -644,4 +723,12 @@ if __name__ == "__main__":
     print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
     print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
     print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}", flush=True)
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=PORT,
+        limit_concurrency=UVICORN_CONFIG["limit_concurrency"],
+        limit_max_requests=UVICORN_CONFIG["limit_max_requests"],
+        timeout_keep_alive=UVICORN_CONFIG["timeout_keep_alive"],
+        backlog=UVICORN_CONFIG["backlog"],
+    )

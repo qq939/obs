@@ -1,12 +1,1 @@
-{
-  "test_server.py::test_upload_no_limit": true,
-  "test_server.py::test_overwrite_existing_file": true,
-  "test_server.py::test_delete_file": true,
-  "test_server.py::test_homepage_list": true,
-  "test_server.py::test_form_upload": true,
-  "test_server.py::test_flexible_upload": true,
-  "test_server.py::test_save_notice_feature": true,
-  "test_server.py::test_json_file_download": true,
-  "test_server.py::test_special_chars_filename": true,
-  "test_server.py::test_websocket_sync": true
-}
+{}

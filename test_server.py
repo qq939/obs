@@ -10,7 +10,8 @@ import websockets
 import json
 
 # Set env vars BEFORE importing server
-TEST_PORT = 8089
+# 避免端口被系统占用（8089 被 Docker 占用），改用 8091
+TEST_PORT = 8091
 TEST_WS_PORT = TEST_PORT
 TEST_DIR = "test_obs"
 os.environ["PORT"] = str(TEST_PORT)

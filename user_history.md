@@ -44,3 +44,15 @@
 2.  Updated the button icon from "✅" to "✓".
 3.  Adjusted the button font size to `16px` and color to `#999` (with hover effect) to visually match the existing "x" (close/reset) button.
 4.  Verified the changes with `uv run pytest test_server.py`.
+
+## 2026-03-15
+**User Request:** ✅ 优化完成！移除文件大小限制；上传/下载分片改为10MB；流式下载40MB；服务端并发与连接参数优化；前端分片上传10MB
+**Action:**
+1. 在 [server.py](file:///Users/jiang/obs/server.py#L23-L44) 顶部前置全局参数：MAX_UPLOAD_SIZE=None、UPLOAD_CHUNK_SIZE=10MB、RANGE_DOWNLOAD_CHUNK_SIZE=10MB、STREAM_DOWNLOAD_CHUNK_SIZE=40MB、UVICORN_CONFIG 并标注使用位置。
+2. 将表单上传分片读取改为 10MB，PUT 流式上传增加累计检查（当 MAX_UPLOAD_SIZE 非 None 时返回 413）。
+3. Range 下载迭代器分片改为 10MB；无 Range 时改为 StreamingResponse，采用 40MB 分片并保留 Content-Length 与 Accept-Ranges。
+4. 在 __main__ 处为 uvicorn.run 增加 limit_concurrency=1000、limit_max_requests=10000、timeout_keep_alive=300、backlog=2048。
+5. 前端新增“分片上传(10MB)”按钮及 JS 实现，浏览器端分片大小为 10MB，保持原有表单上传不变。
+6. 新增 [test_tuning.py](file:///Users/jiang/obs/test_tuning.py) 验证常量值与大文件（60MB）完整流式下载行为；保持原有测试全部通过。
+7. 处理测试端口冲突，调整 [test_server.py](file:///Users/jiang/obs/test_server.py#L13-L18) 使用 8091 端口，确保与系统占用端口（8089）不冲突。
+8. 使用 uv 创建虚拟环境并安装依赖，运行 pytest，当前结果：16 passed。

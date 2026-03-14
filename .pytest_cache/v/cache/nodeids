@@ -14,5 +14,7 @@
   "test_server.py::test_special_chars_filename",
   "test_server.py::test_upload_and_rolling_deletion",
   "test_server.py::test_upload_no_limit",
-  "test_server.py::test_websocket_sync"
+  "test_server.py::test_websocket_sync",
+  "test_tuning.py::test_constants_values",
+  "test_tuning.py::test_large_file_stream_download"
 ]
