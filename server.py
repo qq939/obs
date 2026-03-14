@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import uvicorn
 import aiofiles
 from contextlib import asynccontextmanager
+import hashlib
 
 # 加载环境变量
 load_dotenv()
@@ -45,6 +46,11 @@ UVICORN_CONFIG = {
     "timeout_keep_alive": 300,
     "backlog": 2048,
 }
+def get_upload_dir() -> str:
+    return os.environ.get("UPLOAD_DIR", UPLOAD_DIR)
+
+def get_chunk_dir() -> str:
+    return os.path.join(get_upload_dir(), ".chunks")
 
 # 内存存储 Notice 内容
 NOTICE_CONTENT = ""
@@ -52,8 +58,11 @@ NOTICE_LOCK = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure upload directory exists
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # Startup: capture env-config to app.state (isolation per server instance)
+    app.state.upload_dir = os.environ.get("UPLOAD_DIR", UPLOAD_DIR)
+    app.state.chunk_dir = os.path.join(app.state.upload_dir, ".chunks")
+    os.makedirs(app.state.upload_dir, exist_ok=True)
+    os.makedirs(app.state.chunk_dir, exist_ok=True)
     yield
     # Shutdown
 
@@ -162,16 +171,18 @@ async def update_notice_http(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/save_notice")
-async def save_notice_file():
+async def save_notice_file(request: Request):
     content = await get_notice()
     if not content:
         raise HTTPException(status_code=400, detail="Notice is empty")
     
     # Generate filename: YYYYMMDDHHMMSS公告板.txt
     filename = datetime.now().strftime("%Y%m%d%H%M%S") + "公告板.txt"
-    save_path = os.path.join(UPLOAD_DIR, filename)
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    save_path = os.path.join(upload_dir, filename)
     
     try:
+        os.makedirs(upload_dir, exist_ok=True)
         async with aiofiles.open(save_path, 'w', encoding='utf-8') as f:
             await f.write(content)
         return {"status": "ok", "filename": filename}
@@ -179,18 +190,19 @@ async def save_notice_file():
         raise HTTPException(status_code=500, detail=f"Failed to save notice: {str(e)}")
 
 @app.get("/")
-async def homepage(sort: str = Query("time", enum=["time", "ext"])):
+async def homepage(request: Request, sort: str = Query("time", enum=["time", "ext"])):
     # 获取文件列表
     files_list = []
-    if os.path.exists(UPLOAD_DIR):
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    if os.path.exists(upload_dir):
         try:
-            raw_files = [f for f in os.listdir(UPLOAD_DIR) if not f.startswith('.')]
+            raw_files = [f for f in os.listdir(upload_dir) if not f.startswith('.')]
             
             if sort == 'ext':
                 # 按扩展名排序 (A-Z)
                 raw_files.sort(key=lambda x: (os.path.splitext(x)[1].lower(), x))
             else:
-                raw_files.sort(key=lambda x: os.path.getmtime(os.path.join(UPLOAD_DIR, x)), reverse=True)
+                raw_files.sort(key=lambda x: os.path.getmtime(os.path.join(upload_dir, x)), reverse=True)
                 
             files_list = raw_files
         except Exception:
@@ -318,6 +330,12 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
+            async function sha256Hex(file) {
+                const buf = await file.arrayBuffer();
+                const digest = await crypto.subtle.digest("SHA-256", buf);
+                const arr = Array.from(new Uint8Array(digest));
+                return arr.map(b => b.toString(16).padStart(2, "0")).join("");
+            }
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
                 try {
@@ -359,6 +377,72 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                     window.location.reload();
                 } catch (err) {
                     alert('分片上传出错: ' + err.message);
+                }
+            }
+
+            async function resumableUpload(inputEl) {
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {
+                    alert('请先选择文件');
+                    return;
+                }
+                const filename = file.name;
+                const size = file.size;
+                const chunkSize = CHUNK_SIZE_BROWSER;
+                const totalChunks = Math.ceil(size / chunkSize);
+                const hashAlgo = "sha256";
+                const hash = await sha256Hex(file);
+                // 初始化会话（包含秒传判定）
+                let resp = await fetch('/upload/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
+                });
+                if (!resp.ok) {
+                    const t = await resp.text();
+                    alert('初始化失败: ' + t);
+                    return;
+                }
+                const info = await resp.json();
+                if (info.skip) {
+                    alert('文件已存在，已秒传：' + info.url);
+                    window.location.reload();
+                    return;
+                }
+                const uploadId = info.upload_id;
+                const uploaded = new Set(info.uploaded || []);
+                // 上传缺失分片（带简单重试）
+                for (let i = 0; i < totalChunks; i++) {
+                    if (uploaded.has(i)) continue;
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, size);
+                    const blob = file.slice(start, end);
+                    let ok = false;
+                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+                        const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        });
+                        ok = r.status === 201;
+                    }
+                    if (!ok) {
+                        alert('分片上传失败，无法完成：' + i);
+                        return;
+                    }
+                }
+                // 合并完成
+                const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
+                });
+                if (c.ok) {
+                    const url = await c.text();
+                    alert('上传完成：' + url);
+                    window.location.reload();
+                } else {
+                    const tx = await c.text();
+                    alert('合并失败：' + tx);
                 }
             }
 
@@ -533,6 +617,10 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
                 <input type="file" id="chunkFile">
                 <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
             </div>
+            <div style="margin-top:8px;">
+                <input type="file" id="resumeFile">
+                <button onclick="resumableUpload(document.getElementById('resumeFile'))">断点续传(10MB+秒传)</button>
+            </div>
         </div>
         
         <div class="sort-controls">
@@ -572,6 +660,139 @@ async def homepage(sort: str = Query("time", enum=["time", "ext"])):
     """
     return HTMLResponse(content=html)
 
+def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
+    safe_name = filename.replace("/", "_")
+    return f"{hash_algo}:{file_hash}:{size}:{safe_name}"
+
+def file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+@app.post("/upload/init")
+async def upload_init(request: Request):
+    data = await request.json()
+    filename = data.get("filename")
+    size = int(data.get("size", 0))
+    hash_algo = data.get("hash_algo", "sha256")
+    file_hash = data.get("hash")
+    total_chunks = int(data.get("total_chunks", 0))
+    chunk_size = int(data.get("chunk_size", 0))
+    if not filename or not size or not file_hash:
+        raise HTTPException(status_code=400, detail="缺少必要参数")
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
+    os.makedirs(upload_dir, exist_ok=True)
+    os.makedirs(chunk_dir, exist_ok=True)
+    final_path = os.path.join(upload_dir, filename)
+    if os.path.exists(final_path) and os.path.getsize(final_path) == size:
+        # 进行秒传校验
+        if hash_algo == "sha256":
+            existing_hash = file_sha256(final_path)
+            if existing_hash == file_hash:
+                url = f"http://obs.dimond.top/{filename}"
+                return JSONResponse({"skip": True, "url": url})
+    upload_id = make_upload_id(filename, size, hash_algo, file_hash)
+    up_dir = os.path.join(chunk_dir, upload_id)
+    os.makedirs(up_dir, exist_ok=True)
+    # 枚举已上传分片
+    uploaded = []
+    try:
+        for name in os.listdir(up_dir):
+            if name.endswith(".part"):
+                try:
+                    idx = int(name[:-5])
+                    uploaded.append(idx)
+                except Exception:
+                    pass
+    except Exception:
+        uploaded = []
+    return JSONResponse({
+        "upload_id": upload_id,
+        "uploaded": sorted(uploaded),
+        "total_chunks": total_chunks,
+        "chunk_size": chunk_size,
+    })
+
+@app.put("/upload/chunk/{upload_id}/{index}")
+async def upload_chunk(upload_id: str, index: int, request: Request):
+    if index < 0:
+        raise HTTPException(status_code=400, detail="分片序号非法")
+    chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
+    up_dir = os.path.join(chunk_dir, upload_id)
+    os.makedirs(up_dir, exist_ok=True)
+    part_path = os.path.join(up_dir, f"{index}.part")
+    try:
+        async with aiofiles.open(part_path, "wb") as f:
+            async for chunk in request.stream():
+                await f.write(chunk)
+        return Response(content="OK", status_code=201)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"分片写入失败: {str(e)}")
+
+@app.post("/upload/complete/{upload_id}")
+async def upload_complete(upload_id: str, request: Request):
+    data = await request.json()
+    filename = data.get("filename")
+    size = int(data.get("size", 0))
+    total_chunks = int(data.get("total_chunks", 0))
+    hash_algo = data.get("hash_algo", "sha256")
+    file_hash = data.get("hash")
+    if not filename or not size or total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="缺少必要参数")
+    chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    up_dir = os.path.join(chunk_dir, upload_id)
+    if not os.path.exists(up_dir):
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    # 校验分片完整
+    for i in range(total_chunks):
+        if not os.path.exists(os.path.join(up_dir, f"{i}.part")):
+            raise HTTPException(status_code=409, detail=f"缺少分片 {i}")
+    # 合并
+    tmp_path = os.path.join(up_dir, "__merge.tmp")
+    try:
+        async with aiofiles.open(tmp_path, "wb") as out:
+            for i in range(total_chunks):
+                p = os.path.join(up_dir, f"{i}.part")
+                async with aiofiles.open(p, "rb") as inp:
+                    while True:
+                        chunk = await inp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        await out.write(chunk)
+        # 校验大小与哈希
+        real_size = os.path.getsize(tmp_path)
+        if real_size != size:
+            raise HTTPException(status_code=422, detail="合并后大小不匹配")
+        ok_hash = None
+        if hash_algo == "sha256" and file_hash:
+            ok_hash = file_sha256(tmp_path)
+            if ok_hash != file_hash:
+                raise HTTPException(status_code=422, detail="哈希校验失败")
+        # 移动到最终位置
+        final_path = os.path.join(upload_dir, filename)
+        os.replace(tmp_path, final_path)
+        # 可选清理分片
+        try:
+            for i in range(total_chunks):
+                os.remove(os.path.join(up_dir, f"{i}.part"))
+            os.remove(os.path.join(up_dir, "__merge.tmp")) if os.path.exists(os.path.join(up_dir, "__merge.tmp")) else None
+            os.rmdir(up_dir)
+        except Exception:
+            pass
+        url = f"http://obs.dimond.top/{filename}"
+        return Response(content=url, status_code=200, media_type="text/plain")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"合并失败: {str(e)}")
+
 @app.post("/")
 async def upload_file_form(request: Request):
     # Flexible file upload handler
@@ -594,12 +815,14 @@ async def upload_file_form(request: Request):
         if not filename:
             raise HTTPException(status_code=400, detail="Filename is empty")
             
-        save_path = os.path.join(UPLOAD_DIR, filename)
+        upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+        save_path = os.path.join(upload_dir, filename)
         
         async with aiofiles.open(save_path, 'wb') as out_file:
             # 使用 10MB 分片读取并写入；若设置了 MAX_UPLOAD_SIZE，则进行累计校验
             total_written = 0
             while content := await upload_file.read(UPLOAD_CHUNK_SIZE):
+                os.makedirs(upload_dir, exist_ok=True)
                 await out_file.write(content)
                 total_written += len(content)
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
@@ -616,12 +839,14 @@ async def upload_file_put(filename: str, request: Request):
     if not filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
         
-    save_path = os.path.join(UPLOAD_DIR, filename)
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    save_path = os.path.join(upload_dir, filename)
     try:
         async with aiofiles.open(save_path, 'wb') as out_file:
             # 保持与客户端流大小一致；若设置了 MAX_UPLOAD_SIZE，则进行累计校验
             total_written = 0
             async for chunk in request.stream():
+                os.makedirs(upload_dir, exist_ok=True)
                 await out_file.write(chunk)
                 total_written += len(chunk)
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
@@ -635,7 +860,8 @@ async def upload_file_put(filename: str, request: Request):
 @app.get("/{filename}")
 async def download_file(filename: str, request: Request):
     filename = unquote(filename)
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    file_path = os.path.join(upload_dir, filename)
     
     if os.path.exists(file_path) and os.path.isfile(file_path):
         encoded_filename = quote(filename)
@@ -705,9 +931,10 @@ async def download_file(filename: str, request: Request):
         raise HTTPException(status_code=404, detail="File not found")
 
 @app.delete("/{filename}")
-async def delete_file(filename: str):
+async def delete_file(filename: str, request: Request):
     filename = unquote(filename)
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    file_path = os.path.join(upload_dir, filename)
     
     if os.path.exists(file_path) and os.path.isfile(file_path):
         try:

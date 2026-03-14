@@ -1,4 +1,6 @@
 [
+  "test_resumable.py::test_resumable_upload_and_complete",
+  "test_resumable.py::test_resume_missing_chunk_and_skip_when_exists",
   "test_server.py::test_delete_file",
   "test_server.py::test_flexible_upload",
   "test_server.py::test_form_upload",
