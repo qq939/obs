@@ -56,3 +56,20 @@
 6. 新增 [test_tuning.py](file:///Users/jiang/obs/test_tuning.py) 验证常量值与大文件（60MB）完整流式下载行为；保持原有测试全部通过。
 7. 处理测试端口冲突，调整 [test_server.py](file:///Users/jiang/obs/test_server.py#L13-L18) 使用 8091 端口，确保与系统占用端口（8089）不冲突。
 8. 使用 uv 创建虚拟环境并安装依赖，运行 pytest，当前结果：16 passed。
+
+## 2026-08-01
+**User Request:** 1、改进一点：选择文件之后立刻上传，不再需要点击上传按钮 2、帮我把这个项目部署到docker上8088上
+**Action:**
+1. 修改 [server.py](file:///c:/Users/jiang/Downloads/obs/server.py) 中的 HTML 模板：
+   - 移除 form 表单的 submit 按钮，普通上传改为 `onchange="autoFormUpload(this)"` 自动触发
+   - 分片上传和断点续传也改为 `onchange` 自动触发，移除各自的上传按钮
+   - 新增 `autoFormUpload()` JS 函数，使用 FormData + fetch POST 实现自动上传
+   - 所有上传函数增加状态文字显示（上传中.../上传成功！/上传失败）
+2. 更新 [test_server.py](file:///c:/Users/j/Downloads/obs/test_server.py) 测试用例，验证新的 auto-upload UI 元素。
+3. 优化 [Dockerfile](file:///c:/Users/jiang/Downloads/obs/Dockerfile)：改用 `python:3.11-slim` 轻量镜像替代 ubuntu。
+4. 新建 [docker-compose.yml](file:///c:/Users/jiang/Downloads/obs/docker-compose.yml) 和 [.dockerignore](file:///c:/Users/jiang/Downloads/obs/.dockerignore)。
+5. Docker 构建镜像并启动容器 `obs-server`，映射端口 8088:8088，挂载 obs 目录和 env 文件。
+6. 验证 Docker 容器运行正常（200 OK），上传/下载/删除接口均通过测试。
+7. pytest 全部 14 测试通过。
+8. Git 提交并推送到新分支 `ai`（因 main 分支推送网络失败）。
+
