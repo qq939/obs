@@ -412,7 +412,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                     }
                     if (pastedFiles.length > 0) {
                         e.preventDefault();
-                        const names = pastedFiles.map(f => f.name).join('\n');
+                        const names = pastedFiles.map(f => f.name).join('\\n');
                         if (confirm(`检测到粘贴的${pastedFiles.length}个文件：\n${names}\n是否上传？`)) {
                             uploadFiles(pastedFiles);
                         }
