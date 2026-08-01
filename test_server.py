@@ -121,10 +121,12 @@ def test_homepage_list():
     assert "http://obs.dimond.top/file_0.txt" in html
     assert "http://obs.dimond.top/file_24.txt" in html
 
-    # Check if upload form exists
-    assert '<form action="/" method="post" enctype="multipart/form-data">' in html
-    assert '<input type="file" name="file" required>' in html
-    assert '<input type="submit" value="上传">' in html
+    # Check if upload form exists (auto-upload on file select, no submit button)
+    assert 'autoFormUpload' in html
+    assert 'onchange="autoFormUpload(this)"' in html
+    assert 'onchange="chunkedUpload(this)"' in html
+    assert 'onchange="resumableUpload(this)"' in html
+    assert '<input type="submit" value="上传">' not in html
 
     # Check if notice board exists
     assert 'class="notice-board"' in html

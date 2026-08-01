@@ -1,0 +1,12 @@
+__pycache__
+.pytest_cache
+.venv
+.git
+.gitignore
+.dockerignore
+test_obs
+*.pyc
+.trae
+user_history.md
+tips.txt
+server.log

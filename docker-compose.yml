@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  obs:
+    build: .
+    container_name: obs-server
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./obs:/app/obs
+      - ./env:/app/env:ro
+    restart: unless-stopped

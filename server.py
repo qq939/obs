@@ -350,12 +350,34 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
+            async function autoFormUpload(inputEl) {
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) return;
+                const statusEl = document.getElementById('formUploadStatus');
+                statusEl.textContent = '上传中...';
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const resp = await fetch('/', { method: 'POST', body: formData });
+                    if (resp.status === 201) {
+                        statusEl.textContent = '上传成功！';
+                        window.location.reload();
+                    } else {
+                        const text = await resp.text();
+                        statusEl.textContent = '上传失败';
+                        alert('上传失败: ' + text);
+                    }
+                } catch (err) {
+                    statusEl.textContent = '上传出错';
+                    alert('上传出错: ' + err.message);
+                }
+            }
+
             async function chunkedUpload(inputEl) {
                 const file = inputEl.files && inputEl.files[0];
-                if (!file) {
-                    alert('请先选择文件');
-                    return;
-                }
+                if (!file) return;
+                const statusEl = document.getElementById('chunkUploadStatus');
+                statusEl.textContent = '上传中...';
                 const filename = file.name;
                 const total = file.size;
                 let offset = 0;
@@ -373,19 +395,19 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         }
                         offset = end;
                     }
-                    alert('分片上传成功');
+                    statusEl.textContent = '上传成功！';
                     window.location.reload();
                 } catch (err) {
+                    statusEl.textContent = '上传出错';
                     alert('分片上传出错: ' + err.message);
                 }
             }
 
             async function resumableUpload(inputEl) {
                 const file = inputEl.files && inputEl.files[0];
-                if (!file) {
-                    alert('请先选择文件');
-                    return;
-                }
+                if (!file) return;
+                const statusEl = document.getElementById('resumeUploadStatus');
+                statusEl.textContent = '上传中...';
                 const filename = file.name;
                 const size = file.size;
                 const chunkSize = CHUNK_SIZE_BROWSER;
@@ -400,12 +422,13 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 });
                 if (!resp.ok) {
                     const t = await resp.text();
+                    statusEl.textContent = '初始化失败';
                     alert('初始化失败: ' + t);
                     return;
                 }
                 const info = await resp.json();
                 if (info.skip) {
-                    alert('文件已存在，已秒传：' + info.url);
+                    statusEl.textContent = '秒传成功！';
                     window.location.reload();
                     return;
                 }
@@ -426,6 +449,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         ok = r.status === 201;
                     }
                     if (!ok) {
+                        statusEl.textContent = '分片上传失败';
                         alert('分片上传失败，无法完成：' + i);
                         return;
                     }
@@ -437,11 +461,11 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                     body: JSON.stringify({ filename, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
                 });
                 if (c.ok) {
-                    const url = await c.text();
-                    alert('上传完成：' + url);
+                    statusEl.textContent = '上传完成！';
                     window.location.reload();
                 } else {
                     const tx = await c.text();
+                    statusEl.textContent = '合并失败';
                     alert('合并失败：' + tx);
                 }
             }
@@ -609,17 +633,20 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
         
         <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
-            <form action="/" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" required>
-                <input type="submit" value="上传">
-            </form>
-            <div style="margin-top:8px;">
-                <input type="file" id="chunkFile">
-                <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
+            <div>
+                <label>普通上传：</label>
+                <input type="file" id="formFile" onchange="autoFormUpload(this)">
+                <span id="formUploadStatus" style="font-size:0.85em;color:#999;"></span>
             </div>
             <div style="margin-top:8px;">
-                <input type="file" id="resumeFile">
-                <button onclick="resumableUpload(document.getElementById('resumeFile'))">断点续传(10MB+秒传)</button>
+                <label>分片上传(10MB)：</label>
+                <input type="file" id="chunkFile" onchange="chunkedUpload(this)">
+                <span id="chunkUploadStatus" style="font-size:0.85em;color:#999;"></span>
+            </div>
+            <div style="margin-top:8px;">
+                <label>断点续传(10MB+秒传)：</label>
+                <input type="file" id="resumeFile" onchange="resumableUpload(this)">
+                <span id="resumeUploadStatus" style="font-size:0.85em;color:#999;"></span>
             </div>
         </div>
         
