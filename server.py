@@ -350,35 +350,37 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
-            async function autoFormUpload(inputEl) {
-                const file = inputEl.files && inputEl.files[0];
-                if (!file) return;
+            async function uploadFiles(files) {
+                if (!files || files.length === 0) return;
                 const statusEl = document.getElementById('formUploadStatus');
-                statusEl.textContent = '上传中...';
-                try {
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    const resp = await fetch('/', { method: 'POST', body: formData });
-                    if (resp.status === 201) {
-                        statusEl.textContent = '上传成功！';
-                        window.location.reload();
-                    } else {
-                        const text = await resp.text();
-                        statusEl.textContent = '上传失败';
-                        alert('上传失败: ' + text);
+                let success = 0, fail = 0;
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    statusEl.textContent = `上传中... (${i + 1}/${files.length}) ${file.name}`;
+                    try {
+                        const formData = new FormData();
+                        formData.append('file', file);
+                        const resp = await fetch('/', { method: 'POST', body: formData });
+                        if (resp.status === 201) {
+                            success++;
+                        } else {
+                            fail++;
+                        }
+                    } catch (err) {
+                        fail++;
                     }
-                } catch (err) {
-                    statusEl.textContent = '上传出错';
-                    alert('上传出错: ' + err.message);
                 }
+                if (fail === 0) {
+                    statusEl.textContent = `全部上传成功！(${success}个文件)`;
+                } else {
+                    statusEl.textContent = `上传完成：成功${success}个，失败${fail}个`;
+                }
+                window.location.reload();
             }
 
-            function handleDragUpload(file) {
-                const input = document.getElementById('formFile');
-                const dt = new DataTransfer();
-                dt.items.add(file);
-                input.files = dt.files;
-                autoFormUpload(input);
+            function handleDragUpload(fileList) {
+                if (!fileList || fileList.length === 0) return;
+                uploadFiles(fileList);
             }
 
             document.addEventListener('DOMContentLoaded', () => {
@@ -395,21 +397,24 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 });
                 zone.addEventListener('drop', (e) => {
                     const files = e.dataTransfer.files;
-                    if (files.length > 0) handleDragUpload(files[0]);
+                    if (files.length > 0) handleDragUpload(files);
                 });
 
-                // 粘贴文件上传
+                // 粘贴文件上传（支持多文件）
                 document.addEventListener('paste', (e) => {
                     const items = e.clipboardData && e.clipboardData.items;
                     if (!items) return;
+                    const pastedFiles = [];
                     for (let i = 0; i < items.length; i++) {
                         if (items[i].kind === 'file') {
-                            e.preventDefault();
-                            const file = items[i].getAsFile();
-                            if (confirm(`检测到粘贴的文件：${file.name}\n是否上传？`)) {
-                                handleDragUpload(file);
-                            }
-                            break;
+                            pastedFiles.push(items[i].getAsFile());
+                        }
+                    }
+                    if (pastedFiles.length > 0) {
+                        e.preventDefault();
+                        const names = pastedFiles.map(f => f.name).join('\n');
+                        if (confirm(`检测到粘贴的${pastedFiles.length}个文件：\n${names}\n是否上传？`)) {
+                            uploadFiles(pastedFiles);
                         }
                     }
                 });
@@ -676,7 +681,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
             <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传</p>
-            <input type="file" id="formFile" onchange="autoFormUpload(this)" style="display:none;">
+            <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>

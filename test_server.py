@@ -121,9 +121,9 @@ def test_homepage_list():
     assert "http://obs.dimond.top/file_0.txt" in html
     assert "http://obs.dimond.top/file_24.txt" in html
 
-    # Check if upload form exists (drag-and-drop + auto-upload, no submit button, no chunk/resume UI)
-    assert 'autoFormUpload' in html
-    assert 'onchange="autoFormUpload(this)"' in html
+    # Check if upload form exists (drag-and-drop + multi-select + paste, no chunk/resume UI)
+    assert 'uploadFiles' in html
+    assert 'onchange="uploadFiles(this.files)"' in html
     assert 'id="uploadZone"' in html
     assert 'handleDragUpload' in html
     assert '拖拽文件到此处上传' in html
@@ -133,7 +133,7 @@ def test_homepage_list():
     assert 'id="chunkUploadStatus"' not in html
     assert 'id="resumeUploadStatus"' not in html
     # Check paste-to-upload feature
-    assert "检测到粘贴的文件" in html
+    assert "检测到粘贴" in html
     assert "是否上传？" in html
 
     # Check if notice board exists
