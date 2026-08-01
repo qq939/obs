@@ -397,6 +397,22 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                     const files = e.dataTransfer.files;
                     if (files.length > 0) handleDragUpload(files[0]);
                 });
+
+                // 粘贴文件上传
+                document.addEventListener('paste', (e) => {
+                    const items = e.clipboardData && e.clipboardData.items;
+                    if (!items) return;
+                    for (let i = 0; i < items.length; i++) {
+                        if (items[i].kind === 'file') {
+                            e.preventDefault();
+                            const file = items[i].getAsFile();
+                            if (confirm(`检测到粘贴的文件：${file.name}\n是否上传？`)) {
+                                handleDragUpload(file);
+                            }
+                            break;
+                        }
+                    }
+                });
             });
 
             async function chunkedUpload(inputEl) {

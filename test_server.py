@@ -132,6 +132,9 @@ def test_homepage_list():
     assert 'id="resumeFile"' not in html
     assert 'id="chunkUploadStatus"' not in html
     assert 'id="resumeUploadStatus"' not in html
+    # Check paste-to-upload feature
+    assert "检测到粘贴的文件" in html
+    assert "是否上传？" in html
 
     # Check if notice board exists
     assert 'class="notice-board"' in html
