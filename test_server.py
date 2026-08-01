@@ -121,8 +121,10 @@ def test_homepage_list():
     assert "http://obs.dimond.top/file_0.txt" in html
     assert "http://obs.dimond.top/file_24.txt" in html
 
-    # Check if upload form exists (drag-and-drop + multi-select + paste, no chunk/resume UI)
+    # Check if upload form exists (drag-and-drop + multi-select + paste, chunked upload with progress)
     assert 'uploadFiles' in html
+    assert 'uploadOneFile' in html
+    assert 'onprogress' in html
     assert 'onchange="uploadFiles(this.files)"' in html
     assert 'id="uploadZone"' in html
     assert 'handleDragUpload' in html

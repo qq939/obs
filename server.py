@@ -350,22 +350,46 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
+            // 带进度的单文件上传（PUT分片，后端 stream() 分片接收）
+            function uploadOneFile(file, onFileProgress) {
+                return new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.upload.onprogress = (e) => {
+                        if (e.lengthComputable && onFileProgress) {
+                            onFileProgress(Math.round(e.loaded / e.total * 100), e.loaded, e.total);
+                        }
+                    };
+                    xhr.onload = () => {
+                        if (xhr.status === 201) resolve(xhr.responseText);
+                        else reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+                    };
+                    xhr.onerror = () => reject(new Error('网络错误'));
+                    xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
+                    xhr.send(file);
+                });
+            }
+
             async function uploadFiles(files) {
                 if (!files || files.length === 0) return;
                 const statusEl = document.getElementById('formUploadStatus');
+                const totalFiles = files.length;
                 let success = 0, fail = 0;
+                let overallBytes = 0, totalBytes = 0;
+                for (let i = 0; i < files.length; i++) {
+                    totalBytes += files[i].size;
+                }
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
-                    statusEl.textContent = `上传中... (${i + 1}/${files.length}) ${file.name}`;
+                    let filePct = 0;
+                    statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
                     try {
-                        const formData = new FormData();
-                        formData.append('file', file);
-                        const resp = await fetch('/', { method: 'POST', body: formData });
-                        if (resp.status === 201) {
-                            success++;
-                        } else {
-                            fail++;
-                        }
+                        await uploadOneFile(file, (pct, loaded, total) => {
+                            filePct = pct;
+                            const overallPct = totalBytes > 0 ? Math.round((overallBytes + loaded) / totalBytes * 100) : 0;
+                            statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
+                        });
+                        overallBytes += file.size;
+                        success++;
                     } catch (err) {
                         fail++;
                     }
