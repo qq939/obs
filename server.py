@@ -373,6 +373,32 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
+            function handleDragUpload(file) {
+                const input = document.getElementById('formFile');
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                input.files = dt.files;
+                autoFormUpload(input);
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+                const zone = document.getElementById('uploadZone');
+                if (!zone) return;
+                ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+                    zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); });
+                });
+                ['dragenter', 'dragover'].forEach(evt => {
+                    zone.addEventListener(evt, () => { zone.style.borderColor = '#4A90D9'; zone.style.background = '#eef6ff'; });
+                });
+                ['dragleave', 'drop'].forEach(evt => {
+                    zone.addEventListener(evt, () => { zone.style.borderColor = '#ccc'; zone.style.background = '#f9f9f9'; });
+                });
+                zone.addEventListener('drop', (e) => {
+                    const files = e.dataTransfer.files;
+                    if (files.length > 0) handleDragUpload(files[0]);
+                });
+            });
+
             async function chunkedUpload(inputEl) {
                 const file = inputEl.files && inputEl.files[0];
                 if (!file) return;
@@ -632,22 +658,11 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
 
         <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
         
-        <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
-            <div>
-                <label>普通上传：</label>
-                <input type="file" id="formFile" onchange="autoFormUpload(this)">
-                <span id="formUploadStatus" style="font-size:0.85em;color:#999;"></span>
-            </div>
-            <div style="margin-top:8px;">
-                <label>分片上传(10MB)：</label>
-                <input type="file" id="chunkFile" onchange="chunkedUpload(this)">
-                <span id="chunkUploadStatus" style="font-size:0.85em;color:#999;"></span>
-            </div>
-            <div style="margin-top:8px;">
-                <label>断点续传(10MB+秒传)：</label>
-                <input type="file" id="resumeFile" onchange="resumableUpload(this)">
-                <span id="resumeUploadStatus" style="font-size:0.85em;color:#999;"></span>
-            </div>
+        <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
+            <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传</p>
+            <input type="file" id="formFile" onchange="autoFormUpload(this)" style="display:none;">
+            <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
+            <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
         
         <div class="sort-controls">

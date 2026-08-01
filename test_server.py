@@ -121,12 +121,17 @@ def test_homepage_list():
     assert "http://obs.dimond.top/file_0.txt" in html
     assert "http://obs.dimond.top/file_24.txt" in html
 
-    # Check if upload form exists (auto-upload on file select, no submit button)
+    # Check if upload form exists (drag-and-drop + auto-upload, no submit button, no chunk/resume UI)
     assert 'autoFormUpload' in html
     assert 'onchange="autoFormUpload(this)"' in html
-    assert 'onchange="chunkedUpload(this)"' in html
-    assert 'onchange="resumableUpload(this)"' in html
+    assert 'id="uploadZone"' in html
+    assert 'handleDragUpload' in html
+    assert '拖拽文件到此处上传' in html
     assert '<input type="submit" value="上传">' not in html
+    assert 'id="chunkFile"' not in html
+    assert 'id="resumeFile"' not in html
+    assert 'id="chunkUploadStatus"' not in html
+    assert 'id="resumeUploadStatus"' not in html
 
     # Check if notice board exists
     assert 'class="notice-board"' in html
