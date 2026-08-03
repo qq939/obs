@@ -13,6 +13,6 @@ COPY . .
 # 创建上传目录
 RUN mkdir -p obs obs/.chunks
 
-EXPOSE 8088
+EXPOSE 5003
 
 CMD ["python", "server.py"]
