@@ -5,7 +5,7 @@ services:
     build: .
     container_name: obs-server
     ports:
-      - "8088:5003"
+      - "5003:8088"
     volumes:
       - ./obs:/app/obs
       - ./env:/app/env:ro
