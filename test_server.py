@@ -8,6 +8,7 @@ import socketserver
 import asyncio
 import websockets
 import json
+import hashlib
 
 # Set env vars BEFORE importing server
 # 避免端口被系统占用（8089 被 Docker 占用），改用 8091
@@ -125,6 +126,8 @@ def test_homepage_list():
     assert 'uploadFiles' in html
     assert 'uploadOneFile' in html
     assert 'onprogress' in html
+    assert 'md5Hex' in html
+    assert '计算MD5中' in html
     assert 'onchange="uploadFiles(this.files)"' in html
     assert 'id="uploadZone"' in html
     assert 'handleDragUpload' in html
@@ -422,3 +425,18 @@ async def test_websocket_sync():
             assert data_2['content'] == ""
             
     print("WebSocket sync test passed!")
+
+def test_upload_returns_md5():
+    print("Testing upload returns MD5...")
+    filename = "md5_check.txt"
+    content = b"hello md5 verification"
+    resp = requests.put(f"{BASE_URL}/{filename}", data=content)
+    assert resp.status_code == 201
+    # 响应应为 JSON，包含 md5 字段
+    body = resp.json()
+    assert body.get("filename") == filename
+    expected_md5 = hashlib.md5(content).hexdigest()
+    assert body.get("md5") == expected_md5
+    assert body.get("url") == f"http://obs.dimond.top/{filename}"
+    # 校验服务器返回的 md5 与本地计算一致
+    assert body.get("md5") == hashlib.md5(content).hexdigest()

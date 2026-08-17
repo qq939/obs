@@ -336,6 +336,87 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const arr = Array.from(new Uint8Array(digest));
                 return arr.map(b => b.toString(16).padStart(2, "0")).join("");
             }
+            // 计算文件 MD5（Web Crypto 不支持 MD5，使用纯 JS 实现）
+            async function md5Hex(file) {
+                const buffer = await file.arrayBuffer();
+                const bytes = new Uint8Array(buffer);
+                const len = bytes.length;
+                const K = [
+                    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+                    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+                    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+                    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+                    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+                    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+                    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+                    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+                    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+                    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+                    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+                    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+                    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+                    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+                    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+                    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
+                ];
+                const S = [
+                    7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+                    5,9,14,20, 5,9,14,20, 5,9,14,20, 5,9,14,20,
+                    4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+                    6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21
+                ];
+                const bitLen = len * 8;
+                const bitLenLow = bitLen >>> 0;
+                const bitLenHigh = Math.floor(bitLen / 0x100000000) >>> 0;
+                const paddedLen = (((len + 8) >> 6) + 1) << 6;
+                const data = new Uint8Array(paddedLen);
+                data.set(bytes);
+                data[len] = 0x80;
+                const dv = new DataView(data.buffer);
+                dv.setUint32(paddedLen - 8, bitLenLow, true);
+                dv.setUint32(paddedLen - 4, bitLenHigh, true);
+                let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+                const M = new Array(16);
+                for (let off = 0; off < paddedLen; off += 64) {
+                    for (let j = 0; j < 16; j++) {
+                        M[j] = dv.getUint32(off + j * 4, true);
+                    }
+                    let A = a0, B = b0, C = c0, D = d0;
+                    for (let j = 0; j < 64; j++) {
+                        let F, g;
+                        if (j < 16) {
+                            F = (B & C) | (~B & D);
+                            g = j;
+                        } else if (j < 32) {
+                            F = (D & B) | (~D & C);
+                            g = (5 * j + 1) % 16;
+                        } else if (j < 48) {
+                            F = B ^ C ^ D;
+                            g = (3 * j + 5) % 16;
+                        } else {
+                            F = C ^ (B | ~D);
+                            g = (7 * j) % 16;
+                        }
+                        const temp = D;
+                        D = C;
+                        C = B;
+                        const f = (A + F + K[j] + M[g]) >>> 0;
+                        B = (B + ((f << S[j]) | (f >>> (32 - S[j])))) >>> 0;
+                        A = temp;
+                    }
+                    a0 = (a0 + A) >>> 0;
+                    b0 = (b0 + B) >>> 0;
+                    c0 = (c0 + C) >>> 0;
+                    d0 = (d0 + D) >>> 0;
+                }
+                function wordToHexLE(val) {
+                    const b = new ArrayBuffer(4);
+                    const dv2 = new DataView(b);
+                    dv2.setUint32(0, val, true);
+                    return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join('');
+                }
+                return wordToHexLE(a0) + wordToHexLE(b0) + wordToHexLE(c0) + wordToHexLE(d0);
+            }
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
                 try {
@@ -350,7 +431,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
-            // 带进度的单文件上传（PUT分片，后端 stream() 分片接收）
+            // 带进度的单文件上传（PUT分片，后端 stream() 分片接收），返回服务器响应 JSON
             function uploadOneFile(file, onFileProgress) {
                 return new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
@@ -360,8 +441,15 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         }
                     };
                     xhr.onload = () => {
-                        if (xhr.status === 201) resolve(xhr.responseText);
-                        else reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+                        if (xhr.status === 201) {
+                            try {
+                                resolve(JSON.parse(xhr.responseText));
+                            } catch (e) {
+                                reject(new Error('服务器返回格式错误'));
+                            }
+                        } else {
+                            reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+                        }
                     };
                     xhr.onerror = () => reject(new Error('网络错误'));
                     xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
@@ -374,30 +462,42 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const statusEl = document.getElementById('formUploadStatus');
                 const totalFiles = files.length;
                 let success = 0, fail = 0;
+                const failedNames = [];
                 let overallBytes = 0, totalBytes = 0;
                 for (let i = 0; i < files.length; i++) {
                     totalBytes += files[i].size;
                 }
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
-                    let filePct = 0;
-                    statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
+                    statusEl.textContent = `计算MD5中... (${i + 1}/${totalFiles}) ${file.name}`;
                     try {
-                        await uploadOneFile(file, (pct, loaded, total) => {
-                            filePct = pct;
+                        // 上传前先计算本地 MD5 作为参考
+                        const localMd5 = await md5Hex(file);
+                        statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
+                        const resp = await uploadOneFile(file, (pct, loaded, total) => {
                             const overallPct = totalBytes > 0 ? Math.round((overallBytes + loaded) / totalBytes * 100) : 0;
                             statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
                         });
                         overallBytes += file.size;
-                        success++;
+                        // 上传完成后校验服务器返回的 MD5
+                        const serverMd5 = (resp && resp.md5 || '').toLowerCase();
+                        if (serverMd5 && serverMd5 === localMd5) {
+                            success++;
+                        } else {
+                            fail++;
+                            failedNames.push(file.name + ' (MD5不一致)');
+                        }
                     } catch (err) {
                         fail++;
+                        failedNames.push(file.name + ' (' + err.message + ')');
                     }
                 }
                 if (fail === 0) {
                     statusEl.textContent = `全部上传成功！(${success}个文件)`;
+                    alert(`上传成功！共 ${success} 个文件，MD5 校验通过。`);
                 } else {
                     statusEl.textContent = `上传完成：成功${success}个，失败${fail}个`;
+                    alert(`上传完成：成功${success}个，失败${fail}个。\n失败文件：\n${failedNames.join('\\n')}`);
                 }
                 window.location.reload();
             }
@@ -761,6 +861,16 @@ def file_sha256(path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def file_md5(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
 @app.post("/upload/init")
 async def upload_init(request: Request):
     data = await request.json()
@@ -940,7 +1050,14 @@ async def upload_file_put(filename: str, request: Request):
                     raise HTTPException(status_code=413, detail="文件过大")
                 
         file_url = f"http://obs.dimond.top/{filename}"
-        return Response(content=file_url, media_type="text/plain", status_code=201)
+        # 上传完成后计算 MD5，供前端校验
+        md5_value = await asyncio.to_thread(file_md5, save_path)
+        return JSONResponse(
+            content={"filename": filename, "md5": md5_value, "url": file_url},
+            status_code=201,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
