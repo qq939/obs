@@ -73,3 +73,15 @@
 7. pytest 全部 14 测试通过。
 8. Git 提交并推送到新分支 `ai`（因 main 分支推送网络失败）。
 
+## 2026-08-01 (MD5 校验)
+**User Request:** 上传文件先检查md5，上传完成后再检验md5，校验无误弹窗提示上传成功。完成后部署到docker
+**Action:**
+1. 后端 [server.py](file:///c:/Users/jiang/Downloads/obs/server.py) 新增 `file_md5()` 函数，PUT 上传接口在写完文件后计算 MD5，返回 JSON `{filename, md5, url}`。
+2. 前端新增纯 JS 的 `md5Hex()` 函数（Web Crypto 不支持 MD5），上传前先计算本地 MD5 作为参考。
+3. `uploadOneFile()` 改为解析 JSON 响应；`uploadFiles()` 上传完成后用服务器返回的 MD5 与本地 MD5 对比，一致则弹窗提示"上传成功"。
+4. 修复 `join('\n')` 在 Python 三引号字符串中的转义问题（改为 `join('\\n')`）。
+5. [test_server.py](file:///c:/Users/jiang/Downloads/obs/test_server.py) 新增 `test_upload_returns_md5` 接口测试，验证 PUT 返回 MD5 与 hashlib 一致。
+6. 浏览器验证前端 `md5Hex("hello") == 5d41402abc4b2a76b9719d911017c592`，无 JS 错误。
+7. 15 个测试全部通过，Docker 镜像重建并部署到 5003:8088。
+8. Git 提交推送成功（commit 3098296）。
+
