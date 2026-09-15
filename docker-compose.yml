@@ -1,0 +1,52 @@
+services:
+  obs:
+    build: .
+    container_name: obs
+    ports:
+      - "8088:8088"
+    volumes:
+      - "${OBS_HOST_DIR:-./obs}:/app/obs"
+    environment:
+      - PORT=8088
+      - UPLOAD_DIR=/app/obs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  obs-video-app:
+    build: ../obs-video-app
+    container_name: obs-video-app
+    ports:
+      - "80:8082"
+    volumes:
+      - "${OBS_HOST_DIR:-./obs}:/home/agent/.claude/workspace/project/obs"
+      - "${OBS_SHARDS_DIR:-./obs_shards}:/home/agent/.claude/workspace/project/hls"
+      - "${LOGS_DIR:-./logs}:/home/agent/.claude/workspace/project/logs"
+    environment:
+      - OBS_UPLOAD_URL=http://obs:8088
+      - PORT=8082
+    depends_on:
+      obs:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:8082/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>process.exit(d.trim()==='OK'?0:1));}).on('error',()=>process.exit(1));"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  obs_data:
+  obs_shards_data:
+  logs_data:

@@ -1,58 +1,45 @@
+# User History - OBS Project
 
-## 2026-01-17 (Continued)
-**User Request:** 是8088端口，和http请求共用一个端口啊，都是FASTAPI服务，你不会做不到了吧？
-**Action:**
-1.  Acknowledged user's request to use port 8088 for both HTTP and WebSocket, and to use FastAPI.
-2.  Updated `requirements.txt` to include `fastapi`, `uvicorn`, `python-multipart`, and `aiofiles`.
-3.  Refactored `server.py` to use `FastAPI` instead of `http.server` and `websockets`.
-    -   Combined HTTP and WebSocket services on the same port (8088).
-    -   Implemented `lifespan` context manager to ensure `upload` directory exists.
-    -   Used `ConnectionManager` for handling WebSocket connections and broadcasting.
-    -   Updated frontend code to connect to `ws://${window.location.host}/ws`.
-4.  Updated `test_server.py` to use `uvicorn` for testing the FastAPI server and adjusted tests to work with the new architecture.
-5.  Verified all functionality (file upload, delete, list, sorting, notice board sync) with `pytest`, achieving 100% pass rate.
-6.  Created `.trae/reference/ref.txt` and `tips.txt` as per workspace rules.
+## 2024-09-15
 
-**User Request:** /Users/jiang/Downloads/obs/.log/obs (10).log
-**Action:**
-1.  Analyzed the log file and identified `WARNING: No supported WebSocket library detected`.
-2.  Updated `requirements.txt` to replace `uvicorn` with `uvicorn[standard]` to ensure proper WebSocket support dependencies are installed.
-3.  Ran `uv pip install -r requirements.txt` to apply the changes.
-4.  Verified system stability by running `uv run pytest test_server.py`, which passed successfully.
+### 实现分片上传和分片哈希功能
 
-**User Request:** 公告板需要支持复制和粘贴啊。
-**Action:**
-1.  Updated `server.py` to add "Copy" (复制) and "Paste" (粘贴) buttons to the notice board UI.
-2.  Implemented JavaScript functions `copyNotice()` using `navigator.clipboard.writeText` and `pasteNotice()` using `navigator.clipboard.readText`.
-    -   Note: Paste functionality requires browser permission and HTTPS (or localhost).
-3.  Updated CSS to style the new toolbar buttons.
-4.  Updated `test_server.py` to include a new test case `test_notice_board_controls` verifying the presence of these controls in the HTML response.
-5.  Verified changes with `uv run pytest test_server.py`, all tests passed.
+**任务描述：**
+实现分片上传、分片哈希。但是哈希不要阻塞上传。
 
-**User Request:** 1、删掉复制和粘贴两个按钮和”上传文件“这四个字，太占地方了。2、这一行字字号缩小两号“上传命令示例: curl --upload-file file.txt http://obs.dimond.top/file.txt“并且放到”文件托管列表“下方。3、公告板左下角增加一个“✅”按钮，把公告板的内容保存在obs目录里，文件名：年月日时分秒公告板.txt，文件名不要有符号
-**Action:**
-1.  Modified `server.py` to remove the "Copy" and "Paste" buttons and the "上传文件" (Upload File) header.
-2.  Moved the `curl` upload command example below the "文件托管列表" (File Hosting List) title and reduced its font size (`0.8em`).
-3.  Added a "✅" button to the bottom-left of the notice board.
-4.  Implemented a backend endpoint `/save_notice` that saves the current notice content to a file in the `obs` directory with the format `YYYYMMDDHHMMSS公告板.txt`.
-5.  Updated `test_server.py` to verify the new "Save Notice" feature and removed obsolete tests for copy/paste buttons.
-6.  Verified all changes with `uv run pytest test_server.py`, all tests passed.
+**完成的工作：**
 
-**User Request:** 对号放到右下角，改成这个“✓”，和“x”的大小一致就行
-**Action:**
-1.  Modified `server.py` CSS to position the notice tools container to the bottom-right (`right: 5px`).
-2.  Updated the button icon from "✅" to "✓".
-3.  Adjusted the button font size to `16px` and color to `#999` (with hover effect) to visually match the existing "x" (close/reset) button.
-4.  Verified the changes with `uv run pytest test_server.py`.
+1. **分析现有代码结构**
+   - 查看了 server.py 的分片上传实现
+   - 理解现有的 /upload/init, /upload/chunk, /upload/complete 接口
 
-## 2026-03-15
-**User Request:** ✅ 优化完成！移除文件大小限制；上传/下载分片改为10MB；流式下载40MB；服务端并发与连接参数优化；前端分片上传10MB
-**Action:**
-1. 在 [server.py](file:///Users/jiang/obs/server.py#L23-L44) 顶部前置全局参数：MAX_UPLOAD_SIZE=None、UPLOAD_CHUNK_SIZE=10MB、RANGE_DOWNLOAD_CHUNK_SIZE=10MB、STREAM_DOWNLOAD_CHUNK_SIZE=40MB、UVICORN_CONFIG 并标注使用位置。
-2. 将表单上传分片读取改为 10MB，PUT 流式上传增加累计检查（当 MAX_UPLOAD_SIZE 非 None 时返回 413）。
-3. Range 下载迭代器分片改为 10MB；无 Range 时改为 StreamingResponse，采用 40MB 分片并保留 Content-Length 与 Accept-Ranges。
-4. 在 __main__ 处为 uvicorn.run 增加 limit_concurrency=1000、limit_max_requests=10000、timeout_keep_alive=300、backlog=2048。
-5. 前端新增“分片上传(10MB)”按钮及 JS 实现，浏览器端分片大小为 10MB，保持原有表单上传不变。
-6. 新增 [test_tuning.py](file:///Users/jiang/obs/test_tuning.py) 验证常量值与大文件（60MB）完整流式下载行为；保持原有测试全部通过。
-7. 处理测试端口冲突，调整 [test_server.py](file:///Users/jiang/obs/test_server.py#L13-L18) 使用 8091 端口，确保与系统占用端口（8089）不冲突。
-8. 使用 uv 创建虚拟环境并安装依赖，运行 pytest，当前结果：16 passed。
+2. **创建测试脚本**
+   - test_chunked_hash.py: 测试分片上传基本功能
+   - test_server_chunk_hash.py: 测试服务端分片哈希计算
+
+3. **实现服务端分片哈希计算**
+   - 添加了 ThreadPoolExecutor 用于后台哈希计算
+   - 在 upload_init 时初始化上传会话
+   - 在 upload_chunk 时后台计算分片哈希（不阻塞上传）
+   - 添加 upload_status 接口查询分片哈希和进度
+   - 在 upload_complete 时使用分片哈希快速验证
+
+4. **创建 docker-compose.yml**
+   - 配置 obs 服务（8088端口）
+   - 配置 obs-video-app 服务（80端口）
+   - 共享挂载同一个 obs 和 obs-shards 目录
+
+5. **测试验证**
+   - 所有测试通过（9个测试用例）
+   - 分片哈希计算不阻塞上传
+   - 使用分片哈希快速验证合并
+
+**技术要点：**
+- 使用 ThreadPoolExecutor.run_in_executor 实现异步哈希计算
+- 上传会话管理（upload_sessions）存储分片哈希和总体哈希
+- 合并时优先使用分片哈希快速验证，无需重新读取整个文件
+- 并发上传时能正确计算所有分片的哈希
+
+**下一步：**
+- 将本项目部署到 obs-video-app
+- 修改 obs-video-app 使用本项目的上传服务
