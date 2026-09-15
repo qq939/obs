@@ -658,25 +658,62 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
                 const uploadId = info.upload_id;
                 const uploaded = new Set(info.uploaded || []);
-                // 上传缺失分片（带简单重试）
-                for (let i = 0; i < totalChunks; i++) {
-                    if (uploaded.has(i)) continue;
+                const serverChunkMd5s = info.chunk_md5s || {};
+                // 计算本地分片MD5
+                async function calcChunkMd5(blob) {
+                    const md5 = createMD5();
+                    const buf = await blob.arrayBuffer();
+                    md5.update(new Uint8Array(buf));
+                    return md5.hexdigest();
+                }
+                // 上传单个分片并验证MD5
+                async function uploadAndVerifyChunk(i, maxRetries = 3) {
                     const start = i * chunkSize;
                     const end = Math.min(start + chunkSize, size);
                     const blob = file.slice(start, end);
-                    let ok = false;
-                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+                    const localMd5 = await calcChunkMd5(blob);
+                    
+                    for (let attempt = 0; attempt < maxRetries; attempt++) {
                         const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
                             method: 'PUT',
                             body: await blob.arrayBuffer(),
                         });
-                        ok = r.status === 201;
+                        if (r.status === 201) {
+                            const result = await r.json();
+                            const serverMd5 = (result.md5 || '').toLowerCase();
+                            const expectedMd5 = localMd5.toLowerCase();
+                            if (serverMd5 && serverMd5 !== expectedMd5) {
+                                console.warn(`分片 ${i} MD5不匹配，本地: ${expectedMd5}, 服务器: ${serverMd5}，重传中...`);
+                                continue; // MD5不匹配，重试
+                            }
+                            return true;
+                        }
                     }
+                    return false;
+                }
+                // 上传缺失分片（带MD5验证和重试）
+                for (let i = 0; i < totalChunks; i++) {
+                    if (uploaded.has(i)) {
+                        // 已有分片，验证MD5
+                        const start = i * chunkSize;
+                        const end = Math.min(start + chunkSize, size);
+                        const blob = file.slice(start, end);
+                        const localMd5 = (await calcChunkMd5(blob)).toLowerCase();
+                        const serverMd5 = (serverChunkMd5s[i] || '').toLowerCase();
+                        if (serverMd5 && localMd5 !== serverMd5) {
+                            console.warn(`已上传分片 ${i} MD5不匹配，重新上传...`);
+                            uploaded.delete(i);
+                        } else {
+                            continue; // MD5匹配，跳过
+                        }
+                    }
+                    const ok = await uploadAndVerifyChunk(i);
                     if (!ok) {
                         statusEl.textContent = '分片上传失败';
                         alert('分片上传失败，无法完成：' + i);
                         return;
                     }
+                    uploaded.add(i);
                 }
                 // 合并完成
                 const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
@@ -901,8 +938,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
     return HTMLResponse(content=html)
 
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
-    safe_name = filename.replace("/", "_")
-    return f"{hash_algo}:{file_hash}:{size}:{safe_name}"
+    safe_name = filename.replace("/", "_").replace("\\", "_")
+    # Windows 不支持冒号，使用下划线代替
+    return f"{hash_algo}_{file_hash}_{size}_{safe_name}"
 
 def file_sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -950,14 +988,18 @@ async def upload_init(request: Request):
     upload_id = make_upload_id(filename, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
-    # 枚举已上传分片
+    # 枚举已上传分片，并计算每个分片的md5
     uploaded = []
+    chunk_md5s = {}
     try:
         for name in os.listdir(up_dir):
             if name.endswith(".part"):
                 try:
                     idx = int(name[:-5])
+                    chunk_path = os.path.join(up_dir, name)
+                    chunk_md5 = file_md5(chunk_path)
                     uploaded.append(idx)
+                    chunk_md5s[idx] = chunk_md5
                 except Exception:
                     pass
     except Exception:
@@ -965,6 +1007,7 @@ async def upload_init(request: Request):
     return JSONResponse({
         "upload_id": upload_id,
         "uploaded": sorted(uploaded),
+        "chunk_md5s": chunk_md5s,
         "total_chunks": total_chunks,
         "chunk_size": chunk_size,
     })
@@ -978,10 +1021,14 @@ async def upload_chunk(upload_id: str, index: int, request: Request):
     os.makedirs(up_dir, exist_ok=True)
     part_path = os.path.join(up_dir, f"{index}.part")
     try:
+        # 计算分片的MD5，同时写入文件
+        md5_hash = hashlib.md5()
         async with aiofiles.open(part_path, "wb") as f:
             async for chunk in request.stream():
                 await f.write(chunk)
-        return Response(content="OK", status_code=201)
+                md5_hash.update(chunk)
+        chunk_md5 = md5_hash.hexdigest()
+        return JSONResponse(content={"md5": chunk_md5}, status_code=201)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"分片写入失败: {str(e)}")
 
