@@ -336,11 +336,8 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const arr = Array.from(new Uint8Array(digest));
                 return arr.map(b => b.toString(16).padStart(2, "0")).join("");
             }
-            // 计算文件 MD5（Web Crypto 不支持 MD5，使用纯 JS 实现）
-            async function md5Hex(file) {
-                const buffer = await file.arrayBuffer();
-                const bytes = new Uint8Array(buffer);
-                const len = bytes.length;
+            // 增量 MD5 实现（支持大文件分块计算，避免一次性读入内存）
+            function createMD5() {
                 const K = [
                     0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
                     0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
@@ -365,23 +362,18 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                     4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
                     6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21
                 ];
-                const bitLen = len * 8;
-                const bitLenLow = bitLen >>> 0;
-                const bitLenHigh = Math.floor(bitLen / 0x100000000) >>> 0;
-                const paddedLen = (((len + 8) >> 6) + 1) << 6;
-                const data = new Uint8Array(paddedLen);
-                data.set(bytes);
-                data[len] = 0x80;
-                const dv = new DataView(data.buffer);
-                dv.setUint32(paddedLen - 8, bitLenLow, true);
-                dv.setUint32(paddedLen - 4, bitLenHigh, true);
-                let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-                const M = new Array(16);
-                for (let off = 0; off < paddedLen; off += 64) {
-                    for (let j = 0; j < 16; j++) {
-                        M[j] = dv.getUint32(off + j * 4, true);
+                let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476;
+                let totalBytes = 0;
+                const block = new Uint8Array(64);
+                let blockLen = 0;
+
+                function processBlock() {
+                    const dv = new DataView(block.buffer, block.byteOffset, 64);
+                    const M = new Array(16);
+                    for (let i = 0; i < 16; i++) {
+                        M[i] = dv.getUint32(i * 4, true);
                     }
-                    let A = a0, B = b0, C = c0, D = d0;
+                    let A = h0, B = h1, C = h2, D = h3;
                     for (let j = 0; j < 64; j++) {
                         let F, g;
                         if (j < 16) {
@@ -404,18 +396,79 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         B = (B + ((f << S[j]) | (f >>> (32 - S[j])))) >>> 0;
                         A = temp;
                     }
-                    a0 = (a0 + A) >>> 0;
-                    b0 = (b0 + B) >>> 0;
-                    c0 = (c0 + C) >>> 0;
-                    d0 = (d0 + D) >>> 0;
+                    h0 = (h0 + A) >>> 0;
+                    h1 = (h1 + B) >>> 0;
+                    h2 = (h2 + C) >>> 0;
+                    h3 = (h3 + D) >>> 0;
                 }
+
+                function update(bytes) {
+                    totalBytes += bytes.length;
+                    let i = 0;
+                    const n = bytes.length;
+                    while (i < n) {
+                        if (blockLen === 64) {
+                            processBlock();
+                            blockLen = 0;
+                        }
+                        block[blockLen++] = bytes[i++];
+                    }
+                }
+
                 function wordToHexLE(val) {
                     const b = new ArrayBuffer(4);
                     const dv2 = new DataView(b);
                     dv2.setUint32(0, val, true);
                     return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join('');
                 }
-                return wordToHexLE(a0) + wordToHexLE(b0) + wordToHexLE(c0) + wordToHexLE(d0);
+
+                function hexdigest() {
+                    const bitLen = totalBytes * 8;
+                    const bitLenLow = bitLen >>> 0;
+                    const bitLenHigh = Math.floor(bitLen / 0x100000000) >>> 0;
+                    // 追加 0x80
+                    if (blockLen === 64) {
+                        processBlock();
+                        blockLen = 0;
+                    }
+                    block[blockLen++] = 0x80;
+                    // 补零直到 blockLen == 56
+                    while (blockLen !== 56) {
+                        if (blockLen === 64) {
+                            processBlock();
+                            blockLen = 0;
+                        }
+                        block[blockLen++] = 0;
+                    }
+                    // 追加 8 字节小端比特长度
+                    const lenBytes = new Uint8Array(8);
+                    const dv = new DataView(lenBytes.buffer);
+                    dv.setUint32(0, bitLenLow, true);
+                    dv.setUint32(4, bitLenHigh, true);
+                    for (let i = 0; i < 8; i++) {
+                        block[blockLen++] = lenBytes[i];
+                    }
+                    processBlock();
+                    blockLen = 0;
+                    return wordToHexLE(h0) + wordToHexLE(h1) + wordToHexLE(h2) + wordToHexLE(h3);
+                }
+
+                return { update, hexdigest };
+            }
+
+            // 流式计算文件 MD5：分块读取，避免 8GB 大文件一次性读入内存
+            async function md5Hex(file) {
+                const md5 = createMD5();
+                const CHUNK = 10 * 1024 * 1024; // 10MB
+                const size = file.size;
+                let offset = 0;
+                while (offset < size) {
+                    const blob = file.slice(offset, offset + CHUNK);
+                    const buf = await blob.arrayBuffer();
+                    md5.update(new Uint8Array(buf));
+                    offset += CHUNK;
+                }
+                return md5.hexdigest();
             }
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
