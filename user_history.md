@@ -49,22 +49,22 @@
 
 **实现**（`src/obs/video_static/app.js`）：
 
-1. 浏览器原生 `playbackRate` 不支持负值（设负数会抛 `NotSupportedError`），
-   所以用「正向 1x 播放 + 定时向后 seek」模拟倒放：每 120ms 回退
-   `(REVERSE_RATE + 1) * dt` 秒，正向播放抵消掉 1x，净速度正好是 **-3x**。
-2. 新增常量与函数：`REVERSE_RATE = 3`、`REVERSE_TICK_MS = 120`、
-   `startReverse()`、`stopReverse()`、`reverseTick()`。
-3. `applyPagePlayback()` 分支改为：
+1. **直接负速率真倒放**：`video.playbackRate = -REVERSE_RATE`（即 -3），
+   支持负播放速率的浏览器（Safari）会真正以 **-3 倍速倒放**，无定时器、无补 seek。
+2. 支持性探测 `supportsNegativeRate()`：尝试赋值 `-1` 并读回，
+   抛 `NotSupportedError`（如 Chrome）时判定不支持，才启用兜底。
+3. 兜底方案：`playbackRate = 0` 冻结时间轴（视频仍处于播放态、不暂停），
+   `reverseTick()` 每 120ms 把 `currentTime` 回退 `REVERSE_RATE * dt` 秒，净速度仍是精确 -3x。
+4. `applyPagePlayback()` 分支：
    - `currentPage === 0`（第一页 / 信息页）→ `startReverse()`，永远 -3x 倒放；
    - 第二页 / 第三页 → `stopReverse()`，速率取第三页「播放速度」UI 的
      `playbackSpeed`，长按 5x 覆盖。
-4. 倒到开头后跳回结尾继续倒放（持续倒放不中断）。
-5. `endFastSpeed()` 改为调用 `applyPagePlayback()`，长按结束时按当前页恢复正确速率。
-6. 保活机制不变：任何页面、任何切换方式都不暂停视频（`if (playing) video.play()`）。
+5. 倒到开头后跳回结尾继续倒放（原生模式用 `timeupdate` 监听走到 0 时续播）。
+6. `endFastSpeed()` 调用 `applyPagePlayback()`，长按结束时按当前页恢复正确速率。
+7. 保活机制不变：任何页面、任何切换方式都不暂停视频（`if (playing) video.play()`）。
 
-**测试**：重写 `test_integration.py`，新增用例 `test_reverse_playback_on_page0`
-（校验服务端下发的 app.js 中 -3x 倒放实现、第一页分支调用 startReverse、
-非第一页调用 stopReverse、第二/三页受第三页速度 UI 控制），
-7 组用例全部通过。
+**测试**：重写 `test_integration.py`，用例 `test_reverse_playback_on_page0`
+校验「直接负速率倒放 + 负速率探测 + 兜底 seek」的服务端下发内容，
+7 组用例全部通过（先跑红灯确认旧实现不满足，再实现转绿）。
 
 ---

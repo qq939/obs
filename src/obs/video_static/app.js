@@ -383,38 +383,76 @@
     }
 
     // ---------------------------------------------------------------- playback effect per page
-    // 第一页 = -3 倍速倒放。浏览器原生 playbackRate 不支持负值（设负数会抛
-    // NotSupportedError），所以用「正向播放 + 定时向后 seek」模拟：
-    // 每个 tick 把 currentTime 回退 (REVERSE_RATE + 1) * dt，正向播放本身推进 1 * dt，
-    // 相互抵消后净速度正好是 -3 倍。视频始终保持 playing（保活，不暂停）。
+    // 第一页 = -3 倍速倒放：直接把 video.playbackRate 设成负值（Safari 等支持负播放速率的
+    // 浏览器会真正以 -3x 倒放）。个别浏览器给 playbackRate 赋负值会抛 NotSupportedError
+    // （如 Chrome），此时才退化为兜底方案：冻结时间轴（playbackRate = 0，视频仍处于播放态、
+    // 不暂停）+ 每 tick 把 currentTime 回退 REVERSE_RATE * dt 秒，净速度同样是精确的 -3x。
     const REVERSE_RATE = 3;        // 倒放倍速：-3x
-    const REVERSE_TICK_MS = 120;   // 每次回退间隔
+    const REVERSE_TICK_MS = 120;   // 兜底模式的回退间隔
+    let nativeReverse = null;      // null=未探测；true=原生负速率可用；false=需兜底
+    let reverseActive = false;     // 当前是否处于倒放状态
     let reverseTimer = null;
     let reverseLastTs = 0;
 
+    // 探测浏览器是否支持负 playbackRate：赋值 -1 后读回仍为负即支持；抛异常即不支持
+    function supportsNegativeRate() {
+        if (nativeReverse !== null) return nativeReverse;
+        let prev = 1;
+        try { prev = video.playbackRate; } catch (_) {}
+        try {
+            video.playbackRate = -1;
+            nativeReverse = video.playbackRate < 0;
+        } catch (_) {
+            nativeReverse = false;
+        }
+        try { video.playbackRate = prev > 0 ? prev : 1; } catch (_) {}
+        return nativeReverse;
+    }
+
     function stopReverse() {
+        reverseActive = false;
         if (reverseTimer !== null) { clearInterval(reverseTimer); reverseTimer = null; }
         reverseLastTs = 0;
     }
 
+    // 开始倒放（幂等：切视频 / 切页后重复调用也会重新应用正确速率）
     function startReverse() {
-        if (reverseTimer !== null) return;
-        reverseLastTs = 0;
-        reverseTimer = setInterval(reverseTick, REVERSE_TICK_MS);
+        reverseActive = true;
+        if (supportsNegativeRate()) {
+            if (reverseTimer !== null) { clearInterval(reverseTimer); reverseTimer = null; reverseLastTs = 0; }
+            video.playbackRate = -REVERSE_RATE;   // 直接负速率倒放
+            return;
+        }
+        try { video.playbackRate = 0; } catch (_) {}  // 冻结时间轴，视频不暂停
+        if (reverseTimer === null) {
+            reverseLastTs = 0;
+            reverseTimer = setInterval(reverseTick, REVERSE_TICK_MS);
+        }
     }
 
+    // 兜底模式：时间轴已冻结，按精确 3 倍向后 seek
     function reverseTick() {
         const now = Date.now();
         if (!reverseLastTs) { reverseLastTs = now; return; }
         const dt = Math.min((now - reverseLastTs) / 1000, 0.5);
         reverseLastTs = now;
-        if (video.paused) return;                 // 用户主动暂停时不倒放
+        if (!playing) return;                     // 用户主动暂停时不倒放
         const dur = video.duration;
         if (!isFinite(dur) || dur <= 0) return;
-        let t = video.currentTime - (REVERSE_RATE + 1) * dt;
+        let t = video.currentTime - REVERSE_RATE * dt;
         if (t <= 0) t = Math.max(0, dur - 0.2);   // 倒到开头则回到结尾，持续倒放
         try { video.currentTime = t; } catch (_) {}
     }
+
+    // 原生倒放走到视频开头时浏览器会停下，跳回结尾保持连续倒放
+    video.addEventListener('timeupdate', () => {
+        if (!reverseActive || !nativeReverse || !playing) return;
+        if (video.currentTime > 0.15) return;
+        const dur = video.duration;
+        if (!isFinite(dur) || dur <= 0) return;
+        try { video.currentTime = Math.max(0, dur - 0.2); } catch (_) {}
+        video.play().catch(() => {});
+    });
 
     function applyPagePlayback() {
         if (videos.length === 0) { stopReverse(); return; }
@@ -423,7 +461,6 @@
         if (currentPage === 0) {
             // 第一页（信息页）：永远 -3 倍速倒放
             fastSpeed = false;
-            video.playbackRate = 1;   // 正向 1x，由 reverseTick 多退的 3x 抵消
             startReverse();
         } else {
             // 第二页（主视频页）/ 第三页（设置页）：
