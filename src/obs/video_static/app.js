@@ -389,20 +389,20 @@
         clearInterval(effectTimer);
         if (videos.length === 0) return;
 
+        // 所有页面都保持播放状态，不暂停视频（保活机制）
         if (currentPage === 0) {
-            // Info page: 5x rewind via manual seek
+            // Info page: 保持正常播放
             video.playbackRate = 1;
-            effectTimer = setInterval(() => {
-                if (currentPage !== 0 || videos.length === 0) { clearInterval(effectTimer); return; }
-                video.currentTime = Math.max(0, video.currentTime - 0.5);
-                if (video.currentTime <= 0) video.pause();
-            }, 100);
         } else if (currentPage === 2) {
-            // 第三页（设置页）：默认 2x 播放，长按 5x 覆盖
-            video.playbackRate = fastSpeed ? 5 : 2;
+            // 第三页（设置页）：默认 1x 播放，长按 5x 覆盖
+            video.playbackRate = fastSpeed ? 5 : 1;
         } else {
             // 第二页（主视频页）：默认 1x 播放，长按 5x 覆盖
             video.playbackRate = fastSpeed ? 5 : 1;
+        }
+        // 确保视频保持播放状态
+        if (playing) {
+            video.play().catch(() => {});
         }
     }
 
@@ -1232,9 +1232,6 @@
             video.currentTime = video._pendingSeek;
         }
         video._pendingSeek = undefined;
-        // 显示进度条
-        seekTrack && seekTrack.classList.remove('hidden');
-        seekLabel && seekLabel.classList.remove('hidden');
     });
 
     // 缓冲完成后自动播放（playing=true 时才触发）
