@@ -17,3 +17,16 @@
 
 4. **Terminal**:
    - Toggle terminal: `` Ctrl + ` ``
+
+5. **Emmet 快速补全（HTML/CSS）**:
+   - 输入 `div.video-container` 按 `Tab` → 展开为 `<div class="video-container"></div>`
+   - 输入 `ul>li*3` 按 `Tab` → 一次生成 3 个 li
+   - 输入 `m10` 按 `Tab`（CSS 文件中）→ 展开为 `margin: 10px;`
+
+6. **调试视频播放速率（本项目 -3x 倒放）**:
+   - Chrome DevTools `Console` 里直接执行 `document.querySelector('video').playbackRate`
+     查看当前速率；`= -3` 会让 Chrome 抛 `NotSupportedError`（故代码走兜底 seek）。
+   - 想看原生负速率效果：Safari → 开发 → 显示网页检查器 → 控制台执行
+     `document.querySelector('video').playbackRate = -3`。
+   - 快速重跑集成测试：终端按 `Cmd + P` 输入 `task` 可跑 Task，或直接
+     `python3 test_integration.py`（项目根目录）。
