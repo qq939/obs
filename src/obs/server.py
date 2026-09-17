@@ -46,6 +46,23 @@ SESSION_LOCK = threading.Lock()
 video_tasks: Dict[str, dict] = {}
 TASK_LOCK = threading.Lock()
 
+# 全局性能参数（使用位置见行内注释）
+# MAX_UPLOAD_SIZE: 上传大小限制（None 表示无限制）
+MAX_UPLOAD_SIZE = None
+# UPLOAD_CHUNK_SIZE: 表单上传读取分片大小（10MB）
+UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024
+# RANGE_DOWNLOAD_CHUNK_SIZE: Range 分片下载时的单次读取分片大小（10MB）
+RANGE_DOWNLOAD_CHUNK_SIZE = 10 * 1024 * 1024
+# STREAM_DOWNLOAD_CHUNK_SIZE: 完整流式下载分片大小（40MB）
+STREAM_DOWNLOAD_CHUNK_SIZE = 40 * 1024 * 1024
+# UVICORN 运行参数
+UVICORN_CONFIG = {
+    "limit_concurrency": 1000,
+    "limit_max_requests": 10000,
+    "timeout_keep_alive": 300,
+    "backlog": 2048,
+}
+
 def get_upload_dir() -> str:
     return os.path.abspath(UPLOAD_DIR)
 
@@ -60,8 +77,8 @@ def file_sha256(path: str) -> str:
     return h.hexdigest()
 
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
-    raw = f"{filename}:{size}:{hash_algo}:{file_hash}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16] + "-" + str(int(datetime.now().timestamp()))
+    safe_name = filename.replace("/", "_")
+    return f"{hash_algo}:{file_hash}:{size}:{safe_name}"
 
 def run_ffmpeg(args: List[str], cwd: Optional[str] = None, timeout: int = 600) -> str:
     """运行 ffmpeg 命令，返回 stderr 输出"""
@@ -133,12 +150,12 @@ async def generate_hls_background(filename: str):
     """后台生成 HLS"""
     with TASK_LOCK:
         video_tasks[filename] = {"status": "processing", "progress": 0}
-    
+
     try:
         src_path = os.path.join(UPLOAD_DIR, filename)
         hls_dir = os.path.join(HLS_DIR, filename)
         os.makedirs(hls_dir, exist_ok=True)
-        
+
         # 生成 HLS
         args = [
             "-y", "-i", src_path,
@@ -152,17 +169,17 @@ async def generate_hls_background(filename: str):
             "-hls_segment_filename", os.path.join(hls_dir, "segment_%03d.ts"),
             os.path.join(hls_dir, "index.m3u8")
         ]
-        
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(video_executor, lambda: run_ffmpeg(args))
-        
+
         # 写入 meta.json
         with open(os.path.join(hls_dir, "meta.json"), "w") as f:
             json.dump({
                 "version": HLS_GEN_VERSION,
                 "size": os.path.getsize(src_path)
             }, f)
-        
+
         with TASK_LOCK:
             video_tasks[filename] = {"status": "ready", "progress": 100}
     except Exception as e:
@@ -181,162 +198,547 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="OBS", lifespan=lifespan)
 
 # ============================================================================
-# 静态文件和主页
+# WebSocket 连接管理器（公告板）
+# ============================================================================
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str, exclude: Optional[WebSocket] = None):
+        for connection in self.active_connections:
+            if connection != exclude:
+                try:
+                    await connection.send_text(message)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()
+
+async def get_notice():
+    global NOTICE_CONTENT
+    return NOTICE_CONTENT
+
+async def update_notice(content: str):
+    global NOTICE_CONTENT
+    async with NOTICE_LOCK:
+        NOTICE_CONTENT = content
+    return True
+
+# ============================================================================
+# WebSocket 和公告板路由
+# ============================================================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        current_content = await get_notice()
+        await websocket.send_text(json.dumps({"type": "init", "content": current_content}))
+
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                msg_type = message.get("type")
+
+                if msg_type == "update":
+                    new_content = message.get("content", "")
+                    await update_notice(new_content)
+                    broadcast_msg = json.dumps({"type": "update", "content": new_content})
+                    await manager.broadcast(broadcast_msg, exclude=websocket)
+
+                elif msg_type == "reset":
+                    default_text = ""
+                    await update_notice(default_text)
+                    broadcast_msg = json.dumps({"type": "update", "content": default_text})
+                    await manager.broadcast(broadcast_msg)
+
+            except json.JSONDecodeError:
+                pass
+            except Exception as e:
+                print(f"Error: {e}", flush=True)
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        manager.disconnect(websocket)
+
+@app.get("/notice")
+async def get_notice_http():
+    content = await get_notice()
+    return {"content": content}
+
+@app.post("/notice")
+async def update_notice_http(request: Request):
+    try:
+        data = await request.json()
+        if 'content' in data:
+            await update_notice(data['content'])
+            return {"status": "ok"}
+        else:
+            raise HTTPException(status_code=400, detail="Missing content")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/save_notice")
+async def save_notice_file(request: Request):
+    content = await get_notice()
+    if not content:
+        raise HTTPException(status_code=400, detail="Notice is empty")
+
+    filename = datetime.now().strftime("%Y%m%d%H%M%S") + "公告板.txt"
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    save_path = os.path.join(upload_dir, filename)
+
+    try:
+        os.makedirs(upload_dir, exist_ok=True)
+        async with aiofiles.open(save_path, 'w', encoding='utf-8') as f:
+            await f.write(content)
+        return {"status": "ok", "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save notice: {str(e)}")
+
+# ============================================================================
+# 首页（参照版本 b8756f8 的界面）
 # ============================================================================
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
-    chunk_dir = getattr(app.state, "chunk_dir", get_chunk_dir())
-    files = []
-    try:
-        for name in os.listdir(upload_dir):
-            p = os.path.join(upload_dir, name)
-            if os.path.isfile(p) and not name.startswith("."):
-                files.append({
-                    "name": name,
-                    "size": os.path.getsize(p),
-                    "time": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")
-                })
-    except Exception:
-        pass
-    files.sort(key=lambda x: x["time"], reverse=True)
-    total_size = sum(f["size"] for f in files)
-    
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>文件托管服务</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }}
-        .container {{ max-width: 900px; margin: 0 auto; }}
-        h1 {{ color: #333; margin-bottom: 20px; text-align: center; }}
-        .upload-area {{ background: white; border-radius: 8px; padding: 40px; text-align: center; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        .upload-area.dragover {{ border: 2px dashed #007bff; background: #f0f7ff; }}
-        .file-input {{ display: none; }}
-        .upload-btn {{ background: #007bff; color: white; border: none; padding: 12px 32px; border-radius: 6px; cursor: pointer; font-size: 16px; }}
-        .upload-btn:hover {{ background: #0056b3; }}
-        .progress-bar {{ width: 100%; height: 4px; background: #e0e0e0; border-radius: 2px; margin-top: 16px; display: none; }}
-        .progress-fill {{ height: 100%; background: #007bff; border-radius: 2px; width: 0%; transition: width 0.3s; }}
-        .stats {{ text-align: center; margin-bottom: 20px; color: #666; font-size: 14px; }}
-        .file-list {{ background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        .file-item {{ padding: 16px; border-bottom: 1px solid #eee; display: flex; align-items: center; }}
-        .file-item:last-child {{ border-bottom: none; }}
-        .file-icon {{ width: 40px; height: 40px; background: #e3f2fd; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-right: 16px; font-size: 20px; }}
-        .file-info {{ flex: 1; }}
-        .file-name {{ font-weight: 500; color: #333; word-break: break-all; }}
-        .file-meta {{ font-size: 12px; color: #999; margin-top: 4px; }}
-        .file-actions {{ display: flex; gap: 8px; }}
-        .action-btn {{ padding: 6px 12px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer; font-size: 12px; }}
-        .action-btn:hover {{ background: #f5f5f5; }}
-        .nav {{ display: flex; gap: 20px; margin-bottom: 20px; justify-content: center; }}
-        .nav a {{ padding: 10px 20px; background: white; border-radius: 6px; text-decoration: none; color: #333; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        .nav a:hover {{ background: #007bff; color: white; }}
-        .empty {{ text-align: center; padding: 60px; color: #999; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📦 文件托管服务</h1>
+async def homepage(request: Request, sort: str = Query("time", enum=["time", "ext"])):
+    files_list = []
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    if os.path.exists(upload_dir):
+        try:
+            raw_files = [f for f in os.listdir(upload_dir) if not f.startswith('.')]
+
+            if sort == 'ext':
+                raw_files.sort(key=lambda x: (os.path.splitext(x)[1].lower(), x))
+            else:
+                raw_files.sort(key=lambda x: os.path.getmtime(os.path.join(upload_dir, x)), reverse=True)
+
+            files_list = raw_files
+        except Exception:
+            files_list = []
+
+    time_active = "active" if sort != 'ext' else ""
+    ext_active = "active" if sort == 'ext' else ""
+
+    host = "obs.dimond.top"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>文件托管服务</title>
+        <style>
+            body {{ font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }}
+            h1 {{ color: #333; }}
+            ul {{ list-style: none; padding: 0; }}
+            li {{ padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }}
+            a {{ text-decoration: none; color: #007bff; }}
+            a:hover {{ text-decoration: underline; }}
+            .empty {{ color: #999; font-style: italic; }}
+            .actions {{ display: flex; gap: 10px; }}
+            .btn-delete {{ cursor: pointer; background: none; border: none; font-size: 1.2em; }}
+            .btn-delete:hover {{ opacity: 0.7; }}
+            .sort-controls {{ margin-bottom: 20px; }}
+            .sort-controls a {{ margin-right: 15px; font-weight: bold; }}
+            .sort-controls a.active {{ color: #333; cursor: default; text-decoration: none; }}
+
+            /* 公告板样式 */
+            .notice-board {{
+                margin: 20px 0;
+                padding: 10px;
+                border: 1px solid #eee;
+                background: #f9f9f9;
+                position: relative;
+            }}
+            .notice-board textarea {{
+                width: 100%;
+                height: 150px;
+                border: 1px solid #ccc;
+                border-bottom: none;
+                resize: vertical;
+                font-family: monospace;
+                box-sizing: border-box;
+            }}
+            .notice-copy-btn {{
+                display: block;
+                margin-top: 0;
+                padding: 4px 12px;
+                border: 1px solid #ccc;
+                border-top: none;
+                background: #81D8D0;
+                color: #fff;
+                cursor: pointer;
+                flex: 20;
+            }}
+            .notice-copy-btn:hover {{ background: #73cbc3; }}
+            .notice-save-btn {{
+                display: block;
+                padding: 4px 12px;
+                border: 1px solid #ccc;
+                border-top: none;
+                background: #fff;
+                color: #333;
+                cursor: pointer;
+                flex: 1;
+            }}
+            .notice-save-btn:hover {{ background: #f2f2f2; }}
+            .notice-copy-bar {{
+                position: static;
+                padding: 0;
+                display: flex;
+                gap: 6px;
+            }}
+            .btn-close-notice {{
+                position: absolute;
+                top: 5px;
+                right: 5px;
+                border: none;
+                background: transparent;
+                cursor: pointer;
+                font-size: 16px;
+                color: #999;
+            }}
+            .btn-close-notice:hover {{ color: #333; }}
+            #ws-status-indicator {{
+                position: absolute;
+                top: 5px;
+                left: 5px;
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                background-color: red;
+                border: 1px solid #ccc;
+            }}
+            .notice-tools {{
+                position: absolute;
+                bottom: 8px;
+                right: 8px;
+                z-index: 2;
+            }}
+            .notice-tools button {{
+                cursor: pointer;
+                background: none;
+                border: none;
+                font-size: 16px;
+                color: #999;
+            }}
+            .notice-tools button:hover {{ color: #333; }}
+
+            /* 导航 */
+            .nav {{ margin: 20px 0; }}
+            .nav a {{ margin-right: 15px; padding: 8px 16px; background: #007bff; color: white; border-radius: 4px; text-decoration: none; }}
+            .nav a:hover {{ background: #0056b3; }}
+        </style>
+        <script>
+            const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024;
+
+            async function sha256Hex(file) {{
+                const buf = await file.arrayBuffer();
+                const digest = await crypto.subtle.digest("SHA-256", buf);
+                const arr = Array.from(new Uint8Array(digest));
+                return arr.map(b => b.toString(16).padStart(2, "0")).join("");
+            }}
+
+            async function deleteFile(filename) {{
+                if (!confirm(`确定要删除 ${{filename}} 吗？`)) return;
+                try {{
+                    const response = await fetch(`/${{filename}}`, {{ method: 'DELETE' }});
+                    if (response.ok) {{
+                        window.location.reload();
+                    }} else {{
+                        alert('删除失败');
+                    }}
+                }} catch (e) {{
+                    alert('删除出错: ' + e);
+                }}
+            }}
+
+            async function chunkedUpload(inputEl) {{
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {{
+                    alert('请先选择文件');
+                    return;
+                }}
+                const filename = file.name;
+                const total = file.size;
+                let offset = 0;
+                try {{
+                    while (offset < total) {{
+                        const end = Math.min(offset + CHUNK_SIZE_BROWSER, total);
+                        const blob = file.slice(offset, end);
+                        const resp = await fetch(`/${{encodeURIComponent(filename)}}`, {{
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        }});
+                        if (resp.status !== 201) {{
+                            const text = await resp.text();
+                            throw new Error(`分片上传失败: ${{resp.status}} ${{text}}`);
+                        }}
+                        offset = end;
+                    }}
+                    alert('分片上传成功');
+                    window.location.reload();
+                }} catch (err) {{
+                    alert('分片上传出错: ' + err.message);
+                }}
+            }}
+
+            async function resumableUpload(inputEl) {{
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {{
+                    alert('请先选择文件');
+                    return;
+                }}
+                const filename = file.name;
+                const size = file.size;
+                const chunkSize = CHUNK_SIZE_BROWSER;
+                const totalChunks = Math.ceil(size / chunkSize);
+                const hashAlgo = "sha256";
+                const hash = await sha256Hex(file);
+                let resp = await fetch('/upload/init', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ filename, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks }})
+                }});
+                if (!resp.ok) {{
+                    const t = await resp.text();
+                    alert('初始化失败: ' + t);
+                    return;
+                }}
+                const info = await resp.json();
+                if (info.skip) {{
+                    alert('文件已存在，已秒传：' + info.url);
+                    window.location.reload();
+                    return;
+                }}
+                const uploadId = info.upload_id;
+                const uploaded = new Set(info.uploaded || []);
+                for (let i = 0; i < totalChunks; i++) {{
+                    if (uploaded.has(i)) continue;
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, size);
+                    const blob = file.slice(start, end);
+                    let ok = false;
+                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {{
+                        const r = await fetch(`/upload/chunk/${{encodeURIComponent(uploadId)}}/${{i}}`, {{
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        }});
+                        ok = r.status === 201;
+                    }}
+                    if (!ok) {{
+                        alert('分片上传失败，无法完成：' + i);
+                        return;
+                    }}
+                }}
+                const c = await fetch(`/upload/complete/${{encodeURIComponent(uploadId)}}`, {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ filename, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash }})
+                }});
+                if (c.ok) {{
+                    const url = await c.text();
+                    alert('上传完成：' + url);
+                    window.location.reload();
+                }} else {{
+                    const tx = await c.text();
+                    alert('合并失败：' + tx);
+                }}
+            }}
+
+            async function saveNotice() {{
+                try {{
+                    const response = await fetch('/save_notice', {{ method: 'POST' }});
+                    if (response.ok) {{
+                        const data = await response.json();
+                        alert(`公告已保存为: ${{data.filename}}`);
+                        window.location.reload();
+                    }} else {{
+                        const err = await response.json();
+                        alert('保存失败: ' + (err.detail || '未知错误'));
+                    }}
+                }} catch (e) {{
+                    alert('保存出错: ' + e);
+                }}
+            }}
+
+            function copyNoticeToClipboard() {{
+                try {{
+                    const contentEl = document.getElementById('notice-content');
+                    const content = contentEl.value || '';
+                    if (navigator.clipboard && navigator.clipboard.writeText) {{
+                        navigator.clipboard.writeText(content).catch(() => legacyCopy(contentEl, content));
+                    }} else {{
+                        legacyCopy(contentEl, content);
+                    }}
+                }} catch (e) {{
+                    alert('复制出错: ' + e);
+                }}
+            }}
+
+            function legacyCopy(el, text) {{
+                try {{
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.top = '-1000px';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (!ok) alert('复制失败，请手动选择文本后复制');
+                }} catch (err) {{
+                    alert('复制失败，请手动选择文本后复制');
+                }}
+            }}
+
+            document.addEventListener('DOMContentLoaded', () => {{
+                const noticeArea = document.getElementById('notice-content');
+                const statusIndicator = document.getElementById('ws-status-indicator');
+
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${{wsProtocol}}//${{window.location.host}}/ws`;
+
+                let ws;
+                let isConnected = false;
+
+                function connect() {{
+                    statusIndicator.style.backgroundColor = 'yellow';
+                    ws = new WebSocket(wsUrl);
+
+                    ws.onopen = () => {{
+                        isConnected = true;
+                        statusIndicator.style.backgroundColor = 'green';
+                    }};
+
+                    ws.onmessage = (event) => {{
+                        try {{
+                            const data = JSON.parse(event.data);
+                            if (data.type === 'init' || data.type === 'update') {{
+                                if (noticeArea.value !== data.content) {{
+                                    const start = noticeArea.selectionStart;
+                                    const end = noticeArea.selectionEnd;
+                                    noticeArea.value = data.content;
+                                    if (document.activeElement === noticeArea) {{
+                                        noticeArea.setSelectionRange(start, end);
+                                    }}
+                                }}
+                            }}
+                        }} catch (e) {{}}
+                    }};
+
+                    ws.onclose = () => {{
+                        isConnected = false;
+                        statusIndicator.style.backgroundColor = 'red';
+                        setTimeout(connect, 3000);
+                    }};
+
+                    ws.onerror = () => {{
+                        ws.close();
+                    }};
+                }}
+
+                connect();
+
+                noticeArea.addEventListener('input', () => {{
+                    if (ws && isConnected) {{
+                        ws.send(JSON.stringify({{
+                            type: 'update',
+                            content: noticeArea.value
+                        }}));
+                    }}
+                }});
+
+                window.resetNotice = function() {{
+                    if (ws && isConnected) {{
+                        ws.send(JSON.stringify({{ type: 'reset' }}));
+                    }} else {{
+                        alert('未连接到服务器，无法重置');
+                    }}
+                }};
+            }});
+        </script>
+    </head>
+    <body>
+        <!-- 导航 -->
         <div class="nav">
-            <a href="/">📁 文件管理</a>
+            <a href="/">📁 文件托管</a>
             <a href="/video">🎬 视频播放</a>
         </div>
-        <div class="upload-area" id="uploadArea">
-            <div>拖拽文件到此处，或</div>
-            <input type="file" class="file-input" id="fileInput" multiple>
-            <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
-            <div class="progress-bar" id="progressBar">
-                <div class="progress-fill" id="progressFill"></div>
+
+        <!-- 公告板模块 -->
+        <div class="notice-board">
+            <div id="ws-status-indicator" title="Connecting..."></div>
+            <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
+            <textarea id="notice-content" placeholder="公告板..."></textarea>
+            <div class="notice-copy-bar">
+                <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
+                <button class="notice-save-btn" onclick="saveNotice()" title="保存公告">保存</button>
             </div>
         </div>
-        <div class="stats">共 {len(files)} 个文件，总计 {total_size / 1024 / 1024:.2f} MB</div>
-        <div class="file-list">
-            {"".join(f'''
-            <div class="file-item" data-name="{f["name"]}">
-                <div class="file-icon">📄</div>
-                <div class="file-info">
-                    <div class="file-name">{f["name"]}</div>
-                    <div class="file-meta">{f["time"]} · {f["size"] / 1024:.1f} KB</div>
-                </div>
-                <div class="file-actions">
-                    <button class="action-btn" onclick="copyLink('{quote(f["name"])}')">复制链接</button>
-                    <button class="action-btn" onclick="deleteFile('{quote(f["name"])}')">删除</button>
-                </div>
+
+        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+
+        <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
+            <form action="/" method="post" enctype="multipart/form-data">
+                <input type="file" name="file" required>
+                <input type="submit" value="上传">
+            </form>
+            <div style="margin-top:8px;">
+                <input type="file" id="chunkFile">
+                <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
             </div>
-            ''' for f in files) if files else '<div class="empty">暂无文件，上传一个吧</div>'}
+            <div style="margin-top:8px;">
+                <input type="file" id="resumeFile">
+                <button onclick="resumableUpload(document.getElementById('resumeFile'))">断点续传(10MB+秒传)</button>
+            </div>
         </div>
-    </div>
-    <script>
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const progressBar = document.getElementById('progressBar');
-        const progressFill = document.getElementById('progressFill');
 
-        uploadArea.addEventListener('dragover', e => {{ e.preventDefault(); uploadArea.classList.add('dragover'); }});
-        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
-        uploadArea.addEventListener('drop', e => {{
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            uploadFiles(e.dataTransfer.files);
-        }});
-        fileInput.addEventListener('change', () => uploadFiles(fileInput.files));
+        <div class="sort-controls">
+            排序方式:
+            <a href="?sort=time" class="{time_active}">按时间 (最新)</a>
+            <a href="?sort=ext" class="{ext_active}">按扩展名 (A-Z)</a>
+        </div>
 
-        async function uploadFiles(files) {{
-            for (const file of files) {{
-                await uploadFile(file);
-            }}
-        }}
+        <ul>
+    """
 
-        async function uploadFile(file) {{
-            progressBar.style.display = 'block';
-            progressFill.style.width = '0%';
+    html = html.replace("{time_active}", time_active).replace("{ext_active}", ext_active)
 
-            const formData = new FormData();
-            formData.append('file', file);
+    if not files_list:
+        html += '<li class="empty">暂无文件</li>'
+    else:
+        for f in files_list:
+            file_url = f"http://{host}/{f}"
+            html += f'''
+            <li>
+                <a href="{file_url}" target="_blank">{f}</a>
+                <span class="actions">
+                    <a href="{file_url}" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
+                </span>
+            </li>
+            '''
 
-            const xhr = new XMLHttpRequest();
-            xhr.upload.onprogress = e => {{
-                if (e.lengthComputable) {{
-                    progressFill.style.width = (e.loaded / e.total * 100) + '%';
-                }}
-            }};
-
-            await new Promise((resolve, reject) => {{
-                xhr.onload = () => {{
-                    progressBar.style.display = 'none';
-                    if (xhr.status === 201) {{
-                        location.reload();
-                    }} else {{
-                        alert('上传失败: ' + xhr.responseText);
-                    }}
-                    resolve();
-                }};
-                xhr.onerror = () => {{ reject(); }};
-                xhr.open('POST', '/upload');
-                xhr.send(formData);
-            }});
-        }}
-
-        async function copyLink(name) {{
-            const url = location.origin + '/' + name;
-            await navigator.clipboard.writeText(url);
-            alert('链接已复制');
-        }}
-
-        async function deleteFile(name) {{
-            if (!confirm('确定删除 ' + name + '？')) return;
-            const resp = await fetch('/delete/' + name, {{ method: 'DELETE' }});
-            if (resp.ok) location.reload();
-            else alert('删除失败');
-        }}
-    </script>
-</body>
-</html>"""
-    return html
+    html += """
+        </ul>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
 # ============================================================================
 # 视频页面
@@ -347,7 +749,7 @@ async def video_page():
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     videos = []
     VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
-    
+
     try:
         for name in os.listdir(upload_dir):
             ext = os.path.splitext(name)[1].lower()
@@ -361,9 +763,9 @@ async def video_page():
                 })
     except Exception:
         pass
-    
+
     videos.sort(key=lambda x: x["time"], reverse=True)
-    
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -398,7 +800,10 @@ async def video_page():
             <a href="/video" class="active">🎬 视频播放</a>
         </div>
         <div class="video-grid">
-            {"".join(f'''
+"""
+
+    for f in videos:
+        html += f'''
             <div class="video-card">
                 <div class="video-thumb" onclick="playVideo('{quote(f["name"])}', {str(f["has_hls"]).lower()})">▶️</div>
                 <div class="video-info">
@@ -406,43 +811,46 @@ async def video_page():
                     <div class="video-meta">{f["time"]} · {f["size"] / 1024 / 1024:.1f} MB</div>
                 </div>
             </div>
-            ''' for f in videos) if videos else '<div class="empty">暂无视频</div>'}
-        </div>
+        '''
+
+    if not videos:
+        html += '<div class="empty">暂无视频</div>'
+
+    html += """        </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
-        function playVideo(name, hasHls) {{
+        function playVideo(name, hasHls) {
             const url = '/video/play/' + name;
             const win = window.open('', '_blank', 'width=1280,height=720');
-            if (hasHls) {{
+            if (hasHls) {
                 win.document.write(`
                     <video id="video" controls style="width:100%;height:100%;background:black;" autoplay></video>
                     <script>
                         fetch('/video/hls/' + name + '/index.m3u8')
                             .then(r => r.text())
-                            .then(hlsContent => {{
-                                if (Hls.isSupported()) {{
+                            .then(hlsContent => {
+                                if (Hls.isSupported()) {
                                     const hls = new Hls();
                                     hls.loadSource(URL.createObjectURL(new Blob([hlsContent])));
                                     hls.attachMedia(document.getElementById('video'));
-                                }} else {{
+                                } else {
                                     document.getElementById('video').src = '/video/play/' + name;
-                                }}
-                            }});
+                                }
+                            });
                     </script>
                 `);
-            }} else {{
+            } else {
                 win.document.write('<video src="' + url + '" controls autoplay style="width:100%;height:100%;background:black;"></video>');
-            }}
-        }}
+            }
+        }
     </script>
 </body>
 </html>"""
-    return html
+    return HTMLResponse(content=html)
 
 @app.get("/video/play/{filename}")
 async def video_play(filename: str):
-    """直接播放视频（不支持 Range 请求时降级）"""
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, filename)
     if not os.path.exists(file_path):
@@ -451,7 +859,6 @@ async def video_play(filename: str):
 
 @app.get("/video/hls/{filename}/{path:path}")
 async def video_hls(filename: str, path: str):
-    """HLS 分片流"""
     hls_dir = os.path.join(HLS_DIR, filename)
     file_path = os.path.join(hls_dir, path)
     if not os.path.exists(file_path):
@@ -463,11 +870,10 @@ async def video_hls(filename: str, path: str):
 
 @app.get("/video/api/list")
 async def video_list():
-    """获取视频列表"""
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     videos = []
     VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
-    
+
     try:
         for name in os.listdir(upload_dir):
             ext = os.path.splitext(name)[1].lower()
@@ -481,70 +887,109 @@ async def video_list():
                 })
     except Exception:
         pass
-    
+
     return JSONResponse({"videos": videos})
 
 @app.post("/video/api/generate-hls/{filename}")
 async def generate_hls(filename: str):
-    """触发 HLS 生成"""
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="视频不存在")
-    
+
     if hls_exists(filename):
         return JSONResponse({"status": "ready", "message": "HLS 已存在"})
-    
+
     asyncio.create_task(generate_hls_background(filename))
     return JSONResponse({"status": "processing", "message": "HLS 生成中"})
 
 @app.get("/video/api/status/{filename}")
 async def video_status(filename: str):
-    """查询视频处理状态"""
     with TASK_LOCK:
         task = video_tasks.get(filename, {"status": "not_found"})
     return JSONResponse(task)
 
 # ============================================================================
-# 文件上传接口
+# 文件上传接口（表单上传、curl 上传）
 # ============================================================================
 
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    filename = file.filename or "unnamed"
-    safe_name = "".join(c for c in filename if c.isalnum() or c in "._-")
-    dest = os.path.join(upload_dir, safe_name)
-    
+@app.post("/", response_class=HTMLResponse)
+async def upload_file_form(request: Request):
     try:
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        return Response(content="OK", status_code=201)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        form = await request.form()
 
-@app.delete("/delete/{filename}")
+        upload_file = None
+        for key, value in form.items():
+            if hasattr(value, "filename") and hasattr(value, "file"):
+                upload_file = value
+                break
+
+        if not upload_file:
+            raise HTTPException(status_code=422, detail="No file field found")
+
+        filename = upload_file.filename
+        if not filename:
+            raise HTTPException(status_code=400, detail="Filename is empty")
+
+        upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+        save_path = os.path.join(upload_dir, filename)
+
+        os.makedirs(upload_dir, exist_ok=True)
+        async with aiofiles.open(save_path, 'wb') as out_file:
+            total_written = 0
+            while content := await upload_file.read(UPLOAD_CHUNK_SIZE):
+                await out_file.write(content)
+                total_written += len(content)
+                if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件过大")
+
+        return Response(content=f"文件上传成功: http://obs.dimond.top/{filename}", media_type="text/plain", status_code=201)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@app.put("/{filename}")
+async def upload_file_put(filename: str, request: Request):
+    filename = unquote(filename)
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    save_path = os.path.join(upload_dir, filename)
+    try:
+        os.makedirs(upload_dir, exist_ok=True)
+        async with aiofiles.open(save_path, 'wb') as out_file:
+            total_written = 0
+            async for chunk in request.stream():
+                await out_file.write(chunk)
+                total_written += len(chunk)
+                if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件过大")
+
+        file_url = f"http://obs.dimond.top/{filename}"
+        return Response(content=file_url, media_type="text/plain", status_code=201)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+@app.delete("/{filename}")
 async def delete_file(filename: str):
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
+    filename = unquote(filename)
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="文件不存在")
-    try:
-        os.remove(file_path)
-        invalidate_hls(filename)
-        return Response(content="OK")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/download/{filename}")
-async def download_file(filename: str):
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
-    file_path = os.path.join(upload_dir, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(file_path, filename=filename)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        try:
+            os.remove(file_path)
+            invalidate_hls(filename)
+            return Response(content="Deleted", status_code=200)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
 
 # ============================================================================
 # 分片上传接口
@@ -559,15 +1004,15 @@ async def upload_init(request: Request):
     file_hash = data.get("hash")
     total_chunks = int(data.get("total_chunks", 0))
     chunk_size = int(data.get("chunk_size", 0))
-    
+
     if not filename or not size or not file_hash:
         raise HTTPException(status_code=400, detail="缺少必要参数")
-    
+
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     chunk_dir = getattr(app.state, "chunk_dir", get_chunk_dir())
     os.makedirs(upload_dir, exist_ok=True)
     os.makedirs(chunk_dir, exist_ok=True)
-    
+
     final_path = os.path.join(upload_dir, filename)
     if os.path.exists(final_path) and os.path.getsize(final_path) == size:
         if hash_algo == "sha256":
@@ -575,11 +1020,11 @@ async def upload_init(request: Request):
             if existing_hash == file_hash:
                 url = f"http://obs.dimond.top/{filename}"
                 return JSONResponse({"skip": True, "url": url})
-    
+
     upload_id = make_upload_id(filename, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
-    
+
     uploaded = []
     chunk_hashes = {}
     try:
@@ -598,7 +1043,7 @@ async def upload_init(request: Request):
                     pass
     except Exception:
         uploaded = []
-    
+
     with SESSION_LOCK:
         upload_sessions[upload_id] = {
             "chunk_hashes": chunk_hashes,
@@ -608,7 +1053,7 @@ async def upload_init(request: Request):
             "total_chunks": total_chunks,
             "uploaded_chunks": set(uploaded)
         }
-    
+
     return JSONResponse({
         "upload_id": upload_id,
         "uploaded": sorted(uploaded),
@@ -620,17 +1065,17 @@ async def upload_init(request: Request):
 async def upload_chunk(upload_id: str, index: int, request: Request):
     if index < 0:
         raise HTTPException(status_code=400, detail="分片序号非法")
-    
+
     chunk_dir = getattr(app.state, "chunk_dir", get_chunk_dir())
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
     part_path = os.path.join(up_dir, f"{index}.part")
-    
+
     try:
         async with aiofiles.open(part_path, "wb") as f:
             async for chunk in request.stream():
                 await f.write(chunk)
-        
+
         loop = asyncio.get_event_loop()
         loop.run_in_executor(
             hash_executor,
@@ -639,7 +1084,7 @@ async def upload_chunk(upload_id: str, index: int, request: Request):
             index,
             part_path
         )
-        
+
         return Response(content="OK", status_code=201)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"分片写入失败: {str(e)}")
@@ -651,7 +1096,7 @@ def _compute_chunk_hash_background(upload_id: str, index: int, part_path: str):
             while chunk := f.read(1024 * 1024):
                 h.update(chunk)
             chunk_hash = h.hexdigest()
-        
+
         with SESSION_LOCK:
             if upload_id in upload_sessions:
                 session = upload_sessions[upload_id]
@@ -665,7 +1110,7 @@ async def upload_status(upload_id: str):
     with SESSION_LOCK:
         if upload_id not in upload_sessions:
             raise HTTPException(status_code=404, detail="上传会话不存在")
-        
+
         session = upload_sessions[upload_id]
         chunk_hashes = []
         for i in range(session["total_chunks"]):
@@ -673,7 +1118,7 @@ async def upload_status(upload_id: str):
                 chunk_hashes.append(session["chunk_hashes"][i])
             else:
                 chunk_hashes.append(None)
-        
+
         return JSONResponse({
             "upload_id": upload_id,
             "total_chunks": session["total_chunks"],
@@ -691,21 +1136,21 @@ async def upload_complete(upload_id: str, request: Request):
     total_chunks = int(data.get("total_chunks", 0))
     hash_algo = data.get("hash_algo", "sha256")
     file_hash = data.get("hash")
-    
+
     if not filename or not size or total_chunks <= 0:
         raise HTTPException(status_code=400, detail="缺少必要参数")
-    
+
     chunk_dir = getattr(app.state, "chunk_dir", get_chunk_dir())
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     up_dir = os.path.join(chunk_dir, upload_id)
-    
+
     if not os.path.exists(up_dir):
         raise HTTPException(status_code=404, detail="上传会话不存在")
-    
+
     for i in range(total_chunks):
         if not os.path.exists(os.path.join(up_dir, f"{i}.part")):
             raise HTTPException(status_code=409, detail=f"缺少分片 {i}")
-    
+
     tmp_path = os.path.join(up_dir, "__merge.tmp")
     try:
         async with aiofiles.open(tmp_path, "wb") as out:
@@ -717,16 +1162,16 @@ async def upload_complete(upload_id: str, request: Request):
                         if not chunk:
                             break
                         await out.write(chunk)
-        
+
         real_size = os.path.getsize(tmp_path)
         if real_size != size:
             raise HTTPException(status_code=422, detail="合并后大小不匹配")
-        
+
         ok_hash = None
         if hash_algo == "sha256" and file_hash:
             with SESSION_LOCK:
                 session = upload_sessions.get(upload_id)
-            
+
             if session and len(session["chunk_hashes"]) == total_chunks:
                 all_hashes_match = True
                 for i in range(total_chunks):
@@ -736,25 +1181,25 @@ async def upload_complete(upload_id: str, request: Request):
                         while chunk := f.read(1024 * 1024):
                             h.update(chunk)
                         actual_chunk_hash = h.hexdigest()
-                    
+
                     expected_chunk_hash = session["chunk_hashes"].get(i)
                     if expected_chunk_hash and actual_chunk_hash != expected_chunk_hash:
                         all_hashes_match = False
                         break
-                
+
                 if not all_hashes_match:
                     raise HTTPException(status_code=422, detail="分片哈希校验失败")
-                
+
                 print(f"使用分片哈希快速验证通过（upload_id: {upload_id}）", flush=True)
                 ok_hash = file_hash
             else:
                 ok_hash = file_sha256(tmp_path)
                 if ok_hash != file_hash:
                     raise HTTPException(status_code=422, detail="哈希校验失败")
-        
+
         final_path = os.path.join(upload_dir, filename)
         os.replace(tmp_path, final_path)
-        
+
         try:
             for i in range(total_chunks):
                 os.remove(os.path.join(up_dir, f"{i}.part"))
@@ -763,11 +1208,11 @@ async def upload_complete(upload_id: str, request: Request):
             os.rmdir(up_dir)
         except Exception:
             pass
-        
+
         with SESSION_LOCK:
             if upload_id in upload_sessions:
                 del upload_sessions[upload_id]
-        
+
         url = f"http://obs.dimond.top/{filename}"
         return Response(content=url, status_code=200, media_type="text/plain")
     except HTTPException:
@@ -781,5 +1226,20 @@ async def upload_complete(upload_id: str, request: Request):
 async def health():
     return Response(content="OK")
 
+# ============================================================================
+# 启动服务器
+# ============================================================================
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
+    print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
+    print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}", flush=True)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=PORT,
+        limit_concurrency=UVICORN_CONFIG["limit_concurrency"],
+        limit_max_requests=UVICORN_CONFIG["limit_max_requests"],
+        timeout_keep_alive=UVICORN_CONFIG["timeout_keep_alive"],
+        backlog=UVICORN_CONFIG["backlog"],
+    )

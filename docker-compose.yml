@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile.obs
     container_name: obs
     ports:
-      - "8088:8088"
+      - "80:8088"
     volumes:
       - "${OBS_DIR:-./obs}:/app/obs"
       - "${HLS_DIR:-./obs_shards}:/app/hls"
