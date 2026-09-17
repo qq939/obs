@@ -60,7 +60,7 @@
     let playing = true;
     let random = true;
     let autoplay = true;
-    let playbackSpeed = 1;
+    let playbackSpeed = 3;     // 第三页「播放速度」档位：仅 3x / 5x / 7x，默认 3x
     let currentAbort = null;
     let longPressTimer = null;
     let longPressMoved = false;
@@ -1162,7 +1162,7 @@
 
     viewport.addEventListener('touchend', (e) => {
         if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
-        endFastSpeed();  // 松手恢复 1x 倍速（或用户设置的 playbackSpeed）
+        endFastSpeed();  // 松手恢复用户选定的播放速度（playbackSpeed）
         const t = e.changedTouches[0];
         edgeHintLeft.style.opacity = '0'; edgeHintRight.style.opacity = '0';
         const dy = t.clientY - vertStartY;

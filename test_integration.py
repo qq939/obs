@@ -39,12 +39,12 @@ def setup():
     # 创建测试文件
     with open(TEST_FILE, 'w') as f:
         f.write(f"Test file created at {datetime.now().isoformat()}")
-    print(f"[1/7] 创建测试文件: {TEST_FILE}")
+    print(f"[1/8] 创建测试文件: {TEST_FILE}")
 
 
 def test_homepage():
     """测试首页"""
-    print("\n[2/7] 测试首页...")
+    print("\n[2/8] 测试首页...")
     try:
         resp = requests.get(BASE_URL + "/", timeout=5)
         assert resp.status_code == 200, f"首页返回状态码 {resp.status_code}"
@@ -57,7 +57,7 @@ def test_homepage():
 
 def test_video_page():
     """测试视频页面"""
-    print("\n[3/7] 测试视频页面...")
+    print("\n[3/8] 测试视频页面...")
     try:
         resp = requests.get(BASE_URL + "/video", timeout=5)
         assert resp.status_code == 200, f"视频页面返回状态码 {resp.status_code}"
@@ -70,7 +70,7 @@ def test_video_page():
 
 def test_videos_api():
     """测试视频列表 API"""
-    print("\n[4/7] 测试视频列表 API...")
+    print("\n[4/8] 测试视频列表 API...")
     try:
         resp = requests.get(BASE_URL + "/videos", timeout=5)
         assert resp.status_code == 200, f"视频列表 API 返回状态码 {resp.status_code}"
@@ -89,7 +89,7 @@ def test_videos_api():
 
 def test_video_static_resources():
     """测试视频静态资源"""
-    print("\n[5/7] 测试视频静态资源...")
+    print("\n[5/8] 测试视频静态资源...")
     resources = [
         "/video/style.css",
         "/video/app.js",
@@ -117,7 +117,7 @@ def test_reverse_playback_on_page0():
        第三页「播放速度」UI（playbackSpeed）控制
     5) 倒到开头回到结尾，保持连续倒放
     """
-    print("\n[6/7] 测试第一页 -3 倍速倒放实现...")
+    print("\n[6/8] 测试第一页 -3 倍速倒放实现...")
     try:
         resp = requests.get(BASE_URL + "/video/app.js", timeout=5)
         assert resp.status_code == 200, f"/video/app.js 返回状态码 {resp.status_code}"
@@ -163,9 +163,45 @@ def test_reverse_playback_on_page0():
         raise
 
 
+def test_speed_options_only_357():
+    """
+    测试第三页「播放速度」UI 只保留 3x / 5x / 7x 三档。
+
+    1) /video 页面 speed-options 里只有 3 个 .speed-btn
+    2) data-speed 依次为 3 / 5 / 7（旧的 0.5/0.8/1/1.5/2 已移除）
+    3) 默认档位 3x 带 active 高亮
+    4) app.js 中 playbackSpeed 默认值为 3（与 UI 默认档一致）
+    """
+    print("\n[7/8] 测试播放速度档位只保留 3x/5x/7x...")
+    try:
+        resp = requests.get(BASE_URL + "/video", timeout=5)
+        assert resp.status_code == 200, f"视频页面返回状态码 {resp.status_code}"
+        html = resp.text
+
+        btns = re.findall(r'speed-btn[^>]*data-speed="([^"]+)"', html)
+        assert btns == ["3", "5", "7"], f"播放速度档位应为 3/5/7，实际为 {btns}"
+        print(f"   ✓ 播放速度档位: {btns}")
+
+        for old in ["0.5", "0.8", "1", "1.5", "2"]:
+            assert f'data-speed="{old}"' not in html, f"仍残留旧档位 data-speed=\"{old}\""
+        print("   ✓ 已移除 0.5x/0.8x/1x/1.5x/2x 旧档位")
+
+        assert re.search(r'class="speed-btn active"[^>]*data-speed="3"', html), \
+            "默认档位 3x 未标记 active 高亮"
+        print("   ✓ 默认档位 3x 已高亮")
+
+        js = requests.get(BASE_URL + "/video/app.js", timeout=5).text
+        assert re.search(r"let\s+playbackSpeed\s*=\s*3\b", js), \
+            "app.js 中 playbackSpeed 默认值不是 3"
+        print("   ✓ playbackSpeed 默认值为 3，与 UI 默认档一致")
+    except Exception as e:
+        print(f"   ✗ 播放速度档位测试失败: {e}")
+        raise
+
+
 def test_upload():
     """测试文件上传"""
-    print("\n[7/7] 测试文件上传...")
+    print("\n[8/8] 测试文件上传...")
     try:
         with open(TEST_FILE, 'rb') as f:
             resp = requests.put(
@@ -204,6 +240,7 @@ def main():
         test_videos_api()
         test_video_static_resources()
         test_reverse_playback_on_page0()
+        test_speed_options_only_357()
         test_upload()
         print("\n" + "=" * 60)
         print("所有测试通过!")
