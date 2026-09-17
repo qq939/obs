@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Mount, Route
 from dotenv import load_dotenv
 import uvicorn
 import aiofiles
@@ -79,6 +80,34 @@ def file_sha256(path: str) -> str:
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
     safe_name = filename.replace("/", "_")
     return f"{hash_algo}:{file_hash}:{size}:{safe_name}"
+
+# 视频相关辅助函数
+VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
+
+def list_video_files() -> List[dict]:
+    """列出所有视频文件"""
+    upload_dir = get_upload_dir()
+    videos = []
+    try:
+        for name in os.listdir(upload_dir):
+            ext = os.path.splitext(name)[1].lower()
+            if ext in VIDEO_EXTS:
+                p = os.path.join(upload_dir, name)
+                if os.path.isfile(p):
+                    videos.append({
+                        "name": name,
+                        "size": os.path.getsize(p),
+                        "time": datetime.fromtimestamp(os.path.getmtime(p)).isoformat(),
+                        "has_hls": hls_exists(name)
+                    })
+    except Exception:
+        pass
+    videos.sort(key=lambda x: x["time"], reverse=True)
+    return videos
+
+def safe_name(name: str) -> str:
+    """安全处理文件名"""
+    return "".join(c for c in name if c.isalnum() or c in "._-")
 
 def run_ffmpeg(args: List[str], cwd: Optional[str] = None, timeout: int = 600) -> str:
     """运行 ffmpeg 命令，返回 stderr 输出"""
@@ -435,11 +464,6 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 color: #999;
             }}
             .notice-tools button:hover {{ color: #333; }}
-
-            /* 导航 */
-            .nav {{ margin: 20px 0; }}
-            .nav a {{ margin-right: 15px; padding: 8px 16px; background: #007bff; color: white; border-radius: 4px; text-decoration: none; }}
-            .nav a:hover {{ background: #0056b3; }}
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024;
@@ -673,12 +697,6 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         </script>
     </head>
     <body>
-        <!-- 导航 -->
-        <div class="nav">
-            <a href="/">📁 文件托管</a>
-            <a href="/video">🎬 视频播放</a>
-        </div>
-
         <!-- 公告板模块 -->
         <div class="notice-board">
             <div id="ws-status-indicator" title="Connecting..."></div>
@@ -741,113 +759,52 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
     return HTMLResponse(content=html)
 
 # ============================================================================
-# 视频页面
+# 视频页面（使用 obs-video-app 的 UI）
 # ============================================================================
 
-@app.get("/video", response_class=HTMLResponse)
+# 获取 video_static 目录的绝对路径
+def get_video_static_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_static")
+
+@app.get("/video")
 async def video_page():
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
-    videos = []
-    VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
+    """视频页面 - 使用静态文件"""
+    static_dir = get_video_static_dir()
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Video page not found</h1>", status_code=404)
 
-    try:
-        for name in os.listdir(upload_dir):
-            ext = os.path.splitext(name)[1].lower()
-            if ext in VIDEO_EXTS:
-                p = os.path.join(upload_dir, name)
-                videos.append({
-                    "name": name,
-                    "size": os.path.getsize(p),
-                    "time": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M"),
-                    "has_hls": hls_exists(name)
-                })
-    except Exception:
-        pass
+@app.get("/video/style.css")
+async def video_css():
+    """视频页面 CSS"""
+    static_dir = get_video_static_dir()
+    css_path = os.path.join(static_dir, "style.css")
+    if os.path.exists(css_path):
+        with open(css_path, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="text/css")
+    return Response(content="Not found", status_code=404)
 
-    videos.sort(key=lambda x: x["time"], reverse=True)
+@app.get("/video/app.js")
+async def video_js():
+    """视频页面 JS"""
+    static_dir = get_video_static_dir()
+    js_path = os.path.join(static_dir, "app.js")
+    if os.path.exists(js_path):
+        with open(js_path, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="application/javascript")
+    return Response(content="Not found", status_code=404)
 
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>视频播放</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; min-height: 100vh; }}
-        .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
-        h1 {{ text-align: center; margin-bottom: 20px; }}
-        .nav {{ display: flex; gap: 20px; margin-bottom: 20px; justify-content: center; }}
-        .nav a {{ padding: 10px 20px; background: #16213e; border-radius: 6px; text-decoration: none; color: white; }}
-        .nav a:hover {{ background: #0f3460; }}
-        .nav a.active {{ background: #e94560; }}
-        .video-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }}
-        .video-card {{ background: #16213e; border-radius: 12px; overflow: hidden; transition: transform 0.2s; }}
-        .video-card:hover {{ transform: translateY(-4px); }}
-        .video-thumb {{ width: 100%; aspect-ratio: 16/9; background: #0f3460; display: flex; align-items: center; justify-content: center; font-size: 48px; cursor: pointer; }}
-        .video-info {{ padding: 16px; }}
-        .video-name {{ font-size: 14px; margin-bottom: 8px; word-break: break-all; }}
-        .video-meta {{ font-size: 12px; color: #888; }}
-        .video-badge {{ display: inline-block; padding: 2px 8px; background: #e94560; border-radius: 4px; font-size: 10px; margin-left: 8px; }}
-        .empty {{ text-align: center; padding: 100px; color: #888; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎬 视频库</h1>
-        <div class="nav">
-            <a href="/">📁 文件管理</a>
-            <a href="/video" class="active">🎬 视频播放</a>
-        </div>
-        <div class="video-grid">
-"""
-
-    for f in videos:
-        html += f'''
-            <div class="video-card">
-                <div class="video-thumb" onclick="playVideo('{quote(f["name"])}', {str(f["has_hls"]).lower()})">▶️</div>
-                <div class="video-info">
-                    <div class="video-name">{f["name"]}{'<span class="video-badge">HLS</span>' if f["has_hls"] else ''}</div>
-                    <div class="video-meta">{f["time"]} · {f["size"] / 1024 / 1024:.1f} MB</div>
-                </div>
-            </div>
-        '''
-
-    if not videos:
-        html += '<div class="empty">暂无视频</div>'
-
-    html += """        </div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script>
-        function playVideo(name, hasHls) {
-            const url = '/video/play/' + name;
-            const win = window.open('', '_blank', 'width=1280,height=720');
-            if (hasHls) {
-                win.document.write(`
-                    <video id="video" controls style="width:100%;height:100%;background:black;" autoplay></video>
-                    <script>
-                        fetch('/video/hls/' + name + '/index.m3u8')
-                            .then(r => r.text())
-                            .then(hlsContent => {
-                                if (Hls.isSupported()) {
-                                    const hls = new Hls();
-                                    hls.loadSource(URL.createObjectURL(new Blob([hlsContent])));
-                                    hls.attachMedia(document.getElementById('video'));
-                                } else {
-                                    document.getElementById('video').src = '/video/play/' + name;
-                                }
-                            });
-                    </script>
-                `);
-            } else {
-                win.document.write('<video src="' + url + '" controls autoplay style="width:100%;height:100%;background:black;"></video>');
-            }
-        }
-    </script>
-</body>
-</html>"""
-    return HTMLResponse(content=html)
+@app.get("/video/hls.min.js")
+async def video_hls_js():
+    """HLS.js 库"""
+    static_dir = get_video_static_dir()
+    hls_path = os.path.join(static_dir, "hls.min.js")
+    if os.path.exists(hls_path):
+        with open(hls_path, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="application/javascript")
+    return Response(content="Not found", status_code=404)
 
 @app.get("/video/play/{filename}")
 async def video_play(filename: str):
@@ -857,8 +814,27 @@ async def video_play(filename: str):
         raise HTTPException(status_code=404, detail="视频不存在")
     return FileResponse(file_path, media_type="video/mp4")
 
+@app.get("/hls/{filename}/{path:path}")
+async def hls_playlist(filename: str, path: str):
+    """HLS 播放列表和分片 - 兼容 obs-video-app"""
+    hls_dir = os.path.join(HLS_DIR, filename)
+    file_path = os.path.join(hls_dir, path)
+
+    # 安全检查
+    if not os.path.exists(os.path.join(hls_dir)):
+        raise HTTPException(status_code=404, detail="HLS 目录不存在")
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    if path.endswith(".m3u8"):
+        return FileResponse(file_path, media_type="application/vnd.apple.mpegurl")
+    else:
+        return FileResponse(file_path, media_type="video/mp2t")
+
 @app.get("/video/hls/{filename}/{path:path}")
 async def video_hls(filename: str, path: str):
+    """HLS 播放列表和分片"""
     hls_dir = os.path.join(HLS_DIR, filename)
     file_path = os.path.join(hls_dir, path)
     if not os.path.exists(file_path):
@@ -868,27 +844,19 @@ async def video_hls(filename: str, path: str):
     else:
         return FileResponse(file_path, media_type="video/MP2T")
 
+# ============================================================================
+# 视频 API（兼容 obs-video-app）
+# ============================================================================
+
+@app.get("/videos")
+async def videos_list():
+    """获取视频列表 - 兼容 obs-video-app"""
+    return JSONResponse({"videos": list_video_files()})
+
 @app.get("/video/api/list")
 async def video_list():
-    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
-    videos = []
-    VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
-
-    try:
-        for name in os.listdir(upload_dir):
-            ext = os.path.splitext(name)[1].lower()
-            if ext in VIDEO_EXTS:
-                p = os.path.join(upload_dir, name)
-                videos.append({
-                    "name": name,
-                    "size": os.path.getsize(p),
-                    "time": datetime.fromtimestamp(os.path.getmtime(p)).isoformat(),
-                    "has_hls": hls_exists(name)
-                })
-    except Exception:
-        pass
-
-    return JSONResponse({"videos": videos})
+    """获取视频列表"""
+    return JSONResponse({"videos": list_video_files()})
 
 @app.post("/video/api/generate-hls/{filename}")
 async def generate_hls(filename: str):
@@ -902,6 +870,70 @@ async def generate_hls(filename: str):
 
     asyncio.create_task(generate_hls_background(filename))
     return JSONResponse({"status": "processing", "message": "HLS 生成中"})
+
+@app.post("/compress/{filename}")
+async def compress_video(filename: str):
+    """压缩视频（转码为 H.264 + AAC + faststart）"""
+    filename = unquote(filename)
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
+    file_path = os.path.join(upload_dir, filename)
+
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="视频不存在")
+
+    before_size = os.path.getsize(file_path)
+    tmp_out = os.path.join(upload_dir, f".comp-{datetime.now().strftime('%Y%m%d%H%M%S')}.mp4")
+
+    try:
+        # 执行压缩
+        args = [
+            "-y", "-i", file_path,
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-vf", f"scale='min(1920,iw)':-2",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            tmp_out
+        ]
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(video_executor, lambda: run_ffmpeg(args))
+
+        if not os.path.exists(tmp_out):
+            raise HTTPException(status_code=500, detail="压缩失败")
+
+        after_size = os.path.getsize(tmp_out)
+
+        if after_size >= before_size:
+            # 压缩后没有变小，保留原文件
+            os.remove(tmp_out)
+            return JSONResponse({"ok": True, "skipped": True, "before": before_size, "after": after_size, "savedPct": 0})
+
+        # 替换原文件
+        os.replace(tmp_out, file_path)
+
+        # 失效并重新生成 HLS
+        invalidate_hls(filename)
+        asyncio.create_task(generate_hls_background(filename))
+
+        saved = before_size - after_size
+        saved_pct = round((1 - after_size / before_size) * 100)
+
+        return JSONResponse({"ok": True, "skipped": False, "before": before_size, "after": after_size, "saved": saved, "savedPct": saved_pct})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 清理临时文件
+        if os.path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except:
+                pass
+        raise HTTPException(status_code=500, detail=f"压缩失败: {str(e)}")
 
 @app.get("/video/api/status/{filename}")
 async def video_status(filename: str):

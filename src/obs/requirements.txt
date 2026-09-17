@@ -1,0 +1,8 @@
+pytest
+requests
+python-dotenv
+pytest-asyncio
+fastapi
+uvicorn[standard]
+python-multipart
+aiofiles

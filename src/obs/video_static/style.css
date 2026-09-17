@@ -1,0 +1,440 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    background: #000;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #fff;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------------- single shared player (fixed overlay) ---------------- */
+#playerLayer {
+    position: fixed;
+    inset: 0;
+    /* 视频层在页面内容之下：边栏(10)、页点(12)、遮罩(9)、边缘提示(8)都要显示在视频之上 */
+    z-index: 5;
+    pointer-events: none;
+}
+
+.video-container {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    /* 视频层不接收指针事件，让 wheel/touch 命中下方的 feed，
+       恢复浏览器原生垂直滚动（滚动链不再被全屏覆盖层截断）。
+       需要交互的元素（如设置页按钮）单独开启 pointer-events。 */
+    pointer-events: none;
+}
+
+.video-container video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+}
+
+.video-container .v-label {
+    position: absolute;
+    left: 14px;
+    bottom: 30px;
+    right: 14px;
+    z-index: 6;
+    font-size: 15px;
+    font-weight: 600;
+    text-shadow: 0 1px 4px rgba(0,0,0,.8);
+    word-break: break-all;
+    pointer-events: none;
+}
+
+/* Overlay buttons: only show when on settings page */
+.video-overlay-btns {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 7;
+    display: flex;
+    gap: 8px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
+}
+.page[data-page="2"] .video-overlay-btns {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.video-overlay-btns .v-delete,
+.video-overlay-btns .v-compress {
+    background: rgba(0,0,0,.45);
+    border: none;
+    color: #fff;
+    font-size: 12px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    pointer-events: auto;
+}
+.video-overlay-btns .v-compress[disabled] { opacity: .5; cursor: default; }
+
+/* ---------------- viewport / pages ---------------- */
+.viewport {
+    height: 100%;
+    width: 100%;
+    position: relative;
+    overflow: hidden;
+    touch-action: pan-y;
+    z-index: 1;
+}
+
+.pages {
+    display: flex;
+    width: 300%;
+    height: 100%;
+    /* 必须 position:relative 才能让 z-index 生效（static 元素 z-index 无效） */
+    position: relative;
+    /* 页面内容整体在视频层(playerLayer z-index:5)之上，确保边栏/页点/边缘提示可见 */
+    z-index: 6;
+    transform: translateX(calc(-1 * var(--page, 1) * (100% / 3)));
+    transition: transform .35s cubic-bezier(.4, 0, .2, 1);
+    will-change: transform;
+}
+
+.pages {
+    --page: 1;
+}
+
+.page {
+    width: calc(100% / 3);
+    height: 100%;
+    position: relative;
+    flex-shrink: 0;
+    /* 背景透明：让底层视频层(playerLayer)透出，视频在任意页面持续可见 */
+    background: transparent;
+    overflow: hidden;
+}
+
+/* ---------------- center page (feed only, no video element inside) ---------------- */
+.page[data-page="1"] {
+    /* Center page: empty background, playerLayer shows through */
+}
+
+/* ---------------- vertical feed (for scroll/list, no video elements rendered) ---------------- */
+.feed {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    overflow-y: auto;
+    scroll-snap-type: y mandatory;
+    scrollbar-width: none;
+    z-index: 1;
+    touch-action: pan-y;
+}
+.feed::-webkit-scrollbar { display: none; }
+
+/* Video always covers the center page via fixed overlay. Side pages have
+   their feed transparent so the video shows through. */
+
+/* Feed items: height 100%, snap-align start.
+   These are placeholders for scroll positioning only — no video element inside. */
+.video-item {
+    position: relative;
+    height: 100%;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+    background: transparent;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+/* ---------------- empty state ---------------- */
+.empty-state {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: rgba(255,255,255,.7);
+}
+.empty-state .empty-icon { font-size: 56px; }
+.empty-state p { font-size: 16px; }
+.empty-state .sub { font-size: 13px; color: rgba(255,255,255,.45); }
+
+/* ---------------- side panels ---------------- */
+.side-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 50%;
+    min-width: 240px;
+    z-index: 10;
+    background: rgba(18, 18, 20, 0.82);
+    backdrop-filter: blur(14px);
+    display: flex;
+    flex-direction: column;
+    transform: translateX(105%);
+    transition: transform .35s cubic-bezier(.4,0,.2,1);
+}
+.page[data-page="0"] .side-panel {
+    right: auto;
+    left: 0;
+    border-left: none;
+    border-right: 1px solid rgba(255,255,255,.08);
+    transform: translateX(0);
+}
+.page[data-page="2"] .side-panel { transform: translateX(0); }
+
+.panel-head {
+    padding: 18px 16px 12px;
+    font-size: 16px;
+    font-weight: 700;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+}
+
+.info-row, .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    font-size: 14px;
+}
+.info-row span, .setting-row span { color: rgba(255,255,255,.6); }
+.info-row b, .setting-row b { font-weight: 600; word-break: break-all; max-width: 60%; text-align: right; }
+
+.setting-row .switch {
+    position: relative;
+    width: 46px;
+    height: 26px;
+    flex-shrink: 0;
+}
+.setting-row .switch input { display: none; }
+.setting-row .switch i {
+    position: absolute;
+    inset: 0;
+    background: #48484a;
+    border-radius: 13px;
+    transition: background .2s;
+}
+.setting-row .switch i::after {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform .2s;
+}
+.setting-row .switch input:checked + i { background: #fe2c55; }
+.setting-row .switch input:checked + i::after { transform: translateX(20px); }
+
+/* Playback speed selector */
+.speed-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.speed-options { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.speed-btn {
+    padding: 4px 10px;
+    border: 1px solid rgba(255,255,255,.2);
+    border-radius: 6px;
+    background: transparent;
+    color: rgba(255,255,255,.6);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all .15s;
+}
+.speed-btn.active {
+    background: #fe2c55;
+    border-color: #fe2c55;
+    color: #fff;
+}
+.speed-btn:hover { border-color: rgba(255,255,255,.5); color: #fff; }
+
+/* ---------------- seek bar ---------------- */
+.seek-section {
+    margin-top: 18px;
+    padding: 0 0 8px;
+}
+.seek-label {
+    font-size: 12px;
+    color: rgba(255,255,255,.55);
+    text-align: center;
+    margin-bottom: 8px;
+}
+.seek-track {
+    position: relative;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    padding: 8px 0;
+}
+.seek-track::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0;
+    height: 4px;
+    background: rgba(255,255,255,.2);
+    border-radius: 2px;
+}
+.seek-fill {
+    position: absolute;
+    left: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #fe2c55, #ff7a45);
+    border-radius: 2px;
+    width: 0%;
+    pointer-events: none;
+}
+.seek-thumb {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    top: 50%;
+    left: 0%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    box-shadow: 0 2px 6px rgba(0,0,0,.4);
+    transition: left .1s linear;
+}
+.seek-track:active .seek-thumb {
+    width: 20px;
+    height: 20px;
+    box-shadow: 0 2px 10px rgba(254,44,85,.6);
+}
+
+/* ---------------- page dot ---------------- */
+.page-dot {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 6px;
+    z-index: 12;
+    pointer-events: none;
+}
+.page-dot span {
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255,255,255,.35);
+    transition: all .25s;
+}
+.page-dot span.on { background: #fff; width: 16px; }
+
+/* ---------------- panel mask ---------------- */
+.panel-mask {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    background: rgba(0,0,0,.35);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
+}
+.page[data-page="0"] .panel-mask,
+.page[data-page="2"] .panel-mask {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ---------------- edge hint ---------------- */
+.edge-hint {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    z-index: 8;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .3s ease;
+}
+.edge-hint-left {
+    left: 0;
+    background: linear-gradient(to right, rgba(254,44,85,.6), transparent);
+}
+.edge-hint-right {
+    right: 0;
+    background: linear-gradient(to left, rgba(254,44,85,.6), transparent);
+}
+.viewport.edge-hint-active .edge-hint-left { opacity: 1; }
+.viewport.edge-hint-active .edge-hint-right { opacity: 1; }
+
+/* ---------------- modal ---------------- */
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+}
+.modal.hidden { display: none; }
+
+.modal-card {
+    width: min(360px, 90vw);
+    background: #1c1c1e;
+    border-radius: 16px;
+    padding: 20px;
+}
+.modal-title { font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 16px; }
+
+.modal-drop {
+    border: 2px dashed rgba(255,255,255,.25);
+    border-radius: 12px;
+    padding: 34px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+}
+.modal-drop.dragover { border-color: #fe2c55; background: rgba(254,44,85,.08); }
+.modal-drop .drop-icon { font-size: 40px; margin-bottom: 8px; }
+.modal-drop p { font-size: 14px; }
+.modal-drop .sub { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 4px; }
+
+.progress-area { margin-top: 16px; }
+.progress-area.hidden { display: none; }
+.progress-title { font-size: 13px; word-break: break-all; margin-bottom: 8px; color: rgba(255,255,255,.85); }
+.progress-bar { height: 8px; border-radius: 4px; background: #3a3a3c; overflow: hidden; }
+#progressFill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #fe2c55, #ff7a45); transition: width .2s ease; }
+.progress-text { margin-top: 8px; font-size: 13px; color: rgba(255,255,255,.7); text-align: center; }
+
+.modal-actions { margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 14px; }
+.upload-opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: rgba(255,255,255,.75);
+    cursor: pointer;
+    user-select: none;
+}
+.upload-opt input { accent-color: #fe2c55; width: 15px; height: 15px; }
+.cancel-btn {
+    padding: 10px 26px;
+    border: none;
+    border-radius: 8px;
+    background: #48484a;
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+}
+.cancel-btn:hover { background: #5a5a5c; }
