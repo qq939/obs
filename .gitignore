@@ -11,3 +11,5 @@ test_obs/
 user_history.md
 tips.txt
 obs/
+logs/
+obs_shards/
