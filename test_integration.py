@@ -163,28 +163,28 @@ def test_reverse_playback_on_page0():
         raise
 
 
-def test_speed_options_only_357():
+def test_speed_options_only_137():
     """
-    测试第三页「播放速度」UI 只保留 3x / 5x / 7x 三档。
+    测试第三页「播放速度」UI 只保留 1x / 3x / 7x 三档。
 
     1) /video 页面 speed-options 里只有 3 个 .speed-btn
-    2) data-speed 依次为 3 / 5 / 7（旧的 0.5/0.8/1/1.5/2 已移除）
+    2) data-speed 依次为 1 / 3 / 7（旧的 0.5/0.8/1.5/2/5 已移除）
     3) 默认档位 3x 带 active 高亮
     4) app.js 中 playbackSpeed 默认值为 3（与 UI 默认档一致）
     """
-    print("\n[7/8] 测试播放速度档位只保留 3x/5x/7x...")
+    print("\n[7/8] 测试播放速度档位只保留 1x/3x/7x...")
     try:
         resp = requests.get(BASE_URL + "/video", timeout=5)
         assert resp.status_code == 200, f"视频页面返回状态码 {resp.status_code}"
         html = resp.text
 
         btns = re.findall(r'speed-btn[^>]*data-speed="([^"]+)"', html)
-        assert btns == ["3", "5", "7"], f"播放速度档位应为 3/5/7，实际为 {btns}"
+        assert btns == ["1", "3", "7"], f"播放速度档位应为 1/3/7，实际为 {btns}"
         print(f"   ✓ 播放速度档位: {btns}")
 
-        for old in ["0.5", "0.8", "1", "1.5", "2"]:
+        for old in ["0.5", "0.8", "1.5", "2", "5"]:
             assert f'data-speed="{old}"' not in html, f"仍残留旧档位 data-speed=\"{old}\""
-        print("   ✓ 已移除 0.5x/0.8x/1x/1.5x/2x 旧档位")
+        print("   ✓ 已移除 0.5x/0.8x/1.5x/2x/5x 旧档位")
 
         assert re.search(r'class="speed-btn active"[^>]*data-speed="3"', html), \
             "默认档位 3x 未标记 active 高亮"
@@ -240,7 +240,7 @@ def main():
         test_videos_api()
         test_video_static_resources()
         test_reverse_playback_on_page0()
-        test_speed_options_only_357()
+        test_speed_options_only_137()
         test_upload()
         print("\n" + "=" * 60)
         print("所有测试通过!")

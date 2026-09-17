@@ -201,3 +201,32 @@
 回归 `test_integration.py` 8 组全绿。
 
 ---
+
+## 2026-09-18（续 3）
+
+### 任务：播放速度档位改为 1x / 3x / 7x
+
+**worknote 2026-09-18**：用户要求「倍速包含1倍、3倍、7倍」，
+即第三页「播放速度」UI 的档位由 3x/5x/7x 改为 **1x / 3x / 7x**。
+
+**实现**：
+
+1. `src/obs/video_static/index.html`（第 55-57 行）：`#speedOptions` 三档改为
+   `1x / 3x / 7x`，`active` 高亮保持在 `3x`（默认档不变）。
+2. `src/obs/video_static/app.js`（第 63 行）：更新注释为「档位：1x / 3x / 7x，默认 3x」，
+   `playbackSpeed` 默认值仍为 `3`，与 UI 高亮一致，无需改动逻辑。
+3. `test_integration.py`：回归用例 `test_speed_options_only_357` 更名并更新为
+   `test_speed_options_only_137`，断言档位 1/3/7、旧档位（0.5/0.8/1.5/2/**5**）已移除、
+   3x 默认高亮、`playbackSpeed` 默认 3，并在 main 中同步调用名。
+
+> 说明：长按视频的「5 倍速速览」是独立手势（非档位 UI 选项），本次未改动。
+
+**测试**：新建 `test_speed_137.py`（4 组用例，60s 超时），断言
+① 线上 `/video` 下发的档位恰为 1/3/7 且共 3 个按钮、文案与 `data-speed` 一一对应、5x 已移除；
+② 默认高亮唯一且在 1/3/7 内、与 app.js 的 `playbackSpeed` 默认值一致；
+③ `index.html` 源码档位一致 + 点击链路 `data-speed -> playbackSpeed -> video.playbackRate` 完好；
+④ 回归 -3x 倒放 / 保活 / `video.loop=false` 自动切下一个。
+按 TDD 规则先删除上一任务的 `test_health.py`，先跑红灯（实际为 3/5/7）再实现转绿。
+重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
+
+---

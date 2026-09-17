@@ -60,7 +60,7 @@
     let playing = true;
     let random = true;
     let autoplay = true;
-    let playbackSpeed = 3;     // 第三页「播放速度」档位：仅 3x / 5x / 7x，默认 3x
+    let playbackSpeed = 3;     // 第三页「播放速度」档位：1x / 3x / 7x，默认 3x
     let currentAbort = null;
     let longPressTimer = null;
     let longPressMoved = false;
