@@ -459,101 +459,127 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
-            async function chunkedUpload(inputEl) {
-                const file = inputEl.files && inputEl.files[0];
-                if (!file) {
-                    alert('请先选择文件');
-                    return;
-                }
-                const filename = file.name;
-                const total = file.size;
-                let offset = 0;
-                try {
-                    while (offset < total) {
-                        const end = Math.min(offset + CHUNK_SIZE_BROWSER, total);
-                        const blob = file.slice(offset, end);
-                        const resp = await fetch(`/${encodeURIComponent(filename)}`, {
-                            method: 'PUT',
-                            body: await blob.arrayBuffer(),
-                        });
-                        if (resp.status !== 201) {
-                            const text = await resp.text();
-                            throw new Error(`分片上传失败: ${resp.status} ${text}`);
+            // 单文件直传（≤10MB）：XHR + 上传进度
+            function uploadOneFileDirect(file, onProgress) {
+                return new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.upload.onprogress = (e) => {
+                        if (e.lengthComputable && onProgress) {
+                            onProgress(Math.round(e.loaded / e.total * 100), e.loaded);
                         }
-                        offset = end;
-                    }
-                    alert('分片上传成功');
-                    window.location.reload();
-                } catch (err) {
-                    alert('分片上传出错: ' + err.message);
-                }
+                    };
+                    xhr.onload = () => {
+                        if (xhr.status === 201) resolve(xhr.responseText);
+                        else reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+                    };
+                    xhr.onerror = () => reject(new Error('网络错误'));
+                    xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
+                    xhr.send(file);
+                });
             }
 
-            async function resumableUpload(inputEl) {
-                const file = inputEl.files && inputEl.files[0];
-                if (!file) {
-                    alert('请先选择文件');
-                    return;
-                }
-                const filename = file.name;
-                const size = file.size;
+            // 大文件分片上传（>10MB）：/upload/init + /upload/chunk + /upload/complete，支持秒传/断点续传
+            async function uploadOneFileResumable(file, onProgress) {
                 const chunkSize = CHUNK_SIZE_BROWSER;
-                const totalChunks = Math.ceil(size / chunkSize);
+                const size = file.size;
+                const totalChunks = Math.ceil(size / chunkSize) || 1;
                 const hashAlgo = "sha256";
                 const hash = await sha256Hex(file);
-                // 初始化会话（包含秒传判定）
-                let resp = await fetch('/upload/init', {
+                const initResp = await fetch('/upload/init', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
+                    body: JSON.stringify({ filename: file.name, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
                 });
-                if (!resp.ok) {
-                    const t = await resp.text();
-                    alert('初始化失败: ' + t);
-                    return;
-                }
-                const info = await resp.json();
-                if (info.skip) {
-                    alert('文件已存在，已秒传：' + info.url);
-                    window.location.reload();
-                    return;
-                }
+                if (!initResp.ok) throw new Error('初始化失败: ' + await initResp.text());
+                const info = await initResp.json();
+                if (info.skip) return info.url;   // 秒传
                 const uploadId = info.upload_id;
                 const uploaded = new Set(info.uploaded || []);
-                // 上传缺失分片（带简单重试）
                 for (let i = 0; i < totalChunks; i++) {
-                    if (uploaded.has(i)) continue;
-                    const start = i * chunkSize;
-                    const end = Math.min(start + chunkSize, size);
-                    const blob = file.slice(start, end);
-                    let ok = false;
-                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-                        const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
-                            method: 'PUT',
-                            body: await blob.arrayBuffer(),
-                        });
-                        ok = r.status === 201;
+                    if (!uploaded.has(i)) {
+                        const start = i * chunkSize;
+                        const blob = file.slice(start, Math.min(start + chunkSize, size));
+                        let ok = false;
+                        for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+                            const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
+                                method: 'PUT',
+                                body: await blob.arrayBuffer(),
+                            });
+                            ok = r.status === 201;
+                        }
+                        if (!ok) throw new Error('分片上传失败: ' + i);
                     }
-                    if (!ok) {
-                        alert('分片上传失败，无法完成：' + i);
-                        return;
-                    }
+                    if (onProgress) onProgress(Math.round(Math.min(size, (i + 1) * chunkSize) / size * 100));
                 }
-                // 合并完成
                 const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
+                    body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
                 });
-                if (c.ok) {
-                    const url = await c.text();
-                    alert('上传完成：' + url);
+                if (!c.ok) throw new Error('合并失败: ' + await c.text());
+                return await c.text();
+            }
+
+            // 拖拽/选择文件的统一入口（小文件直传，大文件走分片+秒传）
+            async function uploadFiles(files) {
+                if (!files || files.length === 0) return;
+                const statusEl = document.getElementById('formUploadStatus');
+                const totalFiles = files.length;
+                let success = 0, fail = 0;
+                const failedNames = [];
+                let overallBytes = 0, totalBytes = 0;
+                for (let i = 0; i < totalFiles; i++) totalBytes += files[i].size;
+                for (let i = 0; i < totalFiles; i++) {
+                    const file = files[i];
+                    statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
+                    const report = (pct, loaded) => {
+                        const overallPct = totalBytes > 0 ? Math.round((overallBytes + (loaded || 0)) / totalBytes * 100) : 0;
+                        statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
+                    };
+                    try {
+                        if (file.size <= CHUNK_SIZE_BROWSER) {
+                            await uploadOneFileDirect(file, report);
+                        } else {
+                            await uploadOneFileResumable(file, (pct) => report(pct, file.size * pct / 100));
+                        }
+                        overallBytes += file.size;
+                        success++;
+                    } catch (err) {
+                        fail++;
+                        failedNames.push(file.name + ' (' + err.message + ')');
+                    }
+                }
+                if (fail === 0) {
+                    statusEl.textContent = `全部上传成功！(${success}个文件)`;
                     window.location.reload();
                 } else {
-                    const tx = await c.text();
-                    alert('合并失败：' + tx);
+                    statusEl.textContent = `上传完成：成功${success}个，失败${fail}个 → ${failedNames.join('; ')}`;
+                    if (success > 0) setTimeout(() => window.location.reload(), 1500);
                 }
             }
+
+            function handleDragUpload(fileList) {
+                if (!fileList || fileList.length === 0) return;
+                uploadFiles(fileList);
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+                const zone = document.getElementById('uploadZone');
+                if (!zone) return;
+                ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+                    zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); });
+                });
+                ['dragenter', 'dragover'].forEach(evt => {
+                    zone.addEventListener(evt, () => { zone.style.borderColor = '#4A90D9'; zone.style.background = '#eef6ff'; });
+                });
+                ['dragleave', 'drop'].forEach(evt => {
+                    zone.addEventListener(evt, () => { zone.style.borderColor = '#ccc'; zone.style.background = '#f9f9f9'; });
+                });
+                zone.addEventListener('drop', (e) => {
+                    const files = e.dataTransfer.files;
+                    if (files.length > 0) handleDragUpload(files);
+                });
+            });
 
             async function saveNotice() {
                 try {
@@ -717,19 +743,11 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
 
         <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
         
-        <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
-            <form action="/" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" required>
-                <input type="submit" value="上传">
-            </form>
-            <div style="margin-top:8px;">
-                <input type="file" id="chunkFile">
-                <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
-            </div>
-            <div style="margin-top:8px;">
-                <input type="file" id="resumeFile">
-                <button onclick="resumableUpload(document.getElementById('resumeFile'))">断点续传(10MB+秒传)</button>
-            </div>
+        <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
+            <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传</p>
+            <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
+            <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
+            <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
         
         <div class="sort-controls">

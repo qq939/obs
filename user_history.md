@@ -128,3 +128,43 @@
 重建 `obs-obs` 镜像并 `docker compose up -d obs` 生效。
 
 ---
+
+## 2026-09-18（续）
+
+### 任务：播放完成自动切下一个视频 + obs 首页上传区换成拖拽 UI
+
+**worknote 2026-09-18**：用户要求两件事——
+① 视频播放完成后自动切换到下一个视频；
+② obs 首页上传区 UI 改成 commit `30982962c52d762abc52980f134f77df32d0d2ce` 那一版
+（拖拽上传区），但**只改 UI，分片上传 + 秒传的底层能力保持不变**。
+
+**实现**：
+
+1. `src/obs/video_static/app.js`
+   - `video.loop = true` → `false`（否则不会触发 `ended`，无法自动切下一个）。
+   - 新增 `ended` 监听：走与上滑/滚轮**同一条吸附动画路径**
+     `vertAnimateTo(vertBaseTop - h, 1)` 切到下一个视频。
+   - 倒放分支保护：`reverseActive` 时（第一页 -3x 倒放走到尽头也会触发 `ended`）
+     跳回 `duration - 0.2` 并重新 `startReverse()` + `play()`，
+     保证「永不暂停」的保活机制不被破坏。
+   - 空列表、动画进行中（`vertAnim`）直接 return，避免重复触发。
+
+2. `src/obs/server.py` 首页上传区
+   - 移除旧三套控件（`#chunkFile` 分片、`#resumeFile` 断点续传、`value="上传"` 表单）。
+   - 换成 3098296 版拖拽区：`#uploadZone`（`border: 2px dashed` 虚线框）+
+     「拖拽文件到此处上传」文案 + `#formFile`（`multiple`）+「选择文件」按钮 +
+     `#formUploadStatus` 状态位。
+   - JS 统一入口 `uploadFiles(files)`：≤10MB 走 `XHR` 直传（带 `upload.onprogress` 进度），
+     >10MB 走 `/upload/init` → `/upload/chunk/` → `/upload/complete/` 分片链路，
+     秒传命中直接返回 url。`handleDragUpload` 绑定 `dragover/dragleave/drop` 与 `dataTransfer`。
+   - **上传能力零改动**：接口、参数、分片/秒传语义全部沿用原有后端实现。
+
+**测试**：新建 `test_ui_autonext.py`（5 组用例，60s 超时），断言
+① url_head 无残留硬编码回归；② 首页为拖拽上传区 UI 且旧控件已移除；
+③ 分片 + 秒传接口调用保留并实传 PUT → 首页链接可见 → 删除；
+④ `video.loop = false` + `ended` 走上滑吸附路径 + 倒放场景不误触发；
+⑤ 保活 / -3x 倒放 / 3-5-7 档位回归。
+按 TDD 规则先删除上一个任务的 `test_url_head.py`，再写本任务测试脚本。
+结果：新脚本 5 组全绿，回归 `test_integration.py` 8 组亦全绿。
+
+---
