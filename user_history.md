@@ -230,3 +230,31 @@
 重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
 
 ---
+
+## 2026-09-18（续 4）
+
+### 任务：播放速度默认档位改为 1x
+
+**worknote 2026-09-18**：用户指出「默认是一倍不是三倍啊」，
+即第三页「播放速度」默认档位应为 **1x**（上一轮误保留了 3x 作为默认）。
+
+**实现**：
+
+1. `src/obs/video_static/index.html`：`active` 高亮由 `data-speed="3"` 移到
+   `data-speed="1"`，档位集合仍为 1x / 3x / 7x。
+2. `src/obs/video_static/app.js`（第 63 行）：`let playbackSpeed = 3` → `= 1`，
+   注释改为「默认 1x」，保证 UI 高亮与实际生效速率一致。
+3. `test_integration.py`：回归用例默认档位断言同步改为 1x
+   （active 落在 `data-speed="1"`、`playbackSpeed` 默认 1）。
+
+> 注意：第一页 -3x 倒放用的是独立常量 `REVERSE_RATE = 3`，与默认档位无关，未受影响。
+
+**测试**：新建 `test_speed_default_1x.py`（4 组用例，60s 超时），断言
+① 线上 `/video` 档位集合为 1/3/7 且 `active` 唯一落在 1x；
+② app.js `playbackSpeed` 默认值为 1 且旧的 3 已移除；
+③ index.html 源码中 1x 高亮、3x 取消高亮，点击切换逻辑完好；
+④ 回归 -3x 倒放（`REVERSE_RATE` 仍为 3）/ 保活 / `video.loop=false` 自动切下一个。
+按 TDD 规则先删除上一任务的 `test_speed_137.py`，先跑红灯（高亮仍为 3x）再实现转绿。
+重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
+
+---

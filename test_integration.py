@@ -169,8 +169,8 @@ def test_speed_options_only_137():
 
     1) /video 页面 speed-options 里只有 3 个 .speed-btn
     2) data-speed 依次为 1 / 3 / 7（旧的 0.5/0.8/1.5/2/5 已移除）
-    3) 默认档位 3x 带 active 高亮
-    4) app.js 中 playbackSpeed 默认值为 3（与 UI 默认档一致）
+    3) 默认档位 1x 带 active 高亮
+    4) app.js 中 playbackSpeed 默认值为 1（与 UI 默认档一致）
     """
     print("\n[7/8] 测试播放速度档位只保留 1x/3x/7x...")
     try:
@@ -186,14 +186,14 @@ def test_speed_options_only_137():
             assert f'data-speed="{old}"' not in html, f"仍残留旧档位 data-speed=\"{old}\""
         print("   ✓ 已移除 0.5x/0.8x/1.5x/2x/5x 旧档位")
 
-        assert re.search(r'class="speed-btn active"[^>]*data-speed="3"', html), \
-            "默认档位 3x 未标记 active 高亮"
-        print("   ✓ 默认档位 3x 已高亮")
+        assert re.search(r'class="speed-btn active"[^>]*data-speed="1"', html), \
+            "默认档位 1x 未标记 active 高亮"
+        print("   ✓ 默认档位 1x 已高亮")
 
         js = requests.get(BASE_URL + "/video/app.js", timeout=5).text
-        assert re.search(r"let\s+playbackSpeed\s*=\s*3\b", js), \
-            "app.js 中 playbackSpeed 默认值不是 3"
-        print("   ✓ playbackSpeed 默认值为 3，与 UI 默认档一致")
+        assert re.search(r"let\s+playbackSpeed\s*=\s*1\b", js), \
+            "app.js 中 playbackSpeed 默认值不是 1"
+        print("   ✓ playbackSpeed 默认值为 1，与 UI 默认档一致")
     except Exception as e:
         print(f"   ✗ 播放速度档位测试失败: {e}")
         raise
