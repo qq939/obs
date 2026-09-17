@@ -1,11 +1,13 @@
 services:
   obs:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.obs
     container_name: obs
     ports:
       - "8088:8088"
     volumes:
-      - "${OBS_HOST_DIR:-./obs}:/app/obs"
+      - "${OBS_DIR:-./obs}:/app/obs"
     environment:
       - PORT=8088
       - UPLOAD_DIR=/app/obs
@@ -18,12 +20,14 @@ services:
       start_period: 5s
 
   obs-video-app:
-    build: ../obs-video-app
+    build:
+      context: .
+      dockerfile: Dockerfile.obs-video-app
     container_name: obs-video-app
     ports:
       - "80:8082"
     volumes:
-      - "${OBS_HOST_DIR:-./obs}:/home/agent/.claude/workspace/project/obs"
+      - "${OBS_DIR:-./obs}:/home/agent/.claude/workspace/project/obs"
       - "${OBS_SHARDS_DIR:-./obs_shards}:/home/agent/.claude/workspace/project/hls"
       - "${LOGS_DIR:-./logs}:/home/agent/.claude/workspace/project/logs"
     environment:
@@ -45,8 +49,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-
-volumes:
-  obs_data:
-  obs_shards_data:
-  logs_data:
