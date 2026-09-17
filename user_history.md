@@ -86,3 +86,45 @@
 再改实现转绿，8 组用例全部通过。
 
 ---
+
+## 2026-09-18
+
+### 任务：用户需求「不用改video，就改obs的页面」+ 抽象 url_head
+
+**worknote 2026-09-18**：用户先要求「obs 页面是上古页面，b8756f8 才是最新 UI」，
+随后划定范围「不用改 video，就改 obs 的页面」；再要求
+「obs 的 server 第一行要抽象出一个 url_head，用于渲染替换 http://obs.dimond.top 的文字和下载前缀」。
+
+**调查结论（第一次需求）**：将 `git show b8756f8:server.py` 中首页段（208-677 行）
+与当前 `src/obs/server.py` 首页段（291-760 行）逐行 diff，结果为 **IDENTICAL**（均 470 行）；
+容器内 `/app/src/obs/server.py` 的 md5 与本地一致，线上 200 返回的首页亦无差异。
+即 **b8756f8 的首页 == 当前首页**，源码层面无需改动，故本次只做 url_head 抽象。
+
+**实现（url_head 抽象）**：
+
+1. `src/obs/server.py` 顶部（第 9 行，全局参数前置）新增：
+
+   ```python
+   url_head = "http://obs.dimond.top"
+   ```
+
+   并带注释标注全部使用位置（精确到行）。
+2. 首页内嵌 HTML 中 `curl --upload-file file.txt http://obs.dimond.top/file.txt`
+   改为占位符 `{url_head}`，在原有 `{time_active}/{ext_active}` 替换链上追加
+   `.replace("{url_head}", url_head)` 完成渲染。
+3. 首页文件列表去掉局部变量 `host = "obs.dimond.top"`，下载链接统一用
+   `file_url = f"{url_head}/{f}"`。
+4. `/upload/init` 秒传命中返回 url、表单上传成功响应、`PUT /{filename}` 返回 url、
+   启动日志示例命令，全部改为引用 `url_head`。
+5. 源码内不再残留任何硬编码 `http://obs.dimond.top`（仅保留定义行）。
+
+**测试**：新建 `test_url_head.py`（4 组用例，60s 超时），断言
+① server.py 前 10 行内定义 `url_head` 且注释含「使用位置」；
+② 源码除定义行外无残留硬编码 URL；
+③ 首页 curl 示例 + 文件下载链接前缀均由 url_head 渲染；
+④ PUT 上传响应体 = `{url_head}/{filename}`。
+先跑红灯（未定义 url_head）再实现转绿，4 组全部通过；
+回归 `test_integration.py` 8 组用例亦全部通过。
+重建 `obs-obs` 镜像并 `docker compose up -d obs` 生效。
+
+---

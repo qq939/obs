@@ -30,3 +30,10 @@
      `document.querySelector('video').playbackRate = -3`。
    - 快速重跑集成测试：终端按 `Cmd + P` 输入 `task` 可跑 Task，或直接
      `python3 test_integration.py`（项目根目录）。
+
+7. **抽象全局常量（本项目 url_head）**:
+   - VSCode 里按住 `Cmd` 点击 `url_head` → 跳转到第 9 行定义处，按 `Shift + F12`
+     可列出全部引用位置（对应 server.py 顶部注释里标注的行号）。
+   - 批量改字符串：先手动抽成常量，再用 `Cmd + Shift + H`（全局替换）确认无残留；
+     本项目用 `python3 test_url_head.py` 自动校验「无残留硬编码 URL」。
+   - 想在文件内快速跳到顶部常量：`Cmd + Home`（macOS 为 `Cmd + ↑`）。

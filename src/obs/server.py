@@ -1,3 +1,13 @@
+# 服务对外访问地址前缀（全局参数，用于渲染替换页面文字和下载前缀）
+# 使用位置：
+#   - 第 718 行  首页「文件托管」curl 上传示例
+#   - 第 747/753 行  首页文件列表的下载链接前缀
+#   - 第 806 行  /upload/init 秒传命中的返回 url
+#   - 第 1065 行 表单上传成功响应文本
+#   - 第 1089 行 PUT 上传返回的文件 url
+#   - 第 1313 行 启动日志中的上传命令示例
+url_head = "http://obs.dimond.top"
+
 import os
 import shutil
 import json
@@ -705,7 +715,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             </div>
         </div>
 
-        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
         
         <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
             <form action="/" method="post" enctype="multipart/form-data">
@@ -734,14 +744,13 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
     # 动态设置 active 类
     time_active = "active" if sort != 'ext' else ""
     ext_active = "active" if sort == 'ext' else ""
-    html = html.replace("{time_active}", time_active).replace("{ext_active}", ext_active)
+    html = html.replace("{time_active}", time_active).replace("{ext_active}", ext_active).replace("{url_head}", url_head)
     
-    host = "obs.dimond.top"
     if not files_list:
         html += '<li class="empty">暂无文件</li>'
     else:
         for f in files_list:
-            file_url = f"http://{host}/{f}"
+            file_url = f"{url_head}/{f}"
             html += f'''
             <li>
                 <a href="{file_url}" target="_blank">{f}</a> 
@@ -794,7 +803,7 @@ async def upload_init(request: Request):
         if hash_algo == "sha256":
             existing_hash = file_sha256(final_path)
             if existing_hash == file_hash:
-                url = f"http://obs.dimond.top/{filename}"
+                url = f"{url_head}/{filename}"
                 return JSONResponse({"skip": True, "url": url})
     upload_id = make_upload_id(filename, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
@@ -1053,7 +1062,7 @@ async def upload_file_form(request: Request):
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
                     raise HTTPException(status_code=413, detail="文件过大")
         
-        return Response(content=f"文件上传成功: http://obs.dimond.top/{filename}", media_type="text/plain", status_code=201)
+        return Response(content=f"文件上传成功: {url_head}/{filename}", media_type="text/plain", status_code=201)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -1077,7 +1086,7 @@ async def upload_file_put(filename: str, request: Request):
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
                     raise HTTPException(status_code=413, detail="文件过大")
                 
-        file_url = f"http://obs.dimond.top/{filename}"
+        file_url = f"{url_head}/{filename}"
         return Response(content=file_url, media_type="text/plain", status_code=201)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
@@ -1301,7 +1310,7 @@ async def delete_file(filename: str, request: Request):
 # 启动服务器
 if __name__ == "__main__":
     print(f"文件托管服务器启动: http://localhost:{PORT}", flush=True)
-    print(f"上传命令示例: curl --upload-file your-file.wav http://obs.dimond.top/your-file.wav", flush=True)
+    print(f"上传命令示例: curl --upload-file your-file.wav {url_head}/your-file.wav", flush=True)
     print(f"文件保存目录: {os.path.abspath(UPLOAD_DIR)}", flush=True)
     uvicorn.run(
         app,
