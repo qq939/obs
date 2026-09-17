@@ -6,11 +6,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy OBS source code
-COPY src/obs/ /app/
+# Copy requirements first
+COPY requirements.txt /app/requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy OBS source code
+COPY src/ /app/src/
 
 # Create necessary directories
 RUN mkdir -p /app/obs /app/hls
@@ -21,4 +24,4 @@ ENV PORT=8088
 ENV UPLOAD_DIR=/app/obs
 ENV HLS_DIR=/app/hls
 
-CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8088"]
+CMD ["python", "-m", "uvicorn", "src.obs.server:app", "--host", "0.0.0.0", "--port", "8088"]

@@ -35,36 +35,6 @@ html, body {
     height: 100%;
     object-fit: contain;
     background: #000;
-    /* 翻页动画期间的 transform 过渡：video 元素本身 translateY 离开/回到屏幕中央，
-       配合 .is-flip-up / .is-flip-down / .is-flip-pre-up / .is-flip-pre-down /
-       .is-flipping-in 五个状态切换，模拟"翻一张卡片"。 */
-    transition: transform .3s cubic-bezier(.4, 0, .2, 1), opacity .3s ease-out;
-    will-change: transform, opacity;
-}
-
-/* 切源翻页动画：单 video 元素做整页滚动。
-   .is-flip-up：旧视频向上翻出（切下一个）；.is-flip-down：旧视频向下翻出（切上一个）
-   .is-flip-pre-up：新视频在屏幕下方起始、即将翻入；.is-flip-pre-down：屏幕上方
-   .is-flipping-in：新视频从屏幕外翻入到中央 */
-.video-container.is-flip-up video {
-    transform: translateY(-100%);
-    opacity: 0;
-}
-.video-container.is-flip-down video {
-    transform: translateY(100%);
-    opacity: 0;
-}
-.video-container.is-flip-pre-up video {
-    transform: translateY(100%);
-    opacity: 0;
-}
-.video-container.is-flip-pre-down video {
-    transform: translateY(-100%);
-    opacity: 0;
-}
-.video-container.is-flipping-in video {
-    transform: translateY(0);
-    opacity: 1;
 }
 
 .video-container .v-label {
@@ -79,10 +49,8 @@ html, body {
     word-break: break-all;
     pointer-events: none;
 }
-.video-container .v-label.hidden { display: none; }
-.video-container .v-label { display: none; }  /* 默认隐藏 */
 
-/* Overlay buttons: 默认隐藏 */
+/* Overlay buttons: only show when on settings page */
 .video-overlay-btns {
     position: absolute;
     top: 14px;
@@ -90,7 +58,9 @@ html, body {
     z-index: 7;
     display: flex;
     gap: 8px;
-    display: none;  /* 默认隐藏 */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
 }
 .page[data-page="2"] .video-overlay-btns {
     opacity: 1;
@@ -130,9 +100,7 @@ html, body {
     /* 页面内容整体在视频层(playerLayer z-index:5)之上，确保边栏/页点/边缘提示可见 */
     z-index: 6;
     transform: translateX(calc(-1 * var(--page, 1) * (100% / 3)));
-    /* cubic-bezier(.32,.72,0,1) = "expo-out" 风格：起步快、收尾缓，
-       给三页切换一种"跟手"的弹性观感 */
-    transition: transform .42s cubic-bezier(.32, .72, 0, 1);
+    transition: transform .35s cubic-bezier(.4, 0, .2, 1);
     will-change: transform;
 }
 
@@ -162,12 +130,11 @@ html, body {
     bottom: 0;
     left: 0;
     right: 0;
-    /* 原生纵向滚动由 JS 接管（app.js 实现抖音式跟手 + 吸附动画）：
-       overflow hidden 关掉原生滚动条，touch-action none 让触摸不触发浏览器滚动 */
-    overflow-y: hidden;
-    touch-action: none;
+    overflow-y: auto;
+    scroll-snap-type: y mandatory;
     scrollbar-width: none;
     z-index: 1;
+    touch-action: pan-y;
 }
 .feed::-webkit-scrollbar { display: none; }
 
@@ -179,6 +146,8 @@ html, body {
 .video-item {
     position: relative;
     height: 100%;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
     background: transparent;
     overflow: hidden;
     cursor: pointer;
@@ -220,14 +189,7 @@ html, body {
     border-right: 1px solid rgba(255,255,255,.08);
     transform: translateX(0);
 }
-.page[data-page="2"] .side-panel {
-    /* 设置页边栏贴右缘显示 */
-    left: auto;
-    right: 0;
-    border-left: 1px solid rgba(255,255,255,.08);
-    border-right: none;
-    transform: translateX(0);
-}
+.page[data-page="2"] .side-panel { transform: translateX(0); }
 
 .panel-head {
     padding: 18px 16px 12px;
@@ -239,144 +201,6 @@ html, body {
     flex: 1;
     overflow-y: auto;
     padding: 12px 16px;
-}
-
-/* 播放列表条：固定在设置页 (page 2) 上方，竖向滚动 11 格 (uuid, t) 视图；
-   每行显示：pos（前 N / 当前 / 后 N）+ 状态徽标（未播/看到/播放中）+ uuid
-   + 当前已播时长 / 总时长 mm:ss + 进度条
-   鼠标 / 键盘 / 触摸切换视频时高亮当前条目（中央 playlistWindow[5]） */
-.playlist-strip {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    overflow-x: hidden;
-    overflow-y: auto;
-    max-height: 320px;
-    scrollbar-width: none;
-    border-bottom: 1px solid rgba(255,255,255,.08);
-    background: rgba(0,0,0,.18);
-    scroll-behavior: smooth;
-}
-.playlist-strip::-webkit-scrollbar { display: none; }
-.playlist-strip .pl-item {
-    flex: 0 0 auto;
-    width: 100%;
-    min-height: 38px;
-    border-radius: 8px;
-    background: rgba(255,255,255,.06);
-    color: rgba(255,255,255,.85);
-    font-size: 12px;
-    line-height: 1.3;
-    padding: 6px 9px;
-    cursor: pointer;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-start;
-    gap: 4px;
-    border: 1px solid transparent;
-    transition: transform .18s ease, border-color .18s ease, background .18s ease;
-    user-select: none;
-    pointer-events: auto;
-}
-.playlist-strip .pl-item:hover {
-    background: rgba(255,255,255,.12);
-    transform: translateX(-1px);
-}
-.playlist-strip .pl-item.active {
-    border-color: #fe2c55;
-    background: rgba(254, 44, 85, .18);
-    color: #fff;
-    box-shadow: 0 0 0 1px rgba(254, 44, 85, .55);
-}
-.playlist-strip .pl-item .pl-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-}
-.playlist-strip .pl-item .pl-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-    min-width: 0;
-}
-.playlist-strip .pl-item .pl-pos {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .04em;
-    opacity: .8;
-}
-.playlist-strip .pl-item.active .pl-pos {
-    opacity: 1;
-    color: #ffd0db;
-}
-.playlist-strip .pl-item .pl-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 500;
-    word-break: break-all;
-    flex: 1 1 auto;
-    min-width: 0;
-}
-.playlist-strip .pl-item .pl-status {
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 1;
-    padding: 2px 6px;
-    border-radius: 6px;
-    white-space: nowrap;
-    letter-spacing: .02em;
-    flex: 0 0 auto;
-}
-.playlist-strip .pl-item .pl-status-unwatched {
-    background: rgba(255,255,255,.10);
-    color: rgba(255,255,255,.55);
-}
-.playlist-strip .pl-item .pl-status-watched {
-    background: rgba(84, 197, 255, .18);
-    color: #54c5ff;
-}
-.playlist-strip .pl-item .pl-status-playing {
-    background: rgba(254, 44, 85, .25);
-    color: #ffd0db;
-}
-.playlist-strip .pl-item.active .pl-status-playing {
-    background: rgba(254, 44, 85, .45);
-    color: #fff;
-}
-.playlist-strip .pl-item .pl-time {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    color: rgba(255,255,255,.65);
-    display: inline-block;
-    margin-right: 6px;
-    flex: 0 0 auto;
-    white-space: nowrap;
-}
-.playlist-strip .pl-item.active .pl-time {
-    color: #fff;
-}
-.playlist-strip .pl-item .pl-bar {
-    height: 4px;
-    width: 100%;
-    background: rgba(255,255,255,.10);
-    border-radius: 2px;
-    overflow: hidden;
-}
-.playlist-strip .pl-item .pl-bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #fe2c55, #ff6680);
-    width: 0%;
-    transition: width .35s ease;
-}
-.playlist-strip .pl-item.active .pl-bar-fill {
-    background: linear-gradient(90deg, #ff6680, #ffd0db);
 }
 
 .info-row, .setting-row {
@@ -441,9 +265,8 @@ html, body {
 
 /* ---------------- seek bar ---------------- */
 .seek-section {
-    padding: 0 16px 16px;
-    margin-top: auto;
-    flex-shrink: 0;
+    margin-top: 18px;
+    padding: 0 0 8px;
 }
 .seek-label {
     font-size: 12px;
@@ -451,7 +274,6 @@ html, body {
     text-align: center;
     margin-bottom: 8px;
 }
-.seek-label { display: none; }  /* 默认隐藏 */
 .seek-track {
     position: relative;
     height: 24px;
@@ -460,7 +282,6 @@ html, body {
     cursor: pointer;
     padding: 8px 0;
 }
-.seek-track { display: none; }  /* 默认隐藏 */
 .seek-track::before {
     content: '';
     position: absolute;
@@ -508,7 +329,6 @@ html, body {
     z-index: 12;
     pointer-events: none;
 }
-.page-dot { display: none; }  /* 默认隐藏 */
 .page-dot span {
     width: 6px;
     height: 6px;
@@ -555,37 +375,6 @@ html, body {
 }
 .viewport.edge-hint-active .edge-hint-left { opacity: 1; }
 .viewport.edge-hint-active .edge-hint-right { opacity: 1; }
-
-/* ---------------- upload button (settings panel head, top-right) ---------------- */
-.panel-head { position: relative; }
-.fab-upload {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    border: none;
-    background: linear-gradient(135deg, #fe2c55, #ff6680);
-    color: #fff;
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1;
-    padding: 8px 14px;
-    border-radius: 18px;
-    cursor: pointer;
-    box-shadow: 0 2px 8px rgba(254,44,85,.45);
-    transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    white-space: nowrap;
-}
-.fab-upload:hover {
-    transform: translateY(-50%) scale(1.04);
-    box-shadow: 0 4px 12px rgba(254,44,85,.55);
-}
-.fab-upload:active {
-    transform: translateY(-50%) scale(.96);
-}
-.fab-upload.hidden { display: none; }
 
 /* ---------------- modal ---------------- */
 .modal {
