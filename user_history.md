@@ -168,3 +168,36 @@
 结果：新脚本 5 组全绿，回归 `test_integration.py` 8 组亦全绿。
 
 ---
+
+## 2026-09-18（续 2）
+
+### 任务：补齐 /health 健康检查端点
+
+**worknote 2026-09-18**：用户确认「需要」——上一轮发现
+`docker-compose.yml` 的 healthcheck 探测 `/health`，但 `server.py` 没有该路由，
+导致 `docker ps` 长期显示 `obs (unhealthy)`。
+
+**实现**：
+
+1. `src/obs/server.py` 第 266-269 行新增轻量健康探针（放在 `/notice` 之前）：
+
+   ```python
+   @app.get("/health")
+   async def health():
+       return {"status": "ok"}
+   ```
+
+   不触碰上传目录扫描、视频解码等重资源，探测开销恒定。
+2. 因新增 5 行导致行号下移，同步修正文件顶部 `url_head` 注释中
+   「使用位置」的行号（750/771/777/830/1089/1113/1337），保持注释与实际一致。
+
+**测试**：新建 `test_health.py`（3 组用例，60s 超时），断言
+① server.py 定义 `@app.get("/health")` 且为直接返回字典的轻量探针；
+② 线上 `GET /health` 返回 200 + `{"status": "ok"}`（修复前为 404）；
+③ 解析 `docker-compose.yml` healthcheck 里的 urlopen 地址，
+   断言该路径在 server.py 中确有路由定义，并回归 `/`、`/video` 正常。
+按 TDD 规则先删除上一任务的 `test_ui_autonext.py`，先跑红灯（404）再实现转绿。
+重建 `obs-obs` 镜像生效，容器状态 `Up (healthy)`；
+回归 `test_integration.py` 8 组全绿。
+
+---

@@ -1,11 +1,12 @@
 # 服务对外访问地址前缀（全局参数，用于渲染替换页面文字和下载前缀）
 # 使用位置：
-#   - 第 718 行  首页「文件托管」curl 上传示例
-#   - 第 747/753 行  首页文件列表的下载链接前缀
-#   - 第 806 行  /upload/init 秒传命中的返回 url
-#   - 第 1065 行 表单上传成功响应文本
-#   - 第 1089 行 PUT 上传返回的文件 url
-#   - 第 1313 行 启动日志中的上传命令示例
+#   - 第 750 行  首页「文件托管」curl 上传示例
+#   - 第 771 行  首页 HTML 的 {url_head} 占位符渲染替换
+#   - 第 777 行  首页文件列表的下载链接前缀
+#   - 第 830 行  /upload/init 秒传命中的返回 url
+#   - 第 1089 行 表单上传成功响应文本
+#   - 第 1113 行 PUT 上传返回的文件 url
+#   - 第 1337 行 启动日志中的上传命令示例
 url_head = "http://obs.dimond.top"
 
 import os
@@ -261,6 +262,11 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket Handler Error: {e}", flush=True)
         manager.disconnect(websocket)
+
+@app.get("/health")
+async def health():
+    # 轻量健康探针：不触碰上传目录/视频解码等重资源，供 docker-compose healthcheck 探测
+    return {"status": "ok"}
 
 @app.get("/notice")
 async def get_notice_http():
