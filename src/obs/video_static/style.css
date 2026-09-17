@@ -441,8 +441,9 @@ html, body {
 
 /* ---------------- seek bar ---------------- */
 .seek-section {
-    margin-top: 18px;
-    padding: 0 0 8px;
+    padding: 0 16px 16px;
+    margin-top: auto;
+    flex-shrink: 0;
 }
 .seek-label {
     font-size: 12px;
