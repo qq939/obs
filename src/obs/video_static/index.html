@@ -39,7 +39,12 @@
                 <div class="panel-mask"></div>
                 <div class="feed" id="feed2"></div>
                 <aside class="side-panel settings-panel" id="settingsPanel">
-                    <div class="panel-head">设置</div>
+                    <div class="panel-head">
+                        <span>设置</span>
+                        <button class="fab-upload" id="fabUpload" aria-label="上传视频">⬆ 上传</button>
+                    </div>
+                    <!-- 播放列表：固定在设置页上方，竖向排列的 5 格 (uuid, t) 队列视图（前 2 + 当前 + 后 2） -->
+                    <div class="playlist-strip" id="playlistStrip"></div>
                     <div class="panel-body">
                         <div class="setting-row"><span>视频数量</span><b id="videoCount">0</b></div>
                         <div class="setting-row"><span>随机播放</span><label class="switch"><input type="checkbox" id="randomSwitch" checked><i></i></label></div>
@@ -48,16 +53,19 @@
                             <span>播放速度</span>
                             <div class="speed-options" id="speedOptions">
                                 <button class="speed-btn" data-speed="0.5">0.5x</button>
-                                <button class="speed-btn" data-speed="1">1x</button>
-                                <button class="speed-btn active" data-speed="1.5">1.5x</button>
+                                <button class="speed-btn" data-speed="0.8">0.8x</button>
+                                <button class="speed-btn active" data-speed="1">1x</button>
+                                <button class="speed-btn" data-speed="1.5">1.5x</button>
                                 <button class="speed-btn" data-speed="2">2x</button>
                                 <button class="speed-btn" data-speed="3">3x</button>
+                                <button class="speed-btn" data-speed="5">5x</button>
+                                <button class="speed-btn" data-speed="7">7x</button>
                             </div>
                         </div>
 
                         <div class="seek-section">
-                            <div class="seek-label" id="seekLabel">0:00 / 0:00</div>
-                            <div class="seek-track" id="seekTrack">
+                            <div class="seek-label hidden" id="seekLabel">0:00 / 0:00</div>
+                            <div class="seek-track hidden" id="seekTrack">
                                 <div class="seek-fill" id="seekFill"></div>
                                 <div class="seek-thumb" id="seekThumb"></div>
                             </div>
@@ -69,12 +77,12 @@
         </div>
 
         <!-- Single shared video player: fixed overlay, always on top -->
-        <div id="playerLayer">
+        <div id="playerLayer" class="hidden">
             <div class="video-container" id="videoContainer">
-                <div class="v-label" id="videoLabel"></div>
-                <div class="video-overlay-btns" id="videoOverlayBtns">
-                    <button class="v-compress" id="overlayCompress">压缩</button>
-                    <button class="v-delete" id="overlayDelete">删除</button>
+                <div class="v-label hidden" id="videoLabel"></div>
+                <div class="video-overlay-btns hidden" id="videoOverlayBtns">
+                    <button class="v-compress hidden" id="overlayCompress">压缩</button>
+                    <button class="v-delete hidden" id="overlayDelete">删除</button>
                 </div>
             </div>
         </div>
@@ -93,7 +101,7 @@
                 <p>点击选择文件，或拖拽到此处</p>
                 <p class="sub">支持 mp4 / webm / mov 等</p>
             </div>
-            <input type="file" id="fileInput" accept="video/*" hidden>
+            <input type="file" id="fileInput" accept="video/*" multiple hidden>
             <div class="progress-area hidden" id="progressArea">
                 <div class="progress-title" id="progressTitle"></div>
                 <div class="progress-bar"><div id="progressFill" style="width:0%"></div></div>
@@ -106,7 +114,7 @@
         </div>
     </div>
 
-    <script src="/video/hls.min.js"></script>
+    <script src="/video/vendor/hls.min.js"></script>
     <script src="/video/app.js"></script>
 </body>
 </html>

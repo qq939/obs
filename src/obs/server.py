@@ -85,7 +85,7 @@ def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> 
 VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
 
 def list_video_files() -> List[dict]:
-    """列出所有视频文件"""
+    """列出所有视频文件 - 与 obs-video-app 格式一致"""
     upload_dir = get_upload_dir()
     videos = []
     try:
@@ -94,15 +94,17 @@ def list_video_files() -> List[dict]:
             if ext in VIDEO_EXTS:
                 p = os.path.join(upload_dir, name)
                 if os.path.isfile(p):
+                    stat = os.stat(p)
                     videos.append({
                         "name": name,
-                        "size": os.path.getsize(p),
-                        "time": datetime.fromtimestamp(os.path.getmtime(p)).isoformat(),
-                        "has_hls": hls_exists(name)
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                        "url": f"/obs/{quote(name)}",
+                        "hls": f"/hls/{quote(name)}/index.m3u8",
+                        "hlsReady": hls_exists(name)
                     })
     except Exception:
         pass
-    videos.sort(key=lambda x: x["time"], reverse=True)
     return videos
 
 def safe_name(name: str) -> str:
@@ -806,6 +808,15 @@ async def video_hls_js():
             return Response(content=f.read(), media_type="application/javascript")
     return Response(content="Not found", status_code=404)
 
+@app.get("/obs/{filename:path}")
+async def obs_file(filename: str):
+    """访问 obs 目录下的文件"""
+    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
+    file_path = os.path.join(upload_dir, unquote(filename))
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path)
+
 @app.get("/video/play/{filename}")
 async def video_play(filename: str):
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
@@ -1007,21 +1018,26 @@ async def upload_file_put(filename: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
-@app.delete("/{filename}")
-async def delete_file(filename: str):
+async def do_delete_file(filename: str):
+    """执行文件删除"""
     filename = unquote(filename)
-    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, filename)
 
     if os.path.exists(file_path) and os.path.isfile(file_path):
         try:
             os.remove(file_path)
             invalidate_hls(filename)
-            return Response(content="Deleted", status_code=200)
+            return JSONResponse({"ok": True})
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
     else:
         raise HTTPException(status_code=404, detail="File not found")
+
+@app.delete("/{filename:path}")
+async def delete_file(filename: str):
+    """删除文件"""
+    return await do_delete_file(filename)
 
 # ============================================================================
 # 分片上传接口
@@ -1087,10 +1103,10 @@ async def upload_init(request: Request):
         }
 
     return JSONResponse({
-        "upload_id": upload_id,
+        "uploadId": upload_id,
         "uploaded": sorted(uploaded),
-        "total_chunks": total_chunks,
-        "chunk_size": chunk_size,
+        "totalChunks": total_chunks,
+        "chunkSize": chunk_size,
     })
 
 @app.put("/upload/chunk/{upload_id}/{index}")
@@ -1152,12 +1168,12 @@ async def upload_status(upload_id: str):
                 chunk_hashes.append(None)
 
         return JSONResponse({
-            "upload_id": upload_id,
-            "total_chunks": session["total_chunks"],
-            "uploaded_chunks": list(session["uploaded_chunks"]),
-            "chunk_hashes": chunk_hashes,
-            "overall_hash": session["overall_hash"],
-            "overall_hash_computed": session["overall_hash_computed"]
+            "uploadId": upload_id,
+            "totalChunks": session["total_chunks"],
+            "uploaded": list(session["uploaded_chunks"]),
+            "chunkHashes": chunk_hashes,
+            "overallHash": session["overall_hash"],
+            "overallHashComputed": session["overall_hash_computed"]
         })
 
 @app.post("/upload/complete/{upload_id}")
@@ -1245,8 +1261,8 @@ async def upload_complete(upload_id: str, request: Request):
             if upload_id in upload_sessions:
                 del upload_sessions[upload_id]
 
-        url = f"http://obs.dimond.top/{filename}"
-        return Response(content=url, status_code=200, media_type="text/plain")
+        url = f"/obs/{quote(filename)}"
+        return JSONResponse({"ok": True, "url": url, "filename": filename})
     except HTTPException:
         raise
 
