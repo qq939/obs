@@ -84,6 +84,43 @@ def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> 
 # 视频相关辅助函数
 VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
 
+def hls_duration_sync(name: str) -> float:
+    """从 HLS index.m3u8 求和 EXTINF 获取时长"""
+    try:
+        m3u8_path = os.path.join(HLS_DIR, name, "index.m3u8")
+        if os.path.exists(m3u8_path):
+            with open(m3u8_path, "r") as f:
+                content = f.read()
+            import re
+            matches = re.findall(r"#EXTINF:([0-9.]+)", content)
+            total = sum(float(m) for m in matches if float(m) > 0)
+            if total > 0:
+                return total
+    except Exception:
+        pass
+    return 0
+
+def probe_duration_sync(file_path: str, name: str = "") -> float:
+    """获取视频时长（秒）"""
+    # 1) 从 HLS 求和 EXTINF
+    if name:
+        d = hls_duration_sync(name)
+        if d > 0:
+            return d
+    # 2) ffprobe 兜底
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", file_path],
+            capture_output=True, text=True, timeout=4
+        )
+        import json
+        data = json.loads(result.stdout)
+        d = float(data.get("format", {}).get("duration", 0))
+        return d if d > 0 else 0
+    except Exception:
+        return 0
+
 def list_video_files() -> List[dict]:
     """列出所有视频文件 - 与 obs-video-app 格式一致"""
     upload_dir = get_upload_dir()
@@ -95,10 +132,12 @@ def list_video_files() -> List[dict]:
                 p = os.path.join(upload_dir, name)
                 if os.path.isfile(p):
                     stat = os.stat(p)
+                    duration = probe_duration_sync(p, name)
                     videos.append({
                         "name": name,
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
+                        "duration": duration,
                         "url": f"/obs/{quote(name)}",
                         "hls": f"/hls/{quote(name)}/index.m3u8",
                         "hlsReady": hls_exists(name)
