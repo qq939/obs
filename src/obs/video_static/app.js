@@ -383,22 +383,53 @@
     }
 
     // ---------------------------------------------------------------- playback effect per page
-    let effectTimer = null;
+    // 第一页 = -3 倍速倒放。浏览器原生 playbackRate 不支持负值（设负数会抛
+    // NotSupportedError），所以用「正向播放 + 定时向后 seek」模拟：
+    // 每个 tick 把 currentTime 回退 (REVERSE_RATE + 1) * dt，正向播放本身推进 1 * dt，
+    // 相互抵消后净速度正好是 -3 倍。视频始终保持 playing（保活，不暂停）。
+    const REVERSE_RATE = 3;        // 倒放倍速：-3x
+    const REVERSE_TICK_MS = 120;   // 每次回退间隔
+    let reverseTimer = null;
+    let reverseLastTs = 0;
+
+    function stopReverse() {
+        if (reverseTimer !== null) { clearInterval(reverseTimer); reverseTimer = null; }
+        reverseLastTs = 0;
+    }
+
+    function startReverse() {
+        if (reverseTimer !== null) return;
+        reverseLastTs = 0;
+        reverseTimer = setInterval(reverseTick, REVERSE_TICK_MS);
+    }
+
+    function reverseTick() {
+        const now = Date.now();
+        if (!reverseLastTs) { reverseLastTs = now; return; }
+        const dt = Math.min((now - reverseLastTs) / 1000, 0.5);
+        reverseLastTs = now;
+        if (video.paused) return;                 // 用户主动暂停时不倒放
+        const dur = video.duration;
+        if (!isFinite(dur) || dur <= 0) return;
+        let t = video.currentTime - (REVERSE_RATE + 1) * dt;
+        if (t <= 0) t = Math.max(0, dur - 0.2);   // 倒到开头则回到结尾，持续倒放
+        try { video.currentTime = t; } catch (_) {}
+    }
 
     function applyPagePlayback() {
-        clearInterval(effectTimer);
-        if (videos.length === 0) return;
+        if (videos.length === 0) { stopReverse(); return; }
 
         // 所有页面都保持播放状态，不暂停视频（保活机制）
         if (currentPage === 0) {
-            // Info page: 保持正常播放
-            video.playbackRate = 1;
-        } else if (currentPage === 2) {
-            // 第三页（设置页）：默认 1x 播放，长按 5x 覆盖
-            video.playbackRate = fastSpeed ? 5 : 1;
+            // 第一页（信息页）：永远 -3 倍速倒放
+            fastSpeed = false;
+            video.playbackRate = 1;   // 正向 1x，由 reverseTick 多退的 3x 抵消
+            startReverse();
         } else {
-            // 第二页（主视频页）：默认 1x 播放，长按 5x 覆盖
-            video.playbackRate = fastSpeed ? 5 : 1;
+            // 第二页（主视频页）/ 第三页（设置页）：
+            // 受第三页「播放速度」UI 的 playbackSpeed 控制，长按 5x 覆盖
+            stopReverse();
+            video.playbackRate = fastSpeed ? 5 : playbackSpeed;
         }
         // 确保视频保持播放状态
         if (playing) {
@@ -1038,7 +1069,7 @@
     function endFastSpeed() {
         if (!fastSpeed) return;
         fastSpeed = false;
-        video.playbackRate = playbackSpeed;
+        applyPagePlayback();   // 按当前页恢复正确速率（第一页回到 -3x 倒放）
     }
 
     viewport.addEventListener('touchstart', (e) => {

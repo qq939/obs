@@ -40,3 +40,31 @@
 - 文件上传：✓
 
 ---
+
+## 2026-09-18
+
+### 任务：第一页永远负三倍速播放
+
+用户要求：第一页永远以 -3 倍速（倒放）播放。
+
+**实现**（`src/obs/video_static/app.js`）：
+
+1. 浏览器原生 `playbackRate` 不支持负值（设负数会抛 `NotSupportedError`），
+   所以用「正向 1x 播放 + 定时向后 seek」模拟倒放：每 120ms 回退
+   `(REVERSE_RATE + 1) * dt` 秒，正向播放抵消掉 1x，净速度正好是 **-3x**。
+2. 新增常量与函数：`REVERSE_RATE = 3`、`REVERSE_TICK_MS = 120`、
+   `startReverse()`、`stopReverse()`、`reverseTick()`。
+3. `applyPagePlayback()` 分支改为：
+   - `currentPage === 0`（第一页 / 信息页）→ `startReverse()`，永远 -3x 倒放；
+   - 第二页 / 第三页 → `stopReverse()`，速率取第三页「播放速度」UI 的
+     `playbackSpeed`，长按 5x 覆盖。
+4. 倒到开头后跳回结尾继续倒放（持续倒放不中断）。
+5. `endFastSpeed()` 改为调用 `applyPagePlayback()`，长按结束时按当前页恢复正确速率。
+6. 保活机制不变：任何页面、任何切换方式都不暂停视频（`if (playing) video.play()`）。
+
+**测试**：重写 `test_integration.py`，新增用例 `test_reverse_playback_on_page0`
+（校验服务端下发的 app.js 中 -3x 倒放实现、第一页分支调用 startReverse、
+非第一页调用 stopReverse、第二/三页受第三页速度 UI 控制），
+7 组用例全部通过。
+
+---
