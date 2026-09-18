@@ -324,3 +324,52 @@
 重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
 
 ---
+
+## 2026-09-18（续 7）
+
+### 任务：修复 uploadId 字段名 + 分片上传加真正的逐片校验（用户需求 1 和 3）
+
+**worknote 2026-09-18**：用户先要求「确认 obs 是不是分片上传 / 是否每片独立确认 md5 /
+分片是否直接当 HLS 用」。排查结论：分片是 SHA-256 不是 MD5、逐片比对是服务端自比对、
+complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.upload_id`（恒为 undefined）。
+用户随后要求「做 1 和 3」（1 = 修字段名 + complete 校验会话匹配；3 = 真正的逐片校验），
+并说明 2（HLS）他的想法是「视频格式的分片直接拿来做 hls」。
+
+**实现（`src/obs/server.py`）**：
+
+1. **修字段名**：首页 JS `info.upload_id` → `info.uploadId`（此前恒为 undefined，
+   所有大文件分片都塞进 `obs/.chunks/undefined/`，并发上传会串片）。
+2. **逐片校验**：`PUT /upload/chunk/{upload_id}/{index}` 改为
+   - 读取请求头 `X-Chunk-SHA256`（客户端声明的分片哈希）；
+   - 分片落盘后**同步**计算 sha256 比对，不一致或未声明 → 删除该 `.part`、
+     从会话中剔除、返回 **422**；
+   - 校验通过才写入 `chunk_hashes` / `uploaded_chunks`；
+   - 另校验 `index` 是否超出会话的 `total_chunks`（400）。
+   同时删除原先「写完就返回、哈希丢后台线程算」的
+   `_compute_chunk_hash_background` 与已无引用的 `hash_executor`。
+3. **前端配合**：分片 PUT 带 `headers: { 'X-Chunk-SHA256': await sha256Hex(blob) }`
+   （浏览器 `crypto.subtle` 只支持 SHA-1/256/384/512，无内置 MD5，故沿用 SHA-256）。
+4. **complete 真校验**：`/upload/complete` 去掉原先「分片哈希自比对后
+   `ok_hash = file_hash  # 假设整体也对`」的假校验，改为对合并结果做一次
+   整文件 sha256 与客户端声明哈希比对，不一致 → **422**。
+5. **会话匹配校验**：complete 时若会话存在，要求 `total_chunks` 与会话一致，
+   不一致 → 409（进程重启后会话丢失则不拦，交由整文件哈希兜底）。
+
+**测试**：新建 `test_chunk_verify.py`（5 组用例，60s 超时），按 TDD 先删上一任务的
+`test_auto_next.py`（自动切下一个的回归断言并入本脚本第 5 组）：
+① 前端读取 `info.uploadId` 且无 `info.upload_id`；
+② 前端分片 PUT 携带 `X-Chunk-SHA256` 且哈希基于分片内容；
+③ **真实走完整协议**：init → 分片 0 正确哈希 201 → 分片 1 错误哈希 422 且未落账
+（经 `/upload/status` 断言）→ 分片 1 重传 201 → complete → 下载内容与整文件 sha256 一致；
+④ init/complete 声明错误整文件哈希 → complete 422（旧实现会放行）；
+⑤ 回归：PUT 直传 / `/health` / 首页拖拽上传区 / 视频页（-3x 倒放、自动切下一个、1-2-7 档位）。
+先跑红灯（前端字段名缺失）再实现转绿，5 组全部通过；重建 `obs-obs` 镜像生效。
+
+**附带发现（未改）**：仓库里 `src/obs/test_chunked_hash.py`、
+`src/obs/test_server_chunk_hash.py` 等旧脚本引用 `data["upload_id"]`，
+而服务端**改动前就已返回 `uploadId`**（`git show HEAD` 第 870 行），故这些脚本
+在本次改动前就是失败状态（KeyError: 'upload_id'）；`test_ref_features.py` 依赖
+未在 requirements.txt 中的 `httpx`；根目录 `test_chunk_md5.py`、`test_resumable.py`
+、`test_server.py` 用的是旧目录结构（`from server import app`）无法导入。
+
+---

@@ -43,9 +43,6 @@ load_dotenv("asset/.env")
 PORT = int(os.environ.get("PORT", 8088))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")
 
-# 线程池用于后台哈希计算（使用位置：upload_chunk 异步计算哈希）
-hash_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hash_worker")
-
 # 全局性能参数（使用位置见行内注释）
 # MAX_UPLOAD_SIZE: 上传大小限制（None 表示无限制）
 # 使用位置：upload_file_form 写入循环累计判断；upload_file_put 流式写入累计判断
@@ -499,7 +496,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 if (!initResp.ok) throw new Error('初始化失败: ' + await initResp.text());
                 const info = await initResp.json();
                 if (info.skip) return info.url;   // 秒传
-                const uploadId = info.upload_id;
+                const uploadId = info.uploadId;
                 const uploaded = new Set(info.uploaded || []);
                 for (let i = 0; i < totalChunks; i++) {
                     if (!uploaded.has(i)) {
@@ -509,6 +506,8 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         for (let attempt = 0; attempt < 3 && !ok; attempt++) {
                             const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
                                 method: 'PUT',
+                                // 逐片校验：带上本分片的 sha256，服务端落盘后比对，不一致会 422 并丢弃该分片
+                                headers: { 'X-Chunk-SHA256': await sha256Hex(blob) },
                                 body: await blob.arrayBuffer(),
                             });
                             ok = r.status === 201;
@@ -875,58 +874,52 @@ async def upload_init(request: Request):
 
 @app.put("/upload/chunk/{upload_id}/{index}")
 async def upload_chunk(upload_id: str, index: int, request: Request):
-    """上传分片，后台计算分片哈希（不阻塞上传）"""
+    """上传分片：落盘后立即用客户端声明的分片哈希（X-Chunk-SHA256）校验，不一致则丢弃分片并拒绝"""
     if index < 0:
         raise HTTPException(status_code=400, detail="分片序号非法")
     chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
     part_path = os.path.join(up_dir, f"{index}.part")
-    
+    expected_hash = (request.headers.get("x-chunk-sha256") or "").strip().lower()
+
+    with SESSION_LOCK:
+        session = upload_sessions.get(upload_id)
+    if session and session["total_chunks"] and index >= session["total_chunks"]:
+        raise HTTPException(status_code=400, detail=f"分片序号 {index} 超出总数 {session['total_chunks']}")
+
     try:
         # 写入文件
         async with aiofiles.open(part_path, "wb") as f:
             async for chunk in request.stream():
                 await f.write(chunk)
-        
-        # 立即返回，不阻塞。后台计算哈希
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(
-            hash_executor,
-            _compute_chunk_hash_background,
-            upload_id,
-            index,
-            part_path
-        )
-        
-        return Response(content="OK", status_code=201)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"分片写入失败: {str(e)}")
 
-def _compute_chunk_hash_background(upload_id: str, index: int, part_path: str):
-    """后台计算分片哈希"""
-    try:
-        with open(part_path, "rb") as f:
-            h = hashlib.sha256()
-            while chunk := f.read(1024 * 1024):
-                h.update(chunk)
-            chunk_hash = h.hexdigest()
-        
-        # 更新会话
+        # 逐片校验：必须与客户端声明一致（缺失声明视为不合格，不允许跳过校验）
+        actual_hash = file_sha256(part_path)
+        if not expected_hash or actual_hash != expected_hash:
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            with SESSION_LOCK:
+                if upload_id in upload_sessions:
+                    upload_sessions[upload_id]["chunk_hashes"].pop(index, None)
+                    upload_sessions[upload_id]["uploaded_chunks"].discard(index)
+            detail = "缺少分片哈希声明 X-Chunk-SHA256" if not expected_hash else \
+                f"分片 {index} 哈希校验失败"
+            raise HTTPException(status_code=422, detail=detail)
+
+        # 校验通过才落账（哈希已经是可信值，直接记录，无需再算一遍）
         with SESSION_LOCK:
             if upload_id in upload_sessions:
-                session = upload_sessions[upload_id]
-                session["chunk_hashes"][index] = chunk_hash
-                session["uploaded_chunks"].add(index)
-                
-                # 如果支持分片哈希合并计算总体哈希
-                if session["file_hash_obj"] is not None:
-                    # 将分片哈希追加到总体哈希计算
-                    # 注意：这里使用分片内容而非哈希值
-                    # 因为分片哈希不能直接合并得到总体哈希
-                    pass
+                upload_sessions[upload_id]["chunk_hashes"][index] = actual_hash
+                upload_sessions[upload_id]["uploaded_chunks"].add(index)
+
+        return Response(content="OK", status_code=201)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"计算分片 {index} 哈希失败: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"分片写入失败: {str(e)}")
 
 @app.post("/upload/status/{upload_id}")
 async def upload_status(upload_id: str):
@@ -969,6 +962,14 @@ async def upload_complete(upload_id: str, request: Request):
     up_dir = os.path.join(chunk_dir, upload_id)
     if not os.path.exists(up_dir):
         raise HTTPException(status_code=404, detail="上传会话不存在")
+    # 会话匹配校验：会话存在时必须与本次声明的分片总数一致（进程重启后会话丢失则跳过，交由下方整文件哈希兜底）
+    with SESSION_LOCK:
+        session = upload_sessions.get(upload_id)
+    if session and session["total_chunks"] and session["total_chunks"] != total_chunks:
+        raise HTTPException(
+            status_code=409,
+            detail=f"上传会话不匹配：会话分片数 {session['total_chunks']}，本次声明 {total_chunks}"
+        )
     # 校验分片完整
     for i in range(total_chunks):
         if not os.path.exists(os.path.join(up_dir, f"{i}.part")):
@@ -992,39 +993,12 @@ async def upload_complete(upload_id: str, request: Request):
         if real_size != size:
             raise HTTPException(status_code=422, detail="合并后大小不匹配")
         
-        # 哈希验证：优先使用分片哈希快速验证
-        ok_hash = None
+        # 哈希验证：逐片校验已在 /upload/chunk 完成，这里对合并结果做一次整文件校验，
+        # 把「服务端拿到的字节」与「客户端声明的整文件哈希」真正绑定（不再假设分片对则整体对）
         if hash_algo == "sha256" and file_hash:
-            # 尝试使用预计算的分片哈希快速验证
-            with SESSION_LOCK:
-                session = upload_sessions.get(upload_id)
-            
-            if session and len(session["chunk_hashes"]) == total_chunks:
-                # 使用分片哈希进行快速验证（不需要读取整个文件）
-                all_hashes_match = True
-                for i in range(total_chunks):
-                    part_path = os.path.join(up_dir, f"{i}.part")
-                    with open(part_path, "rb") as f:
-                        h = hashlib.sha256()
-                        while chunk := f.read(1024 * 1024):
-                            h.update(chunk)
-                        actual_chunk_hash = h.hexdigest()
-                    
-                    expected_chunk_hash = session["chunk_hashes"].get(i)
-                    if expected_chunk_hash and actual_chunk_hash != expected_chunk_hash:
-                        all_hashes_match = False
-                        break
-                
-                if not all_hashes_match:
-                    raise HTTPException(status_code=422, detail="分片哈希校验失败")
-                
-                print(f"使用分片哈希快速验证通过（upload_id: {upload_id}）", flush=True)
-                ok_hash = file_hash  # 假设分片哈希正确，总体哈希也正确
-            else:
-                # 分片哈希不完整，使用传统方式验证
-                ok_hash = file_sha256(tmp_path)
-                if ok_hash != file_hash:
-                    raise HTTPException(status_code=422, detail="哈希校验失败")
+            actual_hash = file_sha256(tmp_path)
+            if actual_hash != file_hash:
+                raise HTTPException(status_code=422, detail="整文件哈希校验失败")
         
         # 移动到最终位置
         final_path = os.path.join(upload_dir, filename)
