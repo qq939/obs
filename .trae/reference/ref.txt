@@ -2,5 +2,6 @@ https://fastapi.tiangolo.com/
 https://www.uvicorn.org/
 https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
 https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest
+https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
 https://tools.ietf.org/html/rfc7233
 https://tus.io/protocols/resumable-upload.html

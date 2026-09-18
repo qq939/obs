@@ -42,6 +42,23 @@ load_dotenv("asset/.env")
 # 服务器配置
 PORT = int(os.environ.get("PORT", 8088))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")
+# 日志目录（全局参数；docker-compose 挂载到主机 logs/，容器内为 /app/logs）
+# 使用位置：log_line() 拼接 {LOG_DIR}/server.log；lifespan 启动日志打印 logs dir
+LOG_DIR = os.environ.get("LOG_DIR", "logs")
+
+
+def log_line(message: str) -> None:
+    """把带时间戳的一行追加写入 {LOG_DIR}/server.log，同时打到标准输出（便于 docker logs 查看）。
+    写文件失败不影响业务。
+    使用位置：lifespan 启动；upload_init / upload_chunk / upload_complete / upload_file_put / upload_file_form 的成功与失败分支"""
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(line, flush=True)
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(os.path.join(LOG_DIR, "server.log"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 # 全局性能参数（使用位置见行内注释）
 # MAX_UPLOAD_SIZE: 上传大小限制（None 表示无限制）
@@ -170,8 +187,11 @@ async def lifespan(app: FastAPI):
     app.state.chunk_dir = os.path.join(app.state.upload_dir, ".chunks")
     os.makedirs(app.state.upload_dir, exist_ok=True)
     os.makedirs(app.state.chunk_dir, exist_ok=True)
+    # 启动日志落盘（供主机 logs/server.log 查看）
+    log_line(f"OBS web app running on port {PORT} (obs dir: {app.state.upload_dir}, logs dir: {LOG_DIR})")
     yield
     # Shutdown
+    log_line("OBS web app shutting down")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -443,12 +463,78 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
+            // crypto.subtle 只在安全上下文（https / localhost）可用；
+            // 通过 http://obs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
+            // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
+            const HAS_SUBTLE = !!(globalThis.crypto && globalThis.crypto.subtle && globalThis.crypto.subtle.digest);
+            // 纯 JS SHA-256 兜底实现（非安全上下文用）。输出与 crypto.subtle.digest("SHA-256") 完全一致。
+            // 使用位置：sha256Hex() 在 HAS_SUBTLE 为 false 时调用
+            function sha256HexJS(bytes) {
+                const K = [
+                    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+                    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+                    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+                    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+                    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+                    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+                    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+                    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+                ];
+                const rotr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
+                let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,
+                    h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+                const len = bytes.length;
+                const totalLen = Math.ceil((len + 9) / 64) * 64; // 补 0x80 + 8 字节长度，再补齐到 64 的倍数
+                const m = new Uint8Array(totalLen);
+                m.set(bytes);
+                m[len] = 0x80;
+                const bitsHi = Math.floor(len / 536870912); // len*8 的高 32 位（len/2^29）
+                const bitsLo = (len << 3) >>> 0;
+                m[totalLen - 8] = (bitsHi >>> 24) & 0xff;
+                m[totalLen - 7] = (bitsHi >>> 16) & 0xff;
+                m[totalLen - 6] = (bitsHi >>> 8) & 0xff;
+                m[totalLen - 5] = bitsHi & 0xff;
+                m[totalLen - 4] = (bitsLo >>> 24) & 0xff;
+                m[totalLen - 3] = (bitsLo >>> 16) & 0xff;
+                m[totalLen - 2] = (bitsLo >>> 8) & 0xff;
+                m[totalLen - 1] = bitsLo & 0xff;
+                const w = new Uint32Array(64);
+                for (let off = 0; off < totalLen; off += 64) {
+                    for (let t = 0; t < 16; t++) {
+                        const j = off + t * 4;
+                        w[t] = ((m[j] << 24) | (m[j + 1] << 16) | (m[j + 2] << 8) | m[j + 3]) >>> 0;
+                    }
+                    for (let t = 16; t < 64; t++) {
+                        const x = w[t - 15], y = w[t - 2];
+                        const s0 = rotr(x, 7) ^ rotr(x, 18) ^ (x >>> 3);
+                        const s1 = rotr(y, 17) ^ rotr(y, 19) ^ (y >>> 10);
+                        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) >>> 0;
+                    }
+                    let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+                    for (let t = 0; t < 64; t++) {
+                        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+                        const ch = (e & f) ^ (~e & g);
+                        const t1 = (h + S1 + ch + K[t] + w[t]) >>> 0;
+                        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+                        const maj = (a & b) ^ (a & c) ^ (b & c);
+                        const t2 = (S0 + maj) >>> 0;
+                        h=g; g=f; f=e; e=(d + t1) >>> 0; d=c; c=b; b=a; a=(t1 + t2) >>> 0;
+                    }
+                    h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
+                    h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+                }
+                return [h0,h1,h2,h3,h4,h5,h6,h7].map(x => x.toString(16).padStart(8, "0")).join("");
+            }
             // data 可以是 Blob / ArrayBuffer / TypedArray；只对传入的这一块数据算哈希，不读整个文件
             async function sha256Hex(data) {
                 const buf = (data instanceof Blob) ? await data.arrayBuffer() : data;
-                const digest = await crypto.subtle.digest("SHA-256", buf);
-                const arr = Array.from(new Uint8Array(digest));
-                return arr.map(b => b.toString(16).padStart(2, "0")).join("");
+                const bytes = (buf instanceof Uint8Array) ? buf : new Uint8Array(buf);
+                if (HAS_SUBTLE) {
+                    const digest = await crypto.subtle.digest("SHA-256", bytes);
+                    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+                }
+                // http（非安全上下文）下 crypto.subtle 不存在，走纯 JS 兜底，保证手机也能上传
+                return sha256HexJS(bytes);
             }
             // 各分片 sha256（hex）拼接后再取一次 sha256，作为整文件指纹。
             // 与「整文件 sha256」等价强度地绑定分片集合与顺序，但只需顺序读一遍文件，内存 O(分片)
@@ -900,6 +986,7 @@ async def upload_init(request: Request):
             existing_hash = await asyncio.to_thread(chunk_fingerprint, final_path, chunk_size)
             if existing_hash == file_hash:
                 url = f"{url_head}/{filename}"
+                log_line(f"秒传命中 file={filename} size={size} chunks={total_chunks}")
                 return JSONResponse({"skip": True, "url": url})
     upload_id = make_upload_id(filename, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
@@ -1074,10 +1161,13 @@ async def upload_complete(upload_id: str, request: Request):
                 del upload_sessions[upload_id]
         
         url = f"/obs/{quote(filename)}"
+        log_line(f"上传完成(分片) file={filename} size={size} chunks={total_chunks} -> {final_path}")
         return JSONResponse({"ok": True, "url": url, "filename": filename})
-    except HTTPException:
+    except HTTPException as he:
+        log_line(f"上传失败(分片合并) file={filename} status={he.status_code} detail={he.detail}")
         raise
     except Exception as e:
+        log_line(f"上传失败(分片合并) file={filename} error={e}")
         raise HTTPException(status_code=500, detail=f"合并失败: {str(e)}")
 
 @app.post("/")
@@ -1115,9 +1205,11 @@ async def upload_file_form(request: Request):
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
                     raise HTTPException(status_code=413, detail="文件过大")
         
+        log_line(f"上传完成(表单) file={filename} bytes={total_written} -> {save_path}")
         return Response(content=f"文件上传成功: {url_head}/{filename}", media_type="text/plain", status_code=201)
         
     except Exception as e:
+        log_line(f"上传失败(表单) error={e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.put("/{filename}")
@@ -1140,8 +1232,10 @@ async def upload_file_put(filename: str, request: Request):
                     raise HTTPException(status_code=413, detail="文件过大")
                 
         file_url = f"{url_head}/{filename}"
+        log_line(f"上传完成(PUT) file={filename} bytes={total_written} -> {save_path}")
         return Response(content=file_url, media_type="text/plain", status_code=201)
     except Exception as e:
+        log_line(f"上传失败(PUT) file={filename} error={e}")
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
 # ============================================================================

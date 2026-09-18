@@ -37,3 +37,24 @@
    - 批量改字符串：先手动抽成常量，再用 `Cmd + Shift + H`（全局替换）确认无残留；
      本项目用 `python3 test_url_head.py` 自动校验「无残留硬编码 URL」。
    - 想在文件内快速跳到顶部常量：`Cmd + Home`（macOS 为 `Cmd + ↑`）。
+
+8. **快速 code snippet / 补全**:
+   - 输入几个字母按 `Tab` 触发 Emmet（仅 HTML/CSS）或用户代码片段（snippets）。
+   - 自定义片段：`Cmd + Shift + P` → 输入 `snippets` → 选
+     `Preferences: Configure User Snippets` → 选 `python.json` / `javascript.json`，
+     例如给 `def` 配 "def 函数模板"，之后输入 `def` 按 `Tab` 直接展开。
+   - 触发参数提示 `Cmd + Shift + Space`；快速修复（导入缺失包等）`Cmd + .`。
+   - 重命名符号全项目生效：`F2`。
+
+9. **调试「手机/局域网 http 上传失败」（本项目 crypto.subtle 坑）**:
+   - 浏览器只在**安全上下文**（https 或 localhost/127.0.0.1）才提供 `crypto.subtle`；
+     用 `http://<局域网IP>` / `http://obs.dimond.top` 打开时它在控制台里是 `undefined`。
+   - 一行自检：Chrome DevTools Console 执行
+     `({secure: isSecureContext, subtle: typeof crypto.subtle})`；
+     `secure:false, subtle:"undefined"` 即命中该问题（本项目的分片哈希兜底会自动接管）。
+   - 本项目已加纯 JS SHA-256 兜底 `sha256HexJS`：http 下 `sha256Hex("abc")` 仍应等于
+     `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`。
+   - 看服务端日志：容器已挂载 `logs/`，直接 `tail -f logs/server.log`
+     （VSCode 里 `Cmd + P` 打开 `logs/server.log` 也可实时刷新）。
+   - 重建并重启：`docker compose up -d --build`（改 server.py 后必须重建镜像才生效）。
+   - 跑本任务测试：`python3 test_http_upload_logs.py`。

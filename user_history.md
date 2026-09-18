@@ -423,3 +423,54 @@ complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.uplo
 另清理了测试残留的 `obs/.chunks/*test_*` 会话目录。
 
 ---
+
+## 2026-09-19
+
+### 任务：修复「http 下手机大文件上传失败」+ 挂载 logs 目录
+
+**worknote 2026-09-19 04:00**：用户反馈「上传失败了！！并且logs目录没挂载！！！」。
+
+**排查（定位到真正根因）**：
+
+1. 服务端接口本身没问题：本地 `PUT` 直传、`/upload/init` + 分片 + `complete` 全协议
+   （含 55MB 大文件并发 3 路）全部 201/200，下载校验一致。
+2. 用 Playwright 打开 `http://192.168.8.116/`（局域网 IP，非安全上下文）实测：
+   `window.isSecureContext === false`、`typeof crypto.subtle === "undefined"`。
+   **根因**：浏览器只在安全上下文（https / localhost）暴露 `crypto.subtle`，
+   通过 `http://obs.dimond.top` 或 `http://<局域网IP>` 访问时它为 `undefined`，
+   而 >10MB 的文件走分片路径要调 `crypto.subtle.digest` → 直接抛错 → **所有视频（都>10MB）上传失败**；
+   ≤10MB 走 PUT 直传不需要哈希，所以「小文件能传、大文件全挂」。
+3. `logs/` 目录未挂载：`docker-compose.yml` 只挂了 `obs`、`obs_shards`；
+   且重写后的 `server.py` 只 print 到 stdout，不写日志文件。
+
+**实现**：
+
+1. **`src/obs/server.py`（首页内联 JS）**：
+   - 新增 `const HAS_SUBTLE = !!(globalThis.crypto && globalThis.crypto.subtle && globalThis.crypto.subtle.digest);`
+   - 新增纯 JS SHA-256 兜底 `sha256HexJS(bytes)`（与 `crypto.subtle.digest("SHA-256")` 输出逐位一致）；
+   - `sha256Hex(data)` 改为：`HAS_SUBTLE` 为真走 `crypto.subtle`，否则走 `sha256HexJS`。
+     于是 http 下手机上传大文件不再依赖 `crypto.subtle`。
+2. **日志**：新增全局 `LOG_DIR`（默认 `logs`，容器内 `LOG_DIR=/app/logs`）与 `log_line()`，
+   带时间戳追加写 `{LOG_DIR}/server.log`（同时 print 到 stdout）。
+   接入点：lifespan 启动/关闭、秒传命中、`PUT /{filename}`、表单上传、分片合并的成功/失败。
+3. **`docker-compose.yml`**：新增 `"${LOGS_DIR:-./logs}:/app/logs"` 挂载与 `LOG_DIR=/app/logs`。
+4. **`Dockerfile.obs`**：`mkdir -p /app/obs /app/hls /app/logs`，新增 `ENV LOG_DIR=/app/logs`。
+
+**测试**：新建 `test_http_upload_logs.py`（5 组用例，120s 超时），按 TDD 先删上一任务的
+`test_upload_stream.py`，先跑红灯（缺兜底、缺 logs 挂载）再实现转绿：
+① 首页 JS 有 `crypto.subtle` 可用性探测 + 纯 JS SHA-256 兜底且 `sha256Hex` 已接入；
+② **node 里 `globalThis.crypto = {}` 模拟非安全上下文**，跑首页真实哈希函数，
+   6 组数据（含空输入 / 非整除边界）分片 sha256 与整文件指纹都与 Python 完全一致；
+③ **node 模拟非安全上下文直接执行真实 `uploadOneFileResumable`** 上传 12MB+ 文件成功，
+   进度 100%、下载 sha256 一致；
+④ docker-compose 挂载 logs + `LOG_DIR=/app/logs`、Dockerfile 建 `/app/logs`，
+   且主机 `logs/server.log` 有启动日志与上传事件；
+⑤ 回归：PUT 直传 / 分片协议端到端 / 秒传 / `/health` / 首页拖拽区 / 视频页。
+5 组全绿，回归 `test_integration.py` 8 组全绿；重建 `obs-obs` 镜像生效。
+
+**额外用真实浏览器验证**（Playwright）：在 `http://192.168.8.116/`（非安全上下文）下
+`sha256Hex("abc")` 返回与标准 sha256 一致；再通过页面「选择文件」用文件输入真实上传
+`browser_big_test.bin`（12MB，走分片）→ 成功出现在文件列表，`logs/server.log` 记录
+`上传完成(分片) file=browser_big_test.bin size=12582912 chunks=2`。测试残留已清理。
+
+---
