@@ -258,3 +258,39 @@
 重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
 
 ---
+
+## 2026-09-18（续 5）
+
+### 任务：视频页回退到 95d2d7d + 档位改为 1x / 2x / 7x（默认 1x）
+
+**worknote 2026-09-18**：用户要求「reset 到 95d2d7df81bab5415584e9e335f80ef2f852eef6，
+然后播放速率留下一倍，两倍和七倍」。
+
+**范围确认**：完整硬 reset 会丢弃其后 6 个提交（含今天已完成的 url_head、/health、
+首页拖拽上传区、播放完成自动切下一个、1/3/7 档位）。经与用户确认，实际采用
+**只回退视频页两个文件** 的方式：
+`git checkout 95d2d7d -- src/obs/video_static/index.html src/obs/video_static/app.js`，
+非视频改动（url_head、/health、首页拖拽上传区）全部保留，`main` 分支未做 reset。
+
+**实现**：
+
+1. 视频页两文件回退到 95d2d7d（`index.html` 恢复 8 档结构、`app.js` 恢复 `video.loop = true`、
+   移除 `ended` 自动切下一个监听；`-3x` 倒放与保活本就在 95d2d7d 内，未受影响）。
+2. 在回退基础上改档位：`index.html` 的 `#speedOptions` 改为
+   **1x（active）/ 2x / 7x**，移除 0.5/0.8/1.5/3/5。
+3. `app.js` 第 63 行 `let playbackSpeed = 1` 补注释「档位：1x / 2x / 7x，默认 1x」。
+4. `test_integration.py`：回归用例更名 `test_speed_options_only_127`，
+   档位断言与旧档位排除项同步更新。
+
+**测试**：新建 `test_video_revert_127.py`（4 组用例，60s 超时），断言
+① 视频页两文件已回退：`video.loop = true`、无 `ended` 监听，且 `app.js` 与
+`git show 95d2d7d:...app.js` **逐行比对**仅允许 1 处档位注释差异；
+② 线上 `/video` 档位为 1/2/7 且 `active` 唯一落在 1x，旧档位 0.5/0.8/1.5/3/5 均已移除；
+③ 源码档位与 `playbackSpeed` 默认值一致、注释已更新、点击链路完好；
+④ 非视频改动保留（`url_head`、`/health`、首页 `#uploadZone`）+ -3x 倒放/保活回归。
+按 TDD 规则先删除上一任务的 `test_speed_default_1x.py`，先跑红灯再执行回退转绿。
+重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
+
+> 注：回退 `app.js` 会一并移除「播放完成自动切下一个视频」（该逻辑原在 3668f0b 的 app.js 中）。
+
+---
