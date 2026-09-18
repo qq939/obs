@@ -294,3 +294,33 @@
 > 注：回退 `app.js` 会一并移除「播放完成自动切下一个视频」（该逻辑原在 3668f0b 的 app.js 中）。
 
 ---
+
+## 2026-09-18（续 6）
+
+### 任务：播放完成自动切换到下一个视频（回退后重新加回）
+
+**worknote 2026-09-18**：用户提出「1、播放完成需要切换到下一个视频」
+（回退到 95d2d7d 时该逻辑随 app.js 一起被移除，现按要求加回）。
+
+**实现**（`src/obs/video_static/app.js`）：
+
+1. 第 241 行：`video.loop = true` → `video.loop = false`
+   （循环播放不会触发 `ended`，无法自动切下一个）。
+2. 第 1065-1083 行：新增 `video` 的 `ended` 监听，复用与上滑/滚轮**同一条吸附动画路径**
+   `vertAnimateTo(vertBaseTop - h, 1)` 切到下一个视频：
+   - 空列表直接返回；
+   - `vertAnim` 进行中返回，防重复触发；
+   - **倒放分支**：第一页为 -3x 倒放，负速率走到开头浏览器同样会触发 `ended`，
+     此时跳回 `duration - 0.2` 并重新 `startReverse()` + `play()`，
+     保证「永不暂停」的保活机制不被破坏，视频不会卡住。
+
+**测试**：新建 `test_auto_next.py`（4 组用例，60s 超时），断言
+① `video.loop = false` 且无残留 `loop = true`；
+② `ended` 监听存在、有空列表保护、走上滑吸附路径 `vertAnimateTo(vertBaseTop - h, 1)`、
+   按 `feeds[1].clientHeight` 计算翻页距离、`vertAnim` 防重入；
+③ 倒放分支含 `reverseActive` 判断 + 跳回结尾 + `startReverse()` + 续播；
+④ 线上 `/video/app.js` 已下发该实现，并回归 -3x 倒放与 1/2/7 档位（默认 1x）。
+按 TDD 规则先删除上一任务的 `test_video_revert_127.py`，先跑红灯再实现转绿。
+重建 `obs-obs` 镜像生效；本任务 4 组 + 回归 8 组全部通过。
+
+---

@@ -238,7 +238,7 @@
     // ---------------------------------------------------------------- single video element (ONE instance only)
     const video = document.createElement('video');
     video.muted = false;
-    video.loop = true;
+    video.loop = false;   // 不循环：播放完成触发 ended -> 自动切下一个视频（见下方 ended 监听）
     video.playsInline = true;
     video.preload = 'metadata';
     video.setAttribute('playsinline', '');
@@ -1061,6 +1061,25 @@
         const h = Math.max(1, feeds[1].clientHeight);
         vertAnimateTo(vertBaseTop - dir * h, dir);
     }, { passive: false });
+
+    // 播放完成 -> 自动切换到下一个视频（与上滑/滚轮共用同一条吸附动画路径）
+    // 第一页为 -3x 倒放：负速率走到开头时浏览器也会触发 ended，此时跳回结尾继续倒放，
+    // 保证视频始终处于播放状态（保活机制）。
+    video.addEventListener('ended', () => {
+        if (videos.length === 0) return;
+        if (reverseActive) {
+            const dur = video.duration;
+            if (isFinite(dur) && dur > 0) {
+                try { video.currentTime = Math.max(0, dur - 0.2); } catch (_) {}
+            }
+            startReverse();
+            if (playing) video.play().catch(() => {});
+            return;
+        }
+        if (vertAnim) return;
+        const h = Math.max(1, feeds[1].clientHeight);
+        vertAnimateTo(vertBaseTop - h, 1);
+    });
 
     // 切换播放/暂停：点击视频、空格键共用
     function togglePlayPause() {
