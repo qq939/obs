@@ -373,3 +373,53 @@ complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.uplo
 、`test_server.py` 用的是旧目录结构（`from server import app`）无法导入。
 
 ---
+
+## 2026-09-18（续 8）
+
+### 任务：手机上传优化 A/B/C
+
+**worknote 2026-09-18**：用户问「当前上传（考虑手机上传）更快了吗」，排查后给出优化清单，
+用户回复「ABC, go」：
+- A 分片哈希只算一次并缓存复用（重试不再重算）
+- B 去掉整文件 `arrayBuffer()` 预扫（手机上大文件会 OOM）→ 改「分片哈希 → 文件指纹」
+- C 分片并发上传 + 服务端阻塞哈希搬进线程池
+
+**实现（`src/obs/server.py`）**：
+
+1. **A + B（客户端）**：
+   - `sha256Hex(data)` 改为接受 Blob / ArrayBuffer / TypedArray，只对传入的那一块算哈希。
+   - 新增 `computeChunkHashes(file, chunkSize, totalChunks, onProgress)`：顺序 `file.slice()`
+     逐片算 sha256，**内存只占一个分片**（原来是 `file.arrayBuffer()` 把整个文件读进内存）。
+   - 新增 `fileFingerprint(chunkHashes)`：各分片 sha256（hex）拼接后再取一次 sha256 作为
+     **整文件指纹**（与「整文件 sha256」同等强度地绑定分片集合与顺序，但只读一遍文件）。
+   - `uploadOneFileResumable` 改为：单遍算哈希 → 指纹 → init → 并发上传 → complete。
+     分片 PUT 直接用 `chunkHashes[i]`（缓存复用），请求体直接传 `blob`（不再 `arrayBuffer()` 复制）。
+   - 进度新增「校验中 / 上传中」两个阶段（`report(pct, loaded, stage)`），避免大文件哈希期间无反馈。
+2. **C（客户端）**：新增 `UPLOAD_CONCURRENCY = 3`，分片用 worker 池并发上传，
+   进度按已完成字节累计；已上传分片（断点续传）自动跳过。
+3. **服务端**：
+   - 新增 `chunk_fingerprint(path, chunk_size)`：流式按 `chunk_size` 切分文件、对每片
+     sha256（hex）拼接后再取 sha256，**内存 O(chunk_size)**；与前端实现一一对应。
+   - `/upload/init`：秒传判定改用 `chunk_fingerprint`（原来是整文件 `file_sha256`）；
+     已上传分片枚举抽成 `_scan_uploaded_parts` 并走 `asyncio.to_thread`。
+   - `/upload/complete`：新增 `chunk_size` 参数（缺则 400），用 `chunk_fingerprint` 校验；
+     `upload_chunk` 的逐片校验同样改走 `asyncio.to_thread`，避免阻塞事件循环（并发才有意义）。
+
+**API 变更**：`hash` 字段语义从「整文件 sha256」变为「按 chunk_size 的分片指纹」；
+`/upload/complete` 必须新增 `chunk_size`（前端已同步）。
+秒传仍可用（同文件 + 同分片大小即命中；将来若做自适应分片大小会削弱秒传命中率）。
+
+**测试**：新建 `test_upload_stream.py`（7 组用例，90s 超时），按 TDD 先删上一任务的
+`test_chunk_verify.py`，先跑红灯（旧实现仍 `sha256Hex(file)`）再实现转绿：
+① 前端无整文件 arrayBuffer 预扫、分片哈希复用、3 路并发、complete 带 chunk_size；
+② **node 跑首页里真实的 JS 函数**，4 组随机数据（含非整除边界）指纹与 Python 完全一致；
+③ **node 直接执行真实的 `uploadOneFileResumable`** 上传 12MB+ 文件（相对路径 fetch 重写为绝对），
+   校验阶段含「校验中/上传中」、进度 100%、下载内容 sha256 一致（真·端到端）；
+④ Python 侧并发三路分片协议端到端（全部 201 + 指纹校验 + 内容一致）；
+⑤ 秒传命中（skip=True，url 正确）；
+⑥ 负例：错误分片哈希 422 且未落账、错误指纹 complete 422、缺 chunk_size 400；
+⑦ 回归：PUT 直传 / `/health` / 首页拖拽区 / 视频页（-3x 倒放、自动切下一个、1-2-7 档位）。
+7 组全绿，回归 `test_integration.py` 8 组全绿；重建 `obs-obs` 镜像生效。
+另清理了测试残留的 `obs/.chunks/*test_*` 会话目录。
+
+---

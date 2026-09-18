@@ -442,11 +442,28 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
-            async function sha256Hex(file) {
-                const buf = await file.arrayBuffer();
+            const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
+            // data 可以是 Blob / ArrayBuffer / TypedArray；只对传入的这一块数据算哈希，不读整个文件
+            async function sha256Hex(data) {
+                const buf = (data instanceof Blob) ? await data.arrayBuffer() : data;
                 const digest = await crypto.subtle.digest("SHA-256", buf);
                 const arr = Array.from(new Uint8Array(digest));
                 return arr.map(b => b.toString(16).padStart(2, "0")).join("");
+            }
+            // 各分片 sha256（hex）拼接后再取一次 sha256，作为整文件指纹。
+            // 与「整文件 sha256」等价强度地绑定分片集合与顺序，但只需顺序读一遍文件，内存 O(分片)
+            async function fileFingerprint(chunkHashes) {
+                return await sha256Hex(new TextEncoder().encode(chunkHashes.join("")));
+            }
+            // 顺序读取文件、逐片算 sha256：内存只占一个分片（不会把整个文件读进内存，手机上传大文件不会 OOM）
+            async function computeChunkHashes(file, chunkSize, totalChunks, onProgress) {
+                const hashes = new Array(totalChunks);
+                for (let i = 0; i < totalChunks; i++) {
+                    const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size));
+                    hashes[i] = await sha256Hex(blob);
+                    if (onProgress) onProgress(Math.round((i + 1) / totalChunks * 100));
+                }
+                return hashes;
             }
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
@@ -482,12 +499,20 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             }
 
             // 大文件分片上传（>10MB）：/upload/init + /upload/chunk + /upload/complete，支持秒传/断点续传
+            //  - 分片哈希只算一次并缓存复用（重试/重传不再重算、不再重读文件）
+            //  - 分片 UPLOAD_CONCURRENCY 路并发上传
             async function uploadOneFileResumable(file, onProgress) {
                 const chunkSize = CHUNK_SIZE_BROWSER;
                 const size = file.size;
                 const totalChunks = Math.ceil(size / chunkSize) || 1;
                 const hashAlgo = "sha256";
-                const hash = await sha256Hex(file);
+
+                // 1) 单遍顺序读取：拿到每片哈希（内存 O(分片)），并合并成整文件指纹
+                const chunkHashes = await computeChunkHashes(file, chunkSize, totalChunks,
+                    (pct) => { if (onProgress) onProgress(pct, 0, '校验中'); });
+                const hash = await fileFingerprint(chunkHashes);
+
+                // 2) 初始化会话（含秒传判定与已上传分片枚举）
                 const initResp = await fetch('/upload/init', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -495,31 +520,48 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 });
                 if (!initResp.ok) throw new Error('初始化失败: ' + await initResp.text());
                 const info = await initResp.json();
-                if (info.skip) return info.url;   // 秒传
+                if (info.skip) {                                   // 秒传
+                    if (onProgress) onProgress(100, size, '上传中');
+                    return info.url;
+                }
                 const uploadId = info.uploadId;
                 const uploaded = new Set(info.uploaded || []);
-                for (let i = 0; i < totalChunks; i++) {
-                    if (!uploaded.has(i)) {
-                        const start = i * chunkSize;
-                        const blob = file.slice(start, Math.min(start + chunkSize, size));
+
+                // 3) 并发上传缺失分片（哈希复用第 1 步结果，重试也不重算）
+                let doneBytes = 0;
+                for (const i of uploaded) doneBytes += Math.min(chunkSize, size - i * chunkSize);
+                let nextIndex = 0;
+                const worker = async () => {
+                    while (true) {
+                        const i = nextIndex++;
+                        if (i >= totalChunks) return;
+                        if (uploaded.has(i)) continue;
+                        const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, size));
                         let ok = false;
                         for (let attempt = 0; attempt < 3 && !ok; attempt++) {
                             const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
                                 method: 'PUT',
-                                // 逐片校验：带上本分片的 sha256，服务端落盘后比对，不一致会 422 并丢弃该分片
-                                headers: { 'X-Chunk-SHA256': await sha256Hex(blob) },
-                                body: await blob.arrayBuffer(),
+                                // 逐片校验用哈希；重试直接复用，避免重复计算
+                                headers: { 'X-Chunk-SHA256': chunkHashes[i] },
+                                body: blob,
                             });
                             ok = r.status === 201;
                         }
                         if (!ok) throw new Error('分片上传失败: ' + i);
+                        doneBytes += blob.size;
+                        if (onProgress) onProgress(Math.round(Math.min(size, doneBytes) / size * 100),
+                                                   Math.min(size, doneBytes), '上传中');
                     }
-                    if (onProgress) onProgress(Math.round(Math.min(size, (i + 1) * chunkSize) / size * 100));
-                }
+                };
+                const workers = [];
+                for (let w = 0; w < Math.min(UPLOAD_CONCURRENCY, totalChunks); w++) workers.push(worker());
+                await Promise.all(workers);
+
+                // 4) 合并（服务端按分片指纹再校验一次）
                 const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
+                    body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, chunk_size: chunkSize, hash_algo: hashAlgo, hash })
                 });
                 if (!c.ok) throw new Error('合并失败: ' + await c.text());
                 return await c.text();
@@ -537,15 +579,15 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 for (let i = 0; i < totalFiles; i++) {
                     const file = files[i];
                     statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
-                    const report = (pct, loaded) => {
+                    const report = (pct, loaded, stage) => {
                         const overallPct = totalBytes > 0 ? Math.round((overallBytes + (loaded || 0)) / totalBytes * 100) : 0;
-                        statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
+                        statusEl.textContent = `${stage || '上传中'}... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
                     };
                     try {
                         if (file.size <= CHUNK_SIZE_BROWSER) {
                             await uploadOneFileDirect(file, report);
                         } else {
-                            await uploadOneFileResumable(file, (pct) => report(pct, file.size * pct / 100));
+                            await uploadOneFileResumable(file, report);
                         }
                         overallBytes += file.size;
                         success++;
@@ -805,6 +847,37 @@ def file_sha256(path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def chunk_fingerprint(path: str, chunk_size: int) -> str:
+    """按 chunk_size 顺序切分文件，对各分片 sha256（hex）拼接后再取一次 sha256，作为整文件指纹。
+    流式读取，内存占用 O(chunk_size)，不会把整个文件读进内存。
+    与前端 computeChunkHashes + fileFingerprint 的实现一一对应。
+    （使用位置：upload_init 秒传判定、upload_complete 整文件校验）"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            part = f.read(chunk_size)
+            if not part:
+                break
+            h.update(hashlib.sha256(part).hexdigest().encode())
+    return h.hexdigest()
+
+def _scan_uploaded_parts(up_dir: str):
+    """枚举已上传分片（由 upload_init 放进线程池执行，避免阻塞事件循环）"""
+    uploaded = []
+    chunk_hashes = {}
+    try:
+        for name in os.listdir(up_dir):
+            if name.endswith(".part"):
+                try:
+                    idx = int(name[:-5])
+                    uploaded.append(idx)
+                    chunk_hashes[idx] = file_sha256(os.path.join(up_dir, name))
+                except Exception:
+                    pass
+    except Exception:
+        uploaded = []
+    return uploaded, chunk_hashes
+
 @app.post("/upload/init")
 async def upload_init(request: Request):
     data = await request.json()
@@ -814,46 +887,27 @@ async def upload_init(request: Request):
     file_hash = data.get("hash")
     total_chunks = int(data.get("total_chunks", 0))
     chunk_size = int(data.get("chunk_size", 0))
-    if not filename or not size or not file_hash:
-        raise HTTPException(status_code=400, detail="缺少必要参数")
+    if not filename or not size or not file_hash or chunk_size <= 0 or total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="缺少必要参数（filename/size/hash/chunk_size/total_chunks）")
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
     os.makedirs(upload_dir, exist_ok=True)
     os.makedirs(chunk_dir, exist_ok=True)
     final_path = os.path.join(upload_dir, filename)
     if os.path.exists(final_path) and os.path.getsize(final_path) == size:
-        # 进行秒传校验
+        # 进行秒传校验（按同一分片大小重算指纹，流式读取不占内存）
         if hash_algo == "sha256":
-            existing_hash = file_sha256(final_path)
+            existing_hash = await asyncio.to_thread(chunk_fingerprint, final_path, chunk_size)
             if existing_hash == file_hash:
                 url = f"{url_head}/{filename}"
                 return JSONResponse({"skip": True, "url": url})
     upload_id = make_upload_id(filename, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
-    
-    # 枚举已上传分片
-    uploaded = []
-    chunk_hashes = {}
-    
-    try:
-        for name in os.listdir(up_dir):
-            if name.endswith(".part"):
-                try:
-                    idx = int(name[:-5])
-                    uploaded.append(idx)
-                    # 计算已上传分片的哈希
-                    part_path = os.path.join(up_dir, name)
-                    with open(part_path, "rb") as f:
-                        h = hashlib.sha256()
-                        while chunk := f.read(1024 * 1024):
-                            h.update(chunk)
-                        chunk_hashes[idx] = h.hexdigest()
-                except Exception:
-                    pass
-    except Exception:
-        uploaded = []
-    
+
+    # 枚举已上传分片（放线程池，避免阻塞事件循环）
+    uploaded, chunk_hashes = await asyncio.to_thread(_scan_uploaded_parts, up_dir)
+
     # 初始化上传会话（存储分片哈希和总体哈希）
     with SESSION_LOCK:
         upload_sessions[upload_id] = {
@@ -895,7 +949,7 @@ async def upload_chunk(upload_id: str, index: int, request: Request):
                 await f.write(chunk)
 
         # 逐片校验：必须与客户端声明一致（缺失声明视为不合格，不允许跳过校验）
-        actual_hash = file_sha256(part_path)
+        actual_hash = await asyncio.to_thread(file_sha256, part_path)
         if not expected_hash or actual_hash != expected_hash:
             try:
                 os.remove(part_path)
@@ -953,10 +1007,11 @@ async def upload_complete(upload_id: str, request: Request):
     filename = data.get("filename")
     size = int(data.get("size", 0))
     total_chunks = int(data.get("total_chunks", 0))
+    chunk_size = int(data.get("chunk_size", 0))
     hash_algo = data.get("hash_algo", "sha256")
     file_hash = data.get("hash")
-    if not filename or not size or total_chunks <= 0:
-        raise HTTPException(status_code=400, detail="缺少必要参数")
+    if not filename or not size or total_chunks <= 0 or chunk_size <= 0:
+        raise HTTPException(status_code=400, detail="缺少必要参数（filename/size/total_chunks/chunk_size）")
     chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     up_dir = os.path.join(chunk_dir, upload_id)
@@ -993,12 +1048,12 @@ async def upload_complete(upload_id: str, request: Request):
         if real_size != size:
             raise HTTPException(status_code=422, detail="合并后大小不匹配")
         
-        # 哈希验证：逐片校验已在 /upload/chunk 完成，这里对合并结果做一次整文件校验，
-        # 把「服务端拿到的字节」与「客户端声明的整文件哈希」真正绑定（不再假设分片对则整体对）
+        # 哈希验证：逐片校验已在 /upload/chunk 完成，这里按同一分片大小重算整文件指纹，
+        # 把「服务端拿到的字节」与「客户端声明的指纹」真正绑定（流式读取，内存 O(chunk_size)）
         if hash_algo == "sha256" and file_hash:
-            actual_hash = file_sha256(tmp_path)
+            actual_hash = await asyncio.to_thread(chunk_fingerprint, tmp_path, chunk_size)
             if actual_hash != file_hash:
-                raise HTTPException(status_code=422, detail="整文件哈希校验失败")
+                raise HTTPException(status_code=422, detail="文件指纹校验失败")
         
         # 移动到最终位置
         final_path = os.path.join(upload_dir, filename)
