@@ -116,27 +116,64 @@ def hls_duration_sync(name: str) -> float:
         pass
     return 0
 
+# 时长探测并发度（用于 /videos 首次加载时并发跑 ffprobe，避免 28 个视频串行等待）
+# 使用位置：list_video_files 中的 duration_executor.map
+DURATION_PROBE_WORKERS = 4
+# 时长缓存：key = (绝对路径, size, mtime_ns, HLS 签名) -> duration 秒。
+# 使用位置：probe_duration_sync 读/写；避免每次 /videos 重复启动 ffprobe 子进程。
+_duration_cache: Dict[tuple, float] = {}
+_DURATION_CACHE_LOCK = threading.Lock()
+duration_executor = ThreadPoolExecutor(max_workers=DURATION_PROBE_WORKERS, thread_name_prefix="ffprobe")
+
+def _hls_signature(name: str) -> float:
+    """HLS m3u8 的 mtime（无 HLS 返回 0），用于让缓存能感知 HLS 生成/更新"""
+    try:
+        m3u8 = os.path.join(get_hls_dir(), name, "index.m3u8")
+        return os.path.getmtime(m3u8) if os.path.exists(m3u8) else 0.0
+    except OSError:
+        return 0.0
+
 def probe_duration_sync(file_path: str, name: str = "") -> float:
-    """获取视频时长（秒）"""
+    """获取视频时长（秒）。结果按 (路径, size, mtime, HLS 签名) 缓存，避免重复 ffprobe。"""
+    # 缓存 key：文件被替换/修改（size/mtime 变化）或 HLS 生成后自动失效
+    try:
+        st = os.stat(file_path)
+        key = (os.path.abspath(file_path), st.st_size, st.st_mtime_ns, _hls_signature(name))
+    except OSError:
+        key = None
+    if key is not None:
+        with _DURATION_CACHE_LOCK:
+            cached = _duration_cache.get(key)
+        if cached is not None:
+            return cached
+
+    duration = 0.0
     # 1) 从 HLS 求和 EXTINF
     if name:
         d = hls_duration_sync(name)
         if d > 0:
-            return d
+            duration = d
     # 2) ffprobe 兜底
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", file_path],
-            capture_output=True, text=True, timeout=4
-        )
-        data = json.loads(result.stdout)
-        d = float(data.get("format", {}).get("duration", 0))
-        return d if d > 0 else 0
-    except Exception:
-        return 0
+    if duration <= 0:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", file_path],
+                capture_output=True, text=True, timeout=4
+            )
+            data = json.loads(result.stdout)
+            d = float(data.get("format", {}).get("duration", 0))
+            duration = d if d > 0 else 0.0
+        except Exception:
+            duration = 0.0
+
+    if key is not None:
+        with _DURATION_CACHE_LOCK:
+            _duration_cache[key] = duration
+    return duration
 
 def list_video_files() -> List[dict]:
-    """列出所有视频文件 - 与 obs-video-app 格式一致"""
+    """列出所有视频文件 - 与 obs-video-app 格式一致。
+    时长探测走缓存；未命中缓存的项用 duration_executor 并发探测（不阻塞调用线程的事件循环）。"""
     upload_dir = get_upload_dir()
     videos = []
     try:
@@ -146,18 +183,28 @@ def list_video_files() -> List[dict]:
                 p = os.path.join(upload_dir, name)
                 if os.path.isfile(p):
                     stat = os.stat(p)
-                    duration = probe_duration_sync(p, name)
                     videos.append({
                         "name": name,
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
-                        "duration": duration,
+                        "duration": 0.0,
                         "url": f"/obs/{quote(name)}",
                         "hls": f"/hls/{quote(name)}/index.m3u8",
                         "hlsReady": hls_exists(name)
                     })
     except Exception:
         pass
+
+    # 并发补齐时长：已缓存的会立即返回（缓存命中不启动 ffprobe）
+    if videos:
+        def _fill(item):
+            p = os.path.join(upload_dir, item["name"])
+            item["duration"] = probe_duration_sync(p, item["name"])
+            return item
+        try:
+            list(duration_executor.map(_fill, videos))
+        except Exception:
+            pass
     return videos
 
 def get_video_static_dir() -> str:
@@ -1298,8 +1345,10 @@ async def obs_file(filename: str):
 
 @app.get("/videos")
 async def videos_list():
-    """获取视频列表"""
-    return JSONResponse({"videos": list_video_files()})
+    """获取视频列表。
+    走 asyncio.to_thread：list_video_files 内部有 ffprobe 等阻塞调用，
+    放在线程池执行，避免阻塞事件循环拖慢正在播放的视频流（多客户端并发时的卡顿根因）。"""
+    return JSONResponse({"videos": await asyncio.to_thread(list_video_files)})
 
 @app.get("/hls/{filename}/{path:path}")
 async def hls_playlist(filename: str, path: str):

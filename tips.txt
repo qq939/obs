@@ -94,3 +94,18 @@
    - 想临时预览改动：DevTools → Sources → 对应 css 文件直接改，满意后再落到源码，
      然后 `docker compose up -d --build` 重建（静态文件在镜像里，必须重建）。
    - 跑本任务测试：`python3 test_arrow_keys_swap.py`、`python3 test_speed_vertical_layout.py`。
+
+14. **排查后端「卡顿」的通用套路（本项目 /videos 阻塞事件循环为例）**:
+   - 先用 `curl -w "%{time_total}\n" -o /dev/null <url>` 量每个接口耗时，找出慢的那一个
+     （本项目 `/videos` 曾 2.3~3.1s）。
+   - 再验证「是否阻塞事件循环」：并发打 N 个慢接口，同时发一个轻量接口（如 `/health`），
+     看轻量接口是否被拖慢。本项目实测 `/health` 从 0.009s → **17.68s**，即确诊阻塞。
+   - 根因模式：`async def` 路由里**同步调用**阻塞函数（`subprocess.run` / `time.sleep` / 大文件 IO）
+     → 单线程事件循环被占满。修法：`await asyncio.to_thread(阻塞函数)`。
+   - 重复计算要加缓存：本项目给 ffprobe 时长加了 `(路径, size, mtime_ns, HLS签名)` 为 key
+     的进程级缓存，热缓存后 `/videos` 从 2.5s → 0.009s。
+   - 冷启动也要快：用 `ThreadPoolExecutor` 并发跑未命中缓存的探测（4 路并发，
+     28 次串行 ffprobe → 约 1s）。
+   - 快速定位同步阻塞点：`Grep` 搜 `subprocess.run` / `time.sleep` / `open(` 是否出现在
+     `async def` 路由体内。
+   - 跑本任务测试：`python3 test_videos_concurrency.py`（含重启容器后的冷启动并发验证）。

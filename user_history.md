@@ -598,3 +598,58 @@ complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.uplo
 1x/2x/7x 三个按钮的 `top` 分别为 439 / 470 / 502（3 个不同行）且宽度均为 567（父容器满宽）。
 
 ---
+
+## 2026-09-19（续 4）
+
+### 任务：排查并修复「多个客户端同时用 video 会卡顿」
+
+**worknote 2026-09-19**：用户反馈「现在功能上很完美了。但是为啥多个客户端同时用 video 会卡顿？」
+
+**排查过程（量化定位）**：
+
+1. 先排除播放链路：`/obs/{filename}` 走 `FileResponse`（支持 Range），实测 Range 1MB 仅 0.026s，
+   不是瓶颈。
+2. 量到 **`GET /videos` 单次耗时 2.35~3.13s**：本项目 42 个视频中 **28 个没有 HLS**，
+   `list_video_files()` 对每个无 HLS 视频执行 `probe_duration_sync` →
+   `subprocess.run(["ffprobe", ...], timeout=4)`，**28 次串行子进程调用**。
+3. **关键**：`/videos` 是 `async def`，但内部**同步调用** `list_video_files()`，
+   于是这 2~3 秒**全程阻塞事件循环**（asyncio 单线程）。
+4. 复现实验（`/tmp/diag_videos.py`）：3 个客户端同时请求 `/videos` 时，
+   同一个 `/health` 请求从基线 **0.009s 恶化到 17.68s**；三个 `/videos` 分别耗时 3.86 / 12.46 / 17.74s。
+   → 多个客户端同时打开 video 页时，**所有正在播放的视频流（Range 请求）都被卡住排队**，这就是卡顿根因。
+
+**实现（`src/obs/server.py`）**：
+
+1. `/videos` 路由改为 `await asyncio.to_thread(list_video_files)` ——
+   阻塞逻辑搬进线程池，不再占用（阻塞）事件循环。
+2. `probe_duration_sync` 增加**进程级时长缓存** `_duration_cache`，
+   key = `(绝对路径, st_size, st_mtime_ns, HLS m3u8 签名)`：
+   文件被替换 / HLS 生成后自动失效，避免每次 `/videos` 重复启动 ffprobe 子进程。
+3. `list_video_files` 里未命中缓存的时长用专用线程池
+   `duration_executor = ThreadPoolExecutor(DURATION_PROBE_WORKERS=4)` **并发探测**，
+   把首次冷加载也压下来（原串行 28 次 → 4 路并发）。
+
+**测试**：新建 `test_videos_concurrency.py`（5 组用例，150s 超时），按 TDD 先跑红灯
+（`/videos` 仍同步调用）再实现转绿：
+① 源码：`/videos` 已 `asyncio.to_thread` 包裹且不再直接同步调用；
+② 源码：`_duration_cache` 存在且 key 含 size/mtime，`list_video_files` 用了线程池并发探测；
+③ 行为：热缓存后 `/videos` < 0.5s 且 42 个视频字段完整、duration 有效；
+④ **行为（重启容器清缓存）**：3 并发 `/videos` 期间 `/health` < 3s；
+⑤ 回归：`/obs` Range 流、首页、三页布局、进度条 100px、保活、-3x 倒放、1-2-7 档位、上传、logs 挂载。
+
+**修复前后实测对比**：
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 冷启动并发 3 客户端时 `/health` | **17.68s** | **0.004s** |
+| 冷启动 `/videos`（单次） | 3.13s | 0.99~1.12s（4 路并发探测） |
+| 热缓存 `/videos` | 2.35~3.13s | **0.009s** |
+
+5 组全绿；回归 `test_integration.py` 8 组、`test_arrow_keys_swap.py` 4 组、
+`test_speed_vertical_layout.py` 4 组全绿；重建 `obs-obs` 镜像生效。
+
+**其它潜在（本次未改，供后续参考）**：多客户端各自整段下载大 mp4 会争抢带宽与
+Docker Desktop(macOS) 的 bind mount 磁盘 IO；若无 HLS 且视频码率高，建议后续生成 HLS
+分片以降低单连接带宽峰值。
+
+---
