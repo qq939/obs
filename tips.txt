@@ -68,7 +68,7 @@
      `ensurePlaying()` 会自动静音重试；看到 `muted:true` 但 `paused:false` 属正常保活。
    - 注意：**左右滑动翻页（finishSwipe）也必须走 setPage**，否则会绕过保活逻辑。
    - `Cmd + F2` / `Shift + F12`：找 `ensurePlaying` / `setPage` 的全部引用。
-   - 跑本任务测试：`python3 test_page_switch_play.py`（含 node 行为断言 + 源码/线上校验）。
+   - 跑本任务测试：`python3 test_arrow_keys_swap.py`（含 node 行为断言 + 源码/线上校验）。
 
 11. **VSCode 定位函数引用（本项目排查经验）**:
    - `Shift + F12`（Find All References）列出 `setPage` / `ensurePlaying` 所有调用点。
