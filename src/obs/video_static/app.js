@@ -379,7 +379,11 @@
         viewport.dataset.page = n;
         pagesEl.style.setProperty('--page', n);
         buildPageDots();
+        // 页间切换必须保持播放：无论切页前是播放还是暂停，切页后一律恢复播放，绝不暂停。
+        // （先强制播放态，再按新页面应用速率，最后 ensurePlaying 确保真的在播）
+        playing = true;
         applyPagePlayback();
+        ensurePlaying();
     }
 
     // ---------------------------------------------------------------- playback effect per page
@@ -413,6 +417,21 @@
         reverseActive = false;
         if (reverseTimer !== null) { clearInterval(reverseTimer); reverseTimer = null; }
         reverseLastTs = 0;
+    }
+
+    // 统一「保播放」入口：保证视频一定处于正在播放状态，绝不暂停。
+    // 自动播放策略（无用户手势 / 移动端浏览器）拒绝未静音 play() 时，退回静音继续播放
+    // （muted autoplay 通常被允许），而不是停在暂停态。
+    // 使用位置：setPage（页间切换）、applyPagePlayback、updatePlayback、canplay、ended 倒放分支
+    function ensurePlaying() {
+        if (videos.length === 0) return;
+        video.muted = false;
+        const p = video.play();
+        if (p && p.catch) p.catch(() => {
+            video.muted = true;
+            const p2 = video.play();
+            if (p2 && p2.catch) p2.catch(() => {});
+        });
     }
 
     // 开始倒放（幂等：切视频 / 切页后重复调用也会重新应用正确速率）
@@ -468,9 +487,9 @@
             stopReverse();
             video.playbackRate = fastSpeed ? 5 : playbackSpeed;
         }
-        // 确保视频保持播放状态
+        // 确保视频保持播放状态（含自动播放策略兜底），绝不因切页暂停
         if (playing) {
-            video.play().catch(() => {});
+            ensurePlaying();
         }
     }
 
@@ -843,15 +862,7 @@
         if (!v) return;
 
         if (playing) {
-            video.muted = false;
-            const p = video.play();
-            if (p && p.catch) p.catch(() => {
-                // 自动播放策略拒绝：静音兜底继续播放，绝不中途暂停；
-                // 声音在用户下一次手势触发 updatePlayback 时恢复
-                video.muted = true;
-                const p2 = video.play();
-                if (p2 && p2.catch) p2.catch(() => {});
-            });
+            ensurePlaying();
         } else {
             video.pause();
         }
@@ -969,15 +980,10 @@
         const target = Math.max(0, Math.min(PAGE_COUNT - 1, dx < 0 ? currentPage + 1 : currentPage - 1));
         pagesEl.style.transform = '';            // clear inline so CSS var takes effect
         if (target !== currentPage) {
-            recordActivePosition();
-            currentPage = target;
+            // 统一走 setPage：记录进度 + 同步 DOM/CSS + 强制恢复播放（页间切换绝不暂停）
+            setPage(target);
         }
-        viewport.dataset.page = currentPage;     // 与 setPage 保持状态同步
-        pagesEl.style.setProperty('--page', currentPage);
         pagesEl.style.transition = '';
-        buildPageDots();
-        applyPagePlayback();
-        updatePlayback();  // 滑动成功也触发播放
         return true;
     }
 
@@ -1073,7 +1079,7 @@
                 try { video.currentTime = Math.max(0, dur - 0.2); } catch (_) {}
             }
             startReverse();
-            if (playing) video.play().catch(() => {});
+            if (playing) ensurePlaying();
             return;
         }
         if (vertAnim) return;
@@ -1321,12 +1327,9 @@
         video._pendingSeek = undefined;
     });
 
-    // 缓冲完成后自动播放（playing=true 时才触发）
+    // 缓冲完成后自动播放（playing=true 时才触发；含自动播放策略静音兜底，绝不停在暂停态）
     video.addEventListener('canplay', () => {
-        if (playing && !isNaN(video.duration)) {
-            const p = video.play();
-            if (p && p.catch) p.catch(() => {});
-        }
+        if (playing && !isNaN(video.duration)) ensurePlaying();
     });
 
     // Seek bar drag (touch + mouse)

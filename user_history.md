@@ -474,3 +474,83 @@ complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.uplo
 `上传完成(分片) file=browser_big_test.bin size=12582912 chunks=2`。测试残留已清理。
 
 ---
+
+## 2026-09-19（续 1）
+
+### 任务：视频页进度条加厚到 100px
+
+**worknote 2026-09-19**：用户反馈「进度条太细了，进度条要有100px的高度（宽度）」。
+指视频页第三页（设置页）底部、始终可见、可拖拽的播放进度条（项目里「进度条」即此元素，
+见历史提交「进度条移到第三页最下方」），原厚度仅 4px。
+
+**实现**（`src/obs/video_static/style.css`）：
+
+- `.seek-track` 高度 `24px` → **`100px`**（并去掉上下 `padding: 8px 0`，改为 `padding: 0`）；
+- `.seek-track::before`（底槽）高度 `4px` → **`100px`**，圆角 `2px` → `8px`；
+- `.seek-fill`（已播填充）高度 `4px` → **`100px`**，圆角 `2px` → `8px`。
+- 滑块 `.seek-thumb` 保持 `top:50% + translate(-50%,-50%)`，仍精确垂直居中（实测偏离 0px）。
+
+> 未改动上传弹窗里的 `.progress-bar`（8px），用户指的是可拖拽的播放进度条。
+
+**测试**：新建 `test_seekbar_100px.py`（4 组用例，60s 超时），按 TDD 先删上一任务的
+`test_http_upload_logs.py`（把 http 哈希兜底、logs 挂载的回归断言并入本脚本第 4 组），
+先跑红灯（线上 `.seek-track` 仍 24px）再实现转绿：
+① 线上 `/video/style.css` 的 `.seek-track` / `::before` / `.seek-fill` 高度均 ≥100px，
+   且旧 `4px` 细条已移除；
+② 源码 `style.css` 高度为 100px，与线上一一致；
+③ 拖动交互未受影响：仍用 `getBoundingClientRect` + 触摸/鼠标 `clientX` 横向计算，
+   滑块 `top:50%` 垂直居中，`#seekTrack/#seekFill/#seekThumb` 均在页面；
+④ 回归：-3x 倒放、1/2/7 档位、上传弹窗进度条、首页 http 哈希兜底、`/health`、logs 挂载。
+4 组全绿，回归 `test_integration.py` 8 组全绿；重建 `obs-obs` 镜像生效。
+
+**真实浏览器验证**（Playwright）：`/video` 按 `ArrowLeft` 切到设置页后实测
+`getBoundingClientRect().height === 100`、`::before` 计算值 `100px`、`#seekFill` 高 100px、
+滑块垂直居中偏离 0px，且进度条完整落在视口内（top 582 → bottom 682 / 视口高 698）。
+
+---
+
+## 2026-09-19（续 2）
+
+### 任务：从第 x 页切换到第 y 页必须保持视频播放（不暂停）
+
+**worknote 2026-09-19**：用户要求「从第x页切换到第y页一定要保证视频在播放，不要暂停！记得push到git」。
+
+**排查（找到 3 个会导致切页后暂停的点）**：
+
+1. `setPage()` 只调用 `applyPagePlayback()`，而后者是 `if (playing) { video.play() }` ——
+   一旦 `playing` 为 false（点击暂停、自动播放被拒），切页后视频**仍是暂停的**。
+2. **手机主要的左右滑动翻页路径 `finishSwipe()` 根本没走 `setPage()`**：
+   它自己复制了一份「`applyPagePlayback(); updatePlayback();`」，
+   而 `updatePlayback()` 在 `playing === false` 时会显式 `video.pause()`。
+3. `applyPagePlayback` / `canplay` 用的是裸 `video.play().catch(()=>{})`，
+   **没有自动播放策略兜底**（未静音 play() 被浏览器拒绝后不会静音重试）→ 切页/切源后一直暂停。
+
+**实现**（`src/obs/video_static/app.js`）：
+
+1. 新增统一保播放入口 `ensurePlaying()`：先 `video.muted = false` 尝试 `play()`；
+   被拒（NotAllowedError 等）时 `video.muted = true` 静音重试 —— 绝不调用 `pause()`。
+2. `setPage()` 收尾改为：`playing = true` → `applyPagePlayback()` → `ensurePlaying()`。
+   **页间切换强制回到播放态**（无论切页前是播放还是暂停）。
+3. `finishSwipe()` 翻页成功分支改为直接调用 `setPage(target)`，
+   与键盘/点击返回走同一条保活路径（顺带去掉重复的 DOM/CSS 同步代码）。
+4. `applyPagePlayback()`、`updatePlayback()`、`canplay` 监听、`ended` 倒放分支
+   统一改用 `ensurePlaying()`，消除所有「无兜底的裸 play()」。
+
+**测试**：新建 `test_page_switch_play.py`（4 组用例，60s 超时），按 TDD 先删上一任务的
+`test_seekbar_100px.py`（进度条 100px 的回归断言并入本脚本第 4 组），先跑红灯（缺 ensurePlaying）
+再实现转绿：
+① 源码断言：`ensurePlaying` 含 play + 静音兜底且不含 pause；`setPage` 强制 `playing = true` + `ensurePlaying()`；
+   `applyPagePlayback` 不暂停；**`finishSwipe` 已统一走 `setPage()`**；`canplay` 走 `ensurePlaying()`；
+② 线上 `/video/app.js` 已下发上述实现；
+③ **node 行为测试**：用大括号配对从真实 app.js 里抠出 `setPage / applyPagePlayback / ensurePlaying /
+   startReverse / stopReverse / reverseTick / supportsNegativeRate`，配一套 video/viewport 桩，
+   跑 6 个切页方向共 **15 条行为断言**（含「暂停态 1→2 切页后视频在播放」「0→2 速率恢复 playbackSpeed」
+   「自动播放被拒 → 静音重试后仍在播放且未调用 pause」「2→0 进入 -3x 倒放」）；
+④ 回归：进度条 100px、-3x 倒放、1/2/7 档位、首页 http 哈希兜底、`/health`、logs 挂载。
+4 组全绿，回归 `test_integration.py` 8 组全绿；重建 `obs-obs` 镜像生效。
+
+**真实浏览器验证**（Playwright，`/video`，http://127.0.0.1）：连续切页
+主页(1) → 设置页(2) → 信息页(0) → 回设置页(1)，每步实测 `video.paused === false`
+且 `currentTime` 持续递增（2012.5 → 2013.2 → 2013.9 → 2014.6），确认切页全程不暂停。
+
+---

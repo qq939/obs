@@ -57,4 +57,22 @@
    - 看服务端日志：容器已挂载 `logs/`，直接 `tail -f logs/server.log`
      （VSCode 里 `Cmd + P` 打开 `logs/server.log` 也可实时刷新）。
    - 重建并重启：`docker compose up -d --build`（改 server.py 后必须重建镜像才生效）。
-   - 跑本任务测试：`python3 test_http_upload_logs.py`。
+
+10. **调试「切页/切源后视频暂停」（本项目 ensurePlaying 保活）**:
+   - 一行自检：DevTools Console 执行
+     `(()=>{const v=document.querySelector('#videoContainer video');return {paused:v.paused,muted:v.muted,rate:v.playbackRate}})()`；
+     `paused:true` 就是被暂停了。
+   - 切页观察：`ArrowLeft/ArrowRight` 切换三页，每次切完再跑上一行，
+     `paused` 应始终为 `false`（本项目在 `setPage()` 里强制 `playing = true` + `ensurePlaying()`）。
+   - 自动播放策略：未静音 `play()` 在无用户手势时会被拒（`NotAllowedError`），
+     `ensurePlaying()` 会自动静音重试；看到 `muted:true` 但 `paused:false` 属正常保活。
+   - 注意：**左右滑动翻页（finishSwipe）也必须走 setPage**，否则会绕过保活逻辑。
+   - `Cmd + F2` / `Shift + F12`：找 `ensurePlaying` / `setPage` 的全部引用。
+   - 跑本任务测试：`python3 test_page_switch_play.py`（含 node 行为断言 + 源码/线上校验）。
+
+11. **VSCode 定位函数引用（本项目排查经验）**:
+   - `Shift + F12`（Find All References）列出 `setPage` / `ensurePlaying` 所有调用点。
+   - `Cmd + T`（Go to Symbol in Workspace）直接搜函数名跳转。
+   - `Option + Shift + O`（Go to Symbol in File）在当前文件内按函数名跳转。
+   - `Cmd + Shift + F` 全局搜索正则（勾选 `.*` 开启 RegExp），例如搜
+     `video\.play\(\)\.catch\(\(\)\s*=>` 找出所有「无兜底的裸 play()」。

@@ -455,26 +455,26 @@ html, body {
 .seek-label { display: none; }  /* 默认隐藏 */
 .seek-track {
     position: relative;
-    height: 24px;
+    height: 100px;   /* 进度条厚度：100px（用户要求，原 24px） */
     display: flex;
     align-items: center;
     cursor: pointer;
-    padding: 8px 0;
+    padding: 0;
 }
 .seek-track::before {
     content: '';
     position: absolute;
     left: 0; right: 0;
-    height: 4px;
+    height: 100px;   /* 进度条底槽厚度：100px */
     background: rgba(255,255,255,.2);
-    border-radius: 2px;
+    border-radius: 8px;
 }
 .seek-fill {
     position: absolute;
     left: 0;
-    height: 4px;
+    height: 100px;   /* 已播填充厚度：100px */
     background: linear-gradient(90deg, #fe2c55, #ff7a45);
-    border-radius: 2px;
+    border-radius: 8px;
     width: 0%;
     pointer-events: none;
 }
