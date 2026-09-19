@@ -420,11 +420,13 @@ html, body {
 .setting-row .switch input:checked + i { background: #fe2c55; }
 .setting-row .switch input:checked + i::after { transform: translateX(20px); }
 
-/* Playback speed selector */
-.speed-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.speed-options { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+/* Playback speed selector（竖向：标签占一行，档位各自占一行） */
+.speed-row { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.speed-options { display: flex; flex-direction: column; gap: 6px; }
 .speed-btn {
     padding: 4px 10px;
+    width: 100%;          /* 每个档位各占一整行 */
+    box-sizing: border-box;
     border: 1px solid rgba(255,255,255,.2);
     border-radius: 6px;
     background: transparent;

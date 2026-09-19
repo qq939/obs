@@ -554,3 +554,47 @@ complete 会跳过整文件校验；且前端把 `uploadId` 读成了 `info.uplo
 且 `currentTime` 持续递增（2012.5 → 2013.2 → 2013.9 → 2014.6），确认切页全程不暂停。
 
 ---
+
+## 2026-09-19（续 3）
+
+### 任务：键盘左右方向键功能互换 + 第三页「播放速度」竖向排布
+
+**worknote 2026-09-19**：用户要求「键盘左右方向键的功能互换一下，不要动滑动逻辑和页面布局。」
+随后追加「第三页的播放速度四个字占一行，1X占一行，2X占一行，7X占一行。」
+
+**实现 1 - 左右方向键互换**（`src/obs/video_static/app.js`）：
+
+- `case 'ArrowLeft'`：由 `setPage(currentPage + 1)`（去设置页）改为
+  **`setPage(currentPage - 1)`**（回信息页），边界守卫同步由 `>= PAGE_COUNT-1` 改为 `<= 0`；
+- `case 'ArrowRight'`：由 `setPage(currentPage - 1)` 改为 **`setPage(currentPage + 1)`**，
+  边界守卫改为 `>= PAGE_COUNT - 1`；顶部注释同步更新。
+- **未触碰**滑动逻辑（`finishSwipe` 仍为「左滑 dx<0 → currentPage+1 / 右滑 → currentPage-1」）
+  与页面布局（3 个 `<section class="page">` 结构原样）。
+
+**实现 2 - 播放速度竖向排布**（`src/obs/video_static/style.css`）：
+
+- `.speed-row`：`display:flex; align-items:center; justify-content:space-between` →
+  **`flex-direction: column; align-items: stretch`**（标签「播放速度」独占一行，档位区另起）；
+- `.speed-options`：`flex-wrap: wrap` 横排 → **`flex-direction: column`**（档位竖排）；
+- `.speed-btn`：新增 **`width: 100%` + `box-sizing: border-box`**，使 1x / 2x / 7x 各占一整行。
+- 档位 DOM 与值（1x/2x/7x、默认 1x 高亮）未改动。
+
+**测试**：新建两个 TDD 脚本（各 4 组用例，60s 超时），均先跑红灯再实现转绿：
+- `test_arrow_keys_swap.py`：① 源码左右键已互换（含边界守卫）；
+  ② 线上 `/video/app.js` 已下发；③ **node 跑真实 keydown 回调**，
+  8 条行为断言（第 1 页 Left→0 / Right→2、第 0 页 Left 到边界不动、第 2 页 Right 到边界不动、
+  上下键仍切视频）；④ 回归：滑动方向语义与 `setPage` 保活路径未变、三页 DOM 未动、
+  进度条 100px、保活/倒放/档位/上传兜底/health/logs。
+- `test_speed_vertical_layout.py`：① 源码 `.speed-row`/`.speed-options` 为 `column` 且
+  `.speed-btn` 满宽；② 线上 style.css 一致；③ 「播放速度」标签 + 1x/2x/7x 三档 DOM 与文案不变；
+  ④ 回归：左右键互换保持、滑动逻辑未动、布局/进度条/保活/倒放/兜底/health/logs。
+（按用户要求保留上一任务的 `test_page_switch_play.py`，不再删除。）
+两组全绿，回归 `test_integration.py` 8 组 + `test_page_switch_play.py` 4 组全绿；
+重建 `obs-obs` 镜像生效。
+
+**真实浏览器验证**（Playwright，`/video`）：真实 keydown 序列 2→(Left)1→(Left)0→(Right)1→(Right)2，
+确认 **箭头键方向已互换**；设置页实测 `.speed-row` 计算样式 `flex-direction: column`，
+「播放速度」标签底边 431 与档位区顶边 439 分行，
+1x/2x/7x 三个按钮的 `top` 分别为 439 / 470 / 502（3 个不同行）且宽度均为 567（父容器满宽）。
+
+---

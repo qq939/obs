@@ -1271,6 +1271,8 @@
     //   - 第 0 页 / 第 2 页（信息页 / 设置页）：直接 applyIndex（无纵向滚动动画，
     //     但播放列表条高亮会自动跟随 .active 状态 + 平滑滚到可视范围）
     // ArrowLeft / ArrowRight: 三页之间切换
+    //   - ArrowLeft  = 往第一页（信息页）方向翻：2→1→0
+    //   - ArrowRight = 往第三页（设置页）方向翻：0→1→2
     document.addEventListener('keydown', (e) => {
         // 输入控件里忽略（避免与表单交互冲突）
         const t = e.target;
@@ -1298,16 +1300,16 @@
                 }
                 break;
             case 'ArrowLeft':
-                // 左键 = 翻到第三页（设置页）：索引 0→1→2 递增
-                if (currentPage >= PAGE_COUNT - 1) return;
-                e.preventDefault();
-                setPage(currentPage + 1);
-                break;
-            case 'ArrowRight':
-                // 右键 = 翻回第一页（信息页）：索引 2→1→0 递减
+                // 左键 = 翻回第一页（信息页）：索引 2→1→0 递减
                 if (currentPage <= 0) return;
                 e.preventDefault();
                 setPage(currentPage - 1);
+                break;
+            case 'ArrowRight':
+                // 右键 = 翻到第三页（设置页）：索引 0→1→2 递增
+                if (currentPage >= PAGE_COUNT - 1) return;
+                e.preventDefault();
+                setPage(currentPage + 1);
                 break;
             case ' ':
             case 'Space':

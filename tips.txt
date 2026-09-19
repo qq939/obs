@@ -76,3 +76,21 @@
    - `Option + Shift + O`（Go to Symbol in File）在当前文件内按函数名跳转。
    - `Cmd + Shift + F` 全局搜索正则（勾选 `.*` 开启 RegExp），例如搜
      `video\.play\(\)\.catch\(\(\)\s*=>` 找出所有「无兜底的裸 play()」。
+
+12. **本项目键盘快捷键速查 / 快速改键**:
+   - 三页切换：`ArrowLeft` = 往信息页(0)方向；`ArrowRight` = 往设置页(2)方向
+     （项目已按需求互换过，见 `case 'ArrowLeft' / 'ArrowRight'`）。
+   - 切视频：`ArrowUp` 上一个 / `ArrowDown` 下一个；`Space` 播放/暂停。
+   - 想快速互换两个 case：VSCode 里选中一个 `case` 整块 → `Option + ↑/↓` 上下移动
+     → 再改 `setPage(currentPage ± 1)`；改完用 `Cmd + Shift + F` 搜 `setPage(currentPage`
+     确认两处都已同步，避免漏改边界守卫 `if (currentPage <= 0 / >= PAGE_COUNT - 1)`。
+   - 快捷键不受输入框影响：`keydown` 监听里已有 `INPUT/TEXTAREA/isContentEditable` 过滤。
+
+13. **本项目 CSS 竖排布局改法（第三页「播放速度」为例）**:
+   - 让「标签一行 + 每个选项一行」：父容器加 `flex-direction: column`，
+     选项容器也 `flex-direction: column`，选项本身 `width: 100%; box-sizing: border-box`。
+   - 在 DevTools 里快速验证是否真的分行：Elements 面板选中每个按钮，
+     看 `getBoundingClientRect().top` 是否互不相同（本项目实测 439 / 470 / 502）。
+   - 想临时预览改动：DevTools → Sources → 对应 css 文件直接改，满意后再落到源码，
+     然后 `docker compose up -d --build` 重建（静态文件在镜像里，必须重建）。
+   - 跑本任务测试：`python3 test_arrow_keys_swap.py`、`python3 test_speed_vertical_layout.py`。
