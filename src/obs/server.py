@@ -10,15 +10,17 @@
 url_head = "http://obs.dimond.top"
 
 import os
+import time
 import shutil
 import json
 import asyncio
 import threading
 import subprocess
 import re
-from datetime import datetime
-from urllib.parse import quote, unquote
+from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager, suppress
 from typing import List, Optional, Dict
+from urllib.parse import quote, unquote
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query
@@ -96,10 +98,57 @@ def get_hls_dir() -> str:
 
 VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mkv"}
 
+# ---------------------------------------------------------------------------
+# HLS 生成配置（全局参数，使用位置见行内注释）
+# ---------------------------------------------------------------------------
+# HLS_GEN_VERSION: 产物版本号，写入 hls/<name>/meta.json；hls_exists 会用它与源文件 size 校验，
+#   版本号递增（或源文件被替换）会让旧产物自动失效并重新生成。
+#   使用位置：hls_exists 校验、write_hls_meta 写入
+HLS_GEN_VERSION = 4
+# HLS_SEGMENT_BYTES: 单个 TS 分片目标大小 4MiB（GOP 对齐，实际略有浮动）
+#   使用位置：build_hls_args 的 -hls_segment_size
+HLS_SEGMENT_BYTES = 4 * 1024 * 1024
+# HLS_TIMEOUT_SECONDS: 单个视频生成 HLS 的超时（大文件 remux 较慢）
+#   使用位置：generate_hls 的 asyncio.wait_for
+HLS_TIMEOUT_SECONDS = 600
+# 每日定时任务时段（Asia/Shanghai，无夏令时）；可用环境变量覆盖
+#   使用位置：hls_cron_key / hls_cron_tick / /hls/cron
+HLS_CRON_ENABLED = os.environ.get("HLS_CRON_ENABLED", "1").lower() not in ("0", "false", "no")
+HLS_CRON_HOUR = int(os.environ.get("HLS_CRON_HOUR", 4))
+HLS_CRON_MINUTE = int(os.environ.get("HLS_CRON_MINUTE", 0))
+HLS_CRON_TZ = os.environ.get("HLS_CRON_TZ", "Asia/Shanghai")
+# HLS_CRON_TICK_SECONDS: 轮询粒度；30s 足以在 04:00 那一分钟内命中
+#   使用位置：_hls_cron_loop 的 asyncio.sleep
+HLS_CRON_TICK_SECONDS = 30
+
+# 已触发日期键（'YYYY-MM-DD'，本地时区），保证每天只跑一次
+#   使用位置：hls_cron_tick
+_hls_cron_last_key: Optional[str] = None
+# per-name 生成锁：同一视频并发请求只跑一次 ffmpeg
+#   使用位置：_get_hls_lock / generate_hls
+HLS_LOCKS: Dict[str, asyncio.Lock] = {}
+_HLS_LOCKS_GUARD = threading.Lock()
+
 def hls_exists(filename: str) -> bool:
-    """检查 HLS 是否已生成"""
-    hls_dir = os.path.join(get_hls_dir(), filename)
-    return os.path.isdir(hls_dir) and os.path.exists(os.path.join(hls_dir, "index.m3u8"))
+    """检查 HLS 是否为「有效且与当前源文件匹配」的产物。
+    需要 index.m3u8 + meta.json，且 meta.version == HLS_GEN_VERSION、meta.size == 源文件大小；
+    源文件不存在（孤儿产物）或版本过期都视为未生成，交由定时任务重新生成。"""
+    d = os.path.join(get_hls_dir(), filename)
+    m3u8 = os.path.join(d, "index.m3u8")
+    meta_path = os.path.join(d, "meta.json")
+    if not (os.path.isdir(d) and os.path.isfile(m3u8) and os.path.isfile(meta_path)):
+        return False
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("version") != HLS_GEN_VERSION:
+            return False
+        src = os.path.join(get_upload_dir(), filename)
+        if not os.path.isfile(src):
+            return False
+        return meta.get("size") == os.path.getsize(src)
+    except Exception:
+        return False
 
 def hls_duration_sync(name: str) -> float:
     """从 HLS index.m3u8 求和 EXTINF 获取时长"""
@@ -115,6 +164,259 @@ def hls_duration_sync(name: str) -> float:
     except Exception:
         pass
     return 0
+
+# ---------------------------------------------------------------------------
+# HLS 生成（ffmpeg）
+# ---------------------------------------------------------------------------
+
+def detect_codecs(file_path: str) -> Dict[str, Optional[str]]:
+    """用 ffprobe 探测首个视频/音频编码（限制探测窗口，慢速存储上也很快）"""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error",
+         "-analyzeduration", "1000000", "-probesize", "1000000",
+         "-show_entries", "stream=codec_type,codec_name",
+         "-of", "json", file_path],
+        capture_output=True, text=True, timeout=30
+    )
+    data = json.loads(result.stdout or "{}")
+    video = audio = None
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video" and not video:
+            video = s.get("codec_name")
+        if s.get("codec_type") == "audio" and not audio:
+            audio = s.get("codec_name")
+    return {"video": video, "audio": audio}
+
+def detect_rotation(file_path: str) -> int:
+    """探测视频旋转角度（0/90/180/270）"""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream_tags=rotate:stream_side_data=rotation",
+         "-of", "json", file_path],
+        capture_output=True, text=True, timeout=30
+    )
+    data = json.loads(result.stdout or "{}")
+    streams = data.get("streams", [])
+    if not streams:
+        return 0
+    s = streams[0]
+    tag = (s.get("tags") or {}).get("rotate")
+    if tag:
+        try:
+            return int(tag)
+        except (TypeError, ValueError):
+            return 0
+    for sd in (s.get("side_data_list") or []):
+        if "rotation" in sd:
+            try:
+                return int(sd["rotation"])
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+def can_remux(src_path: str, codecs: Dict[str, Optional[str]], rotation: int) -> bool:
+    """H.264(+AAC/MP3) 且未旋转的 mp4/m4v 可直接 -c copy remux，无需重编码"""
+    if rotation != 0:
+        return False
+    if codecs.get("video") != "h264":
+        return False
+    audio = codecs.get("audio")
+    if audio and audio not in ("aac", "mp3"):
+        return False
+    return os.path.splitext(src_path)[1].lower() in (".mp4", ".m4v")
+
+def build_hls_args(src_path: str, codecs: Dict[str, Optional[str]], rotation: int) -> List[str]:
+    """构造 ffmpeg 参数。以 cwd=输出目录运行，使 playlist 里引用相对文件名 seg-%05d.ts，
+    从而能通过 /hls/<name>/ 正常访问。
+    旋转过的源必须重编码：ffmpeg 的自动旋转会烘焙进像素，播放器才能看到正立画面。"""
+    args = ["-y", "-i", src_path, "-map", "0:v:0"]
+    if codecs.get("audio"):
+        args += ["-map", "0:a:0"]
+    common = [
+        "-f", "hls",
+        "-hls_segment_size", str(HLS_SEGMENT_BYTES),
+        "-hls_list_size", "0",
+        "-hls_playlist_type", "vod",
+        "-hls_segment_filename", "seg-%05d.ts",
+        "index.m3u8",
+    ]
+    if can_remux(src_path, codecs, rotation):
+        return args + ["-c", "copy"] + common
+    args += ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+             "-pix_fmt", "yuv420p", "-vf", "scale='min(1920,iw)':-2"]
+    args += ["-c:a", "aac", "-b:a", "128k"] if codecs.get("audio") else ["-an"]
+    return args + common
+
+def _get_hls_lock(name: str) -> asyncio.Lock:
+    """取（或创建）某个视频专属的生成锁"""
+    with _HLS_LOCKS_GUARD:
+        lock = HLS_LOCKS.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            HLS_LOCKS[name] = lock
+        return lock
+
+async def generate_hls(name: str) -> bool:
+    """为单个视频生成 HLS（幂等 + 并发去重）。已在生成中则等待同一把锁，不重复跑 ffmpeg。"""
+    async with _get_hls_lock(name):
+        if hls_exists(name):
+            return False
+        await _do_generate_hls(name)
+        return True
+
+async def _do_generate_hls(name: str) -> None:
+    """实际执行 ffmpeg 生成：先写临时目录，成功后再原子替换到 hls/<name>/，避免半成品被读到"""
+    src_path = os.path.join(get_upload_dir(), name)
+    if not os.path.isfile(src_path):
+        raise RuntimeError("源视频不存在")
+    hls_root = get_hls_dir()
+    os.makedirs(hls_root, exist_ok=True)
+    tmp_dir = os.path.join(hls_root, f".tmp-{int(time.time() * 1000)}-{os.urandom(4).hex()}")
+    os.makedirs(tmp_dir, exist_ok=True)
+    try:
+        codecs, rotation = await asyncio.gather(
+            asyncio.to_thread(detect_codecs, src_path),
+            asyncio.to_thread(detect_rotation, src_path),
+        )
+        args = build_hls_args(src_path, codecs, rotation)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", *args, cwd=tmp_dir,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=HLS_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            with suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+            raise RuntimeError(f"HLS 生成超时（>{HLS_TIMEOUT_SECONDS}s）")
+        if proc.returncode != 0:
+            tail = (stderr or b"").decode("utf-8", "ignore").strip().splitlines()[-3:]
+            raise RuntimeError(f"ffmpeg 退出码 {proc.returncode}: {' '.join(tail)}")
+        if not os.path.isfile(src_path):
+            raise RuntimeError("生成期间源视频被删除")
+        if not os.path.isfile(os.path.join(tmp_dir, "index.m3u8")):
+            raise RuntimeError("ffmpeg 未产出 index.m3u8")
+
+        final_dir = os.path.join(hls_root, name)
+        if os.path.isdir(final_dir):
+            shutil.rmtree(final_dir, ignore_errors=True)
+        os.replace(tmp_dir, final_dir)
+
+        stat = os.stat(src_path)
+        duration = await asyncio.to_thread(probe_duration_sync, src_path, name)
+        segs = len([f for f in os.listdir(final_dir) if re.match(r"^seg-\d+\.ts$", f)])
+        with open(os.path.join(final_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "version": HLS_GEN_VERSION,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "rotation": rotation,
+                "duration": duration,
+            }, f)
+        log_line(f"HLS 生成完成 file={name} segments={segs} rotation={rotation} duration={duration:.2f}s")
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+def _list_missing_hls() -> List[str]:
+    """列出 obs/ 下所有「尚无有效 HLS」的视频名（阻塞 IO，调用方负责 offload）"""
+    upload_dir = get_upload_dir()
+    pending: List[str] = []
+    try:
+        for name in sorted(os.listdir(upload_dir)):
+            if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
+                continue
+            if not os.path.isfile(os.path.join(upload_dir, name)):
+                continue
+            if not hls_exists(name):
+                pending.append(name)
+    except OSError:
+        pass
+    return pending
+
+def _count_videos() -> int:
+    """统计 obs/ 下视频文件总数（阻塞 IO，调用方负责 offload）"""
+    upload_dir = get_upload_dir()
+    try:
+        return sum(1 for n in os.listdir(upload_dir)
+                   if os.path.splitext(n)[1].lower() in VIDEO_EXTS
+                   and os.path.isfile(os.path.join(upload_dir, n)))
+    except OSError:
+        return 0
+
+async def sweep_missing_hls(trigger: str = "manual") -> Dict[str, object]:
+    """扫描并为缺 HLS 的视频串行生成（一次一个，避免多路 ffmpeg 抢占 CPU）。"""
+    pending = await asyncio.to_thread(_list_missing_hls)
+    total = len(pending)
+    if total == 0:
+        log_line(f"HLS 扫描[{trigger}]：无待处理视频")
+        return {"total": 0, "pending": 0, "queue": [], "done": [], "failed": []}
+    log_line(f"HLS 扫描[{trigger}]：{total} 个视频待生成（串行）")
+    done: List[str] = []
+    failed: List[str] = []
+    for i, name in enumerate(pending, 1):
+        try:
+            await generate_hls(name)
+            done.append(name)
+            log_line(f"HLS 扫描[{trigger}] [{i}/{total}] {name}: 完成")
+        except Exception as e:
+            failed.append(name)
+            log_line(f"HLS 扫描[{trigger}] [{i}/{total}] {name}: 失败 {e}")
+    log_line(f"HLS 扫描[{trigger}] 结束：成功 {len(done)}，失败 {len(failed)}")
+    return {"total": total, "pending": total, "queue": pending, "done": done, "failed": failed}
+
+# ---------------------------------------------------------------------------
+# 每日定时任务：每天 04:00（HLS_CRON_TZ）检查并生成缺 HLS 的视频
+# ---------------------------------------------------------------------------
+
+def _cron_tzinfo(tz_name: str):
+    """取时区对象；系统无 tzdata 时回退到固定 UTC+8（Asia/Shanghai 无夏令时）"""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone(timedelta(hours=8))
+
+def hls_cron_key(now: datetime, tz_name: str, hour: int, minute: int) -> Optional[str]:
+    """若 now（带时区）落在目标时区的 hour:minute，返回该天的日期键 'YYYY-MM-DD'，否则 None。
+    日期键用于「每天只触发一次」的去重。"""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        local = now.astimezone(_cron_tzinfo(tz_name))
+    except Exception:
+        local = now.astimezone(timezone(timedelta(hours=8)))
+    if local.hour != hour or local.minute != minute:
+        return None
+    return local.strftime("%Y-%m-%d")
+
+async def hls_cron_tick() -> None:
+    """定时轮询：命中 04:00 且当天未跑过，就执行一次扫描生成"""
+    global _hls_cron_last_key
+    if not HLS_CRON_ENABLED:
+        return
+    key = hls_cron_key(datetime.now(timezone.utc), HLS_CRON_TZ, HLS_CRON_HOUR, HLS_CRON_MINUTE)
+    if key is None or key == _hls_cron_last_key:
+        return
+    _hls_cron_last_key = key
+    log_line(f"每日定时任务触发：{HLS_CRON_TZ} {HLS_CRON_HOUR:02d}:{HLS_CRON_MINUTE:02d}（{key}）开始检查缺 HLS 的视频")
+    try:
+        await sweep_missing_hls(trigger="cron")
+    except Exception as e:
+        log_line(f"每日定时任务异常：{e}")
+
+async def _hls_cron_loop() -> None:
+    """后台常驻协程：按 HLS_CRON_TICK_SECONDS 轮询，命中目标时刻则触发一次"""
+    log_line(f"HLS 定时任务已启动：{HLS_CRON_TZ} 每天 {HLS_CRON_HOUR:02d}:{HLS_CRON_MINUTE:02d}（{HLS_CRON_TICK_SECONDS}s 轮询）")
+    while True:
+        try:
+            await hls_cron_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_line(f"HLS 定时任务轮询异常：{e}")
+        await asyncio.sleep(HLS_CRON_TICK_SECONDS)
 
 # 时长探测并发度（用于 /videos 首次加载时并发跑 ffprobe，避免 28 个视频串行等待）
 # 使用位置：list_video_files 中的 duration_executor.map
@@ -234,10 +536,17 @@ async def lifespan(app: FastAPI):
     app.state.chunk_dir = os.path.join(app.state.upload_dir, ".chunks")
     os.makedirs(app.state.upload_dir, exist_ok=True)
     os.makedirs(app.state.chunk_dir, exist_ok=True)
+    os.makedirs(get_hls_dir(), exist_ok=True)
     # 启动日志落盘（供主机 logs/server.log 查看）
     log_line(f"OBS web app running on port {PORT} (obs dir: {app.state.upload_dir}, logs dir: {LOG_DIR})")
+    # 启动每日 04:00 的 HLS 检查任务（每天检查缺 HLS 的视频并生成分片）
+    cron_task = asyncio.create_task(_hls_cron_loop()) if HLS_CRON_ENABLED else None
     yield
-    # Shutdown
+    # Shutdown：取消定时任务
+    if cron_task is not None:
+        cron_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cron_task
     log_line("OBS web app shutting down")
 
 app = FastAPI(lifespan=lifespan)
@@ -1349,6 +1658,39 @@ async def videos_list():
     走 asyncio.to_thread：list_video_files 内部有 ffprobe 等阻塞调用，
     放在线程池执行，避免阻塞事件循环拖慢正在播放的视频流（多客户端并发时的卡顿根因）。"""
     return JSONResponse({"videos": await asyncio.to_thread(list_video_files)})
+
+@app.post("/hls/generate-all")
+async def hls_generate_all(dry_run: bool = Query(False)):
+    """触发一次全量扫描：为所有缺（或过期）HLS 的视频生成分片。
+    - 默认：后台串行生成，立即返回待处理队列（与旧版 obs-video-app 行为一致）。
+    - ?dry_run=true：只返回待处理队列、不启动生成（便于运维先确认影响范围）。
+    注意：本路由必须在 /hls/{filename}/{path} 之前声明。"""
+    pending = await asyncio.to_thread(_list_missing_hls)
+    total = await asyncio.to_thread(_count_videos)
+    if not pending:
+        log_line(f"HLS 扫描[manual]：无待处理视频（共 {total} 个视频）")
+        return JSONResponse({"total": total, "pending": 0, "queue": [],
+                             "done": [], "failed": [], "started": False})
+    if dry_run:
+        log_line(f"HLS 扫描[manual][dry-run]：{len(pending)} 个视频待生成（未启动）")
+        return JSONResponse({"total": total, "pending": len(pending),
+                             "queue": pending, "started": False})
+    asyncio.create_task(sweep_missing_hls(trigger="manual"))
+    log_line(f"HLS 扫描[manual]：已排队 {len(pending)} 个视频（串行生成）")
+    return JSONResponse({"total": total, "pending": len(pending),
+                         "queue": pending, "started": True})
+
+@app.get("/hls/cron")
+async def hls_cron_status():
+    """每日 HLS 检查任务的调度信息（便于运维确认 04:00 定时任务已生效）"""
+    return JSONResponse({
+        "enabled": HLS_CRON_ENABLED,
+        "hour": HLS_CRON_HOUR,
+        "minute": HLS_CRON_MINUTE,
+        "timezone": HLS_CRON_TZ,
+        "tickSeconds": HLS_CRON_TICK_SECONDS,
+        "lastFiredKey": _hls_cron_last_key,
+    })
 
 @app.get("/hls/{filename}/{path:path}")
 async def hls_playlist(filename: str, path: str):

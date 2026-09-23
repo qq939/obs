@@ -653,3 +653,61 @@ Docker Desktop(macOS) 的 bind mount 磁盘 IO；若无 HLS 且视频码率高�
 分片以降低单连接带宽峰值。
 
 ---
+
+## 续 5 — 每天 04:00 定时检查并生成缺 HLS 的分片
+
+**用户原话**：`需要，设置为定时任务每天04:00检查是否有未生成hls的视频并处理hls分片`
+
+**背景**：上个任务排查并发卡顿时发现「无 HLS 的大 mp4 会被每个客户端整段下载，抢占带宽与
+磁盘 IO」。历史上 `obs-video-app` 有一套 HLS 生成 + 每日 cron，但二合一重写成 `src/obs/server.py`
+时丢失了，只剩只读的 `hls_exists`。本任务把它补回来。
+
+**实现**（`src/obs/server.py`）：
+
+- **配置常量**（可用环境变量覆盖，`global` 参数前置到文件顶部并带使用位置注释）：
+  `HLS_GEN_VERSION=4`、`HLS_SEGMENT_BYTES=4MiB`、`HLS_TIMEOUT_SECONDS=600`、
+  `HLS_CRON_ENABLED=1`、`HLS_CRON_HOUR=4`、`HLS_CRON_MINUTE=0`、`HLS_CRON_TZ=Asia/Shanghai`、
+  `HLS_CRON_TICK_SECONDS=30`、`_hls_cron_last_key`、`HLS_LOCKS`。
+- **meta-aware `hls_exists`**：不仅要有 `index.m3u8`，还要 `meta.json` 里
+  `version == HLS_GEN_VERSION` 且 `size == 源文件 size`，否则视为过期需重生成（幂等核心）。
+- **生成链路**：`detect_codecs` / `detect_rotation` / `can_remux` / `build_hls_args`
+  → H.264+AAC 且无旋转时 `-c copy` remux（秒级），否则 libx264 重编码（缩放 ≤1920）；
+  `_do_generate_hls` 先写**临时目录** `.tmp-xxx`，`os.replace` 原子替换到最终目录；
+  每视频一把 `asyncio.Lock`（`_get_hls_lock`）避免并发重复跑 ffmpeg。
+- **扫描**：`_list_missing_hls`（`sorted` 保证顺序稳定）、`_count_videos`、
+  `sweep_missing_hls(trigger)` 串行逐个生成（避免多路 ffmpeg 抢 CPU）。
+- **定时**：`hls_cron_key(now, tz, hour, minute)`（落在目标时区的 04:00 → 返回 `YYYY-MM-DD`
+  日期键，用于**每天只触发一次**）；`hls_cron_tick()` 比对 `_hls_cron_last_key` 去重；
+  `_hls_cron_loop()` 每 30s 轮询一次；`lifespan` 启动 `asyncio.create_task`，关闭时 `cancel()`。
+  时区用 `zoneinfo`，无 tzdata 时回退固定 UTC+8。
+- **端点**：`POST /hls/generate-all`（支持 `?dry_run=true` 只返回队列不启动）、
+  `GET /hls/cron`（返回 enabled/hour/minute/timezone/tickSeconds/lastFiredKey）。
+  **必须声明在 `/hls/{filename}/{path:path}` 通配路由之前**，否则被吞。
+
+**踩坑**：`from datetime import datetime, time, timedelta, timezone` 里的 `time` **遮蔽**了
+`time` 模块，导致 `os.path.join(hls_root, f".tmp-{int(time.time()*1000)}...")` 报
+`AttributeError: type object 'datetime.time' has no attribute 'time'`。
+修复：移除 `datetime.time`，文件头单独 `import time`。
+
+**测试**：新建 `test_hls_cron.py`（6 组用例，每组 300s 超时，TDD 先红后绿）：
+① 源码：04:00 配置 / lifespan 注册与取消 / 每日去重 / 端点 / 路由顺序 / per-name 锁；
+② 行为：`GET /hls/cron` 字段与调度值；
+③ 行为：容器内**注入时间**验证 `hls_cron_key` —— 04:00 命中、03:59/04:01 不命中、
+   UTC 20:00 = 北京 04:00 命中、次日产生新键；
+④ 行为：造 3s 测试视频 → 容器内调 `generate_hls` → 校验幂等（重复调用不重跑）+ 产物
+   （m3u8 头/`#EXT-X-ENDLIST`/`#EXTINF`、`meta version=4`、size 一致）+ `/hls/` 端点可播；
+⑤ 行为：**隔离目录** `/tmp/hls_sweep_test` 跑 `sweep_missing_hls`（同 cron 代码路径，不碰生产数据）
+   + HTTP `dry_run=true` 校验 queue == 「缺有效 HLS 的视频集合」（28 个，不含孤儿产物）；
+⑥ 回归：3 并发 `/videos` 期间 `/health` < 3s、保活/倒放/箭头互换/1-2-7 档位/进度条 100px/上传兜底/logs。
+
+**结果**：6 组全绿（真实生成 + 隔离 sweep + dry-run queue 一致性均通过）；
+回归 `test_integration.py` 8 组、`test_arrow_keys_swap.py` 4 组、`test_speed_vertical_layout.py` 4 组、
+`test_videos_concurrency.py` 5 组（含重启容器冷启动）全部通过。重建 `obs-obs` 镜像生效。
+
+**使用**：
+- 自动：容器启动后即挂上后台协程，每天 `Asia/Shanghai` 04:00 自动跑，无需干预；
+- 手动：`curl -X POST "http://127.0.0.1:80/hls/generate-all"`（先 `?dry_run=true` 看队列）；
+- 状态：`curl http://127.0.0.1:80/hls/cron`；
+- 调节：`HLS_CRON_HOUR` / `HLS_CRON_MINUTE` / `HLS_CRON_TZ` / `HLS_CRON_ENABLED` 环境变量。
+
+---

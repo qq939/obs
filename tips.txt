@@ -109,3 +109,43 @@
    - 快速定位同步阻塞点：`Grep` 搜 `subprocess.run` / `time.sleep` / `open(` 是否出现在
      `async def` 路由体内。
    - 跑本任务测试：`python3 test_videos_concurrency.py`（含重启容器后的冷启动并发验证）。
+
+15. **在 FastAPI 进程内做一个「每天固定时刻」的定时任务（本项目 04:00 生成 HLS）**：
+   - 不引 APScheduler/Celery，用「后台协程 + 轮询 + 日期键去重」就够了：
+     `lifespan` 里 `task = asyncio.create_task(loop())`，`yield` 之后 `task.cancel()` 并
+     `await` 它（`with suppress(asyncio.CancelledError)`），否则容器重启会留悬挂任务。
+   - **关键：日期键去重**。轮询是每 30s 一次，如果只判断「现在是不是 04:00」，
+     30 秒窗口内会触发多次。做法：命中时返回 `'YYYY-MM-DD'` 字符串存到全局 `_last_key`，
+     下次同一天直接跳过。这样即使容器在 04:00 之后重启，当天也不会重复跑。
+   - 时区别用 `datetime.utcnow().hour == 4`（那是 UTC）。用 `zoneinfo.ZoneInfo("Asia/Shanghai")`
+     做 `now.astimezone(tz)`；容器里可能没装 tzdata，要 `try/except` 回退固定 `timezone(timedelta(hours=8))`。
+   - 可测试性：把「判断是否命中」抽成纯函数 `cron_key(now, tz, hour, minute)`，
+     测试时**直接注入不同时间**验证边界（04:00 命中 / 03:59、04:01 不命中），
+     不用真等到凌晨 4 点，也不用 mock 时钟。
+   - 生成类任务要**幂等 + 原子**：产物先写临时目录 `.tmp-xxx` 再 `os.replace` 到最终目录，
+     避免 ffmpeg 中断留下半成品；再配一个 `meta.json`（version+源文件 size）判断是否过期，
+     这样「重复调用不重跑」既省时间又能被测试断言。
+   - 别让定时任务和线上请求抢资源：`sweep` 用**串行**逐个跑 ffmpeg（不要并发多路），
+     每个文件一把 `asyncio.Lock` 防重入。
+
+16. **Python 踩坑：`from datetime import time` 会遮蔽 `import time` 模块**：
+   - 症状：`AttributeError: type object 'datetime.time' has no attribute 'time'`
+     （写 `int(time.time()*1000)` 时炸）。
+   - 原因：`datetime` 模块里也有个 `time` 类，`from datetime import datetime, time, ...` 把它
+     绑定到了 `time` 这个名字上，后面 `import time` 的模块名就被覆盖了（后 import 的才生效，
+     若 import 顺序在 from 之前则被覆盖）。
+   - 修法：**不要** `from datetime import time`；需要时间戳就 `import time` 用 `time.time()`，
+     需要时间类型就 `datetime.time(...)` 全限定名。
+   - 快速自查：`grep -n "from datetime import" xxx.py`，看见 `time` 就警惕。
+   - 单元测试里让函数 `print` 出中间量（如 `print('MADE', made)`），
+     断言关键子串，比只看 traceback 更快定位是哪一步炸的。
+
+17. **拿到旧代码做参考（本项目从 git 历史挖回 HLS 实现）**：
+   - 二合一重构常把功能「弄丢」。想找回来先翻历史：`git log --oneline --all -- <关键字>`，
+     再 `git show <commit>:<path>` 看当时的文件内容，比自己重写快且稳。
+   - 本项目用了 `git show 5f15d64:<path>/server.js` 挖出旧 `obs-video-app` 的
+     `generateHls/buildHlsArgs/canRemux/detectCodecs/detectRotation/hlsExists` 与每日 cron
+     的完整逻辑，逐条搬成 Python。
+   - macOS 小技巧：`cat -A` 是 GNU 的，macOS 自带 `cat` 没有 `-A`，
+     看不可见字符用 `cat -v` 或 `sed -n l`。
+
