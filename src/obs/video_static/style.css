@@ -558,11 +558,16 @@ html, body {
 .viewport.edge-hint-active .edge-hint-left { opacity: 1; }
 .viewport.edge-hint-active .edge-hint-right { opacity: 1; }
 
-/* ---------------- upload button (settings panel head, top-right) ---------------- */
+/* ---------------- settings panel head buttons (left = 删除, right = 上传) ----------------
+   两个按钮共用 .panel-head-btn 基类，保证格式（尺寸/圆角/配色/阴影/交互）完全一致；
+   各自只负责左右定位。
+   使用位置：
+     - .btn-delete-current → #btnDeleteCurrent（替换原「设置」二字）→ deleteCurrentVideo()
+     - .fab-upload → #fabUpload → 打开上传弹窗 */
 .panel-head { position: relative; }
-.fab-upload {
+
+.panel-head-btn {
     position: absolute;
-    right: 12px;
     top: 50%;
     transform: translateY(-50%);
     border: none;
@@ -580,14 +585,21 @@ html, body {
     -webkit-tap-highlight-color: transparent;
     white-space: nowrap;
 }
-.fab-upload:hover {
+.panel-head-btn:hover {
     transform: translateY(-50%) scale(1.04);
     box-shadow: 0 4px 12px rgba(254,44,85,.55);
 }
-.fab-upload:active {
+.panel-head-btn:active {
     transform: translateY(-50%) scale(.96);
 }
-.fab-upload.hidden { display: none; }
+.panel-head-btn:disabled { opacity: .5; cursor: not-allowed; }
+.panel-head-btn.hidden { display: none; }
+
+/* 删除按钮：设置在左 */
+.btn-delete-current { left: 12px; }
+
+/* 上传按钮：设置在右 */
+.fab-upload { right: 12px; }
 
 /* ---------------- modal ---------------- */
 .modal {

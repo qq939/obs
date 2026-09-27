@@ -22,6 +22,8 @@
     const videoOverlayBtns = document.getElementById('videoOverlayBtns');
     const overlayCompress = document.getElementById('overlayCompress');
     const overlayDelete = document.getElementById('overlayDelete');
+    // 设置页头部「删除」按钮（替换原「设置」二字；使用位置：deleteCurrentVideo 绑定处）
+    const btnDeleteCurrent = document.getElementById('btnDeleteCurrent');
     const edgeHintLeft = document.getElementById('edgeHintLeft');
     const edgeHintRight = document.getElementById('edgeHintRight');
     const infoName = document.getElementById('infoName');
@@ -1387,13 +1389,34 @@
         } catch (err) { alert('压缩失败：' + err.message); overlayCompress.disabled = false; overlayCompress.textContent = '压缩'; }
     });
 
-    overlayDelete.addEventListener('click', async (e) => {
-        e.stopPropagation();
+    // 删除「当前正在播放的视频」：原视频文件 + 其 HLS 分片目录（服务端 DELETE 一并清理）
+    // 使用位置：播放器浮层「删除」按钮、设置页头部「删除」按钮（替换原「设置」二字）
+    async function deleteCurrentVideo(triggerEl) {
         if (videos.length === 0) return;
         const v = videos[activeIndex];
-        if (!confirm('删除 ' + v.name + ' ？')) return;
-        try { await fetch(v.url, { method: 'DELETE' }); await loadFeed(); }
-        catch (err) { alert('删除失败：' + err.message); }
+        if (!v) return;
+        if (!confirm('删除「' + v.name + '」及其 HLS 分片？')) return;
+        if (triggerEl) triggerEl.disabled = true;
+        try {
+            const res = await fetch(v.url, { method: 'DELETE' });
+            if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+            await loadFeed();
+        } catch (err) {
+            alert('删除失败：' + err.message);
+        } finally {
+            if (triggerEl) triggerEl.disabled = false;
+        }
+    }
+
+    overlayDelete.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await deleteCurrentVideo(overlayDelete);
+    });
+
+    // 设置页头部的「删除」按钮
+    btnDeleteCurrent.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await deleteCurrentVideo(btnDeleteCurrent);
     });
 
     window.addEventListener('resize', () => {
