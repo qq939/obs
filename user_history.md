@@ -711,3 +711,50 @@ Docker Desktop(macOS) 的 bind mount 磁盘 IO；若无 HLS 且视频码率高�
 - 调节：`HLS_CRON_HOUR` / `HLS_CRON_MINUTE` / `HLS_CRON_TZ` / `HLS_CRON_ENABLED` 环境变量。
 
 ---
+
+## 续 6 — 首页新增「粘贴上传」（粘贴文件 → 弹窗确认）
+
+**用户原话**：`除了拖拽和选择文件的上传方式，还要通过粘贴的方式上传。一旦用户在obs页面右键粘贴（或者快捷键粘贴）。要弹出对话框让用户确认是否要上传剪切板中的文件。`
+
+**实现**（`src/obs/server.py` 首页内联 HTML/CSS/JS）：
+
+- **粘贴监听**：`document.addEventListener('paste', ...)`。右键菜单「粘贴」与 `Ctrl/Cmd+V`
+  在浏览器里都会触发同一个 `paste` 事件，所以只装一个监听即可覆盖两种入口。
+- **文件提取** `collectPasteFiles(clipboardData)`：优先取 `clipboardData.files`；
+  为空时回退遍历 `clipboardData.items` 取 `kind === 'file'` 的 `getAsFile()`。
+- **纯文本放行**：无文件时**直接 return，不调用 `preventDefault()`** —— 否则公告板
+  `<textarea>` 里粘贴文字会被吞掉。实测 `defaultPrevented === false`，公告板粘贴不受影响。
+- **文件名兜底** `guessPasteName(mime, index)`：剪贴板里的截图通常 `name` 为空，按 MIME
+  映射扩展名（png/jpg/gif/webp/mp4/mov/pdf…），未知 MIME 取 `/` 后半段，再兜底 `bin`；
+  名字形如 `粘贴文件-20260927082035-1.png`，带序号避免同批多文件重名。
+  `withPasteName()` 用 `new File([file], name, {type})` 补名，保证后续 `uploadFiles` 可用。
+- **确认对话框**：`showPasteConfirm(files)` 把文件名 + `fmtSize()` 大小渲染进
+  `#pasteFileList`，把数量写进 `#pasteConfirmCount`，`#pasteConfirmModal` 设为 `flex`
+  并高亮文件列表；`cancelPasteUpload()` 清空待上传并隐藏；`confirmPasteUpload()` 取出
+  待上传文件→关弹窗→交给**既有** `uploadFiles()`（小文件直传 / 大文件分片 + 秒传全部复用）。
+- **UI**：上传区文案改为「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」；
+  新增 `.paste-modal-mask` / `.paste-modal` 半透明遮罩 + 居中卡片样式，
+  「确认上传」为蓝色主按钮、「取消」为白底次按钮。
+
+**测试**：新建 `test_paste_upload.py`（4 组用例，每组 60s 超时，TDD 先红后绿）：
+① 源码：paste 监听 / `collectPasteFiles` / 无文件 return 放行 / 有文件 `preventDefault` /
+   弹窗 DOM 与「确认上传·取消」/ 确认走 `uploadFiles` / 上传区文案；
+② node 行为（从真实 JS 抠出函数执行）19 条断言：有 `files` 原样返回、`files` 空回退
+   `items.getAsFile()`、纯文本返回 `[]`、`null`/空对象/`getAsFile` 缺失不报错、多文件全返回、
+   `guessPasteName` 六种 MIME 与序号去重、`fmtSize` B/KB/MB 边界；
+③ HTTP：页面真实下发弹窗 DOM 与粘贴 JS，且拖拽 / 选择文件 / 小文件直传 / 大文件分片入口全保留；
+④ 回归：首页 200、公告板/排序/WS 状态灯、health/video/videos、PUT 上传下载删除。
+
+**浏览器实测**（Playwright，`http://127.0.0.1` 非 https 环境）：
+- 合成 `ClipboardEvent('paste')` 带 1 个文件 → 弹窗 `display:flex`、列表显示
+  `clip-real-test.png (11B)`、`defaultPrevented === true`；
+- 点「确认上传」→ `PUT /clip-real-test.png` **恰好 1 次**，11 字节落盘、首页列出、HTTP 200；
+- 点「取消」→ 弹窗隐藏、`pastePendingFiles` 清空、目标文件 **404（未上传）**；
+- 纯文本粘贴 → 弹窗不出现、`defaultPrevented === false`，公告板粘贴行为不变；
+- 2 个文件同时粘贴 → 列表两条、计数为 2；截图见弹窗样式渲染正常。
+
+**结果**：4 组全绿；回归 `test_integration` 8 组、`test_arrow_keys_swap` 4 组、
+`test_speed_vertical_layout` 4 组、`test_videos_concurrency` 5 组、`test_hls_cron` 6 组全部通过。
+重建 `obs-obs` 镜像生效。
+
+---

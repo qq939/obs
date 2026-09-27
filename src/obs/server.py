@@ -815,6 +815,58 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             .notice-board {
                 padding-bottom: 0;
             }
+
+            /* 粘贴上传确认对话框（使用位置：showPasteConfirm / cancelPasteUpload） */
+            .paste-modal-mask {
+                position: fixed;
+                top: 0; right: 0; bottom: 0; left: 0;
+                background: rgba(0, 0, 0, 0.45);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 9999;
+            }
+            .paste-modal {
+                background: #fff;
+                border-radius: 8px;
+                padding: 20px 24px;
+                min-width: 320px;
+                max-width: 90vw;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+            }
+            .paste-modal h3 { margin: 0 0 8px 0; font-size: 1.05em; color: #333; }
+            .paste-modal p { margin: 0 0 6px 0; font-size: 0.9em; color: #666; }
+            .paste-file-list {
+                margin: 10px 0;
+                padding-left: 20px;
+                list-style: disc;
+                max-height: 30vh;
+                overflow: auto;
+            }
+            .paste-file-list li {
+                display: list-item;
+                justify-content: flex-start;
+                padding: 4px 0;
+                border-bottom: 1px dashed #eee;
+                font-size: 0.9em;
+                color: #333;
+            }
+            .paste-modal-actions {
+                display: flex;
+                gap: 10px;
+                justify-content: flex-end;
+                margin-top: 14px;
+            }
+            .paste-modal-actions button {
+                padding: 6px 18px;
+                border-radius: 4px;
+                cursor: pointer;
+                border: 1px solid #ccc;
+            }
+            .paste-btn-cancel { background: #fff; color: #333; }
+            .paste-btn-cancel:hover { background: #f2f2f2; }
+            .paste-btn-ok { background: #4A90D9; border-color: #4A90D9; color: #fff; }
+            .paste-btn-ok:hover { background: #3a7ec0; }
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
@@ -1052,6 +1104,103 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 uploadFiles(fileList);
             }
 
+            // 从剪贴板事件中提取文件；无文件（纯文本粘贴）返回空数组
+            // 说明：右键菜单「粘贴」与 Ctrl/Cmd+V 都会触发 paste 事件
+            function collectPasteFiles(clipboardData) {
+                if (!clipboardData) return [];
+                const out = [];
+                const direct = clipboardData.files;
+                if (direct && direct.length) {
+                    for (let i = 0; i < direct.length; i++) out.push(direct[i]);
+                }
+                if (out.length === 0 && clipboardData.items) {
+                    for (let i = 0; i < clipboardData.items.length; i++) {
+                        const it = clipboardData.items[i];
+                        if (it && it.kind === 'file' && typeof it.getAsFile === 'function') {
+                            const f = it.getAsFile();
+                            if (f) out.push(f);
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // 剪贴板里的截图/图片常常没有文件名，按 MIME 兜底生成一个
+            function guessPasteName(mime, index) {
+                const map = {
+                    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+                    'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
+                    'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm',
+                    'application/pdf': 'pdf', 'text/plain': 'txt', 'application/zip': 'zip'
+                };
+                let ext = map[mime];
+                if (!ext && mime && mime.indexOf('/') > -1) ext = mime.split('/')[1].split('+')[0];
+                if (!ext) ext = 'bin';
+                const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+                return '粘贴文件-' + ts + '-' + (index + 1) + '.' + ext;
+            }
+
+            // 无 name 的剪贴板文件补一个名字，保证后续 uploadFiles 逻辑可用
+            function withPasteName(file, index) {
+                if (file && file.name) return file;
+                try {
+                    return new File([file], guessPasteName(file && file.type, index),
+                                    { type: (file && file.type) || '' });
+                } catch (e) {
+                    return file;
+                }
+            }
+
+            // 人类可读的文件大小（使用位置：showPasteConfirm 列表）
+            function fmtSize(bytes) {
+                if (bytes === null || bytes === undefined || isNaN(bytes)) return '';
+                const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let n = Number(bytes), i = 0;
+                while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+                return (i === 0 ? String(n) : n.toFixed(1)) + units[i];
+            }
+
+            // 待确认的剪贴板文件（确认后交给 uploadFiles）
+            let pastePendingFiles = null;
+
+            function showPasteConfirm(files) {
+                pastePendingFiles = files;
+                const listEl = document.getElementById('pasteFileList');
+                const countEl = document.getElementById('pasteConfirmCount');
+                const modalEl = document.getElementById('pasteConfirmModal');
+                if (!listEl || !countEl || !modalEl) return;
+                listEl.innerHTML = '';
+                for (let i = 0; i < files.length; i++) {
+                    const li = document.createElement('li');
+                    const nm = files[i].name || guessPasteName(files[i].type, i);
+                    li.textContent = nm + ' (' + fmtSize(files[i].size) + ')';
+                    listEl.appendChild(li);
+                }
+                countEl.textContent = files.length;
+                modalEl.style.display = 'flex';
+            }
+
+            function cancelPasteUpload() {
+                pastePendingFiles = null;
+                const modalEl = document.getElementById('pasteConfirmModal');
+                if (modalEl) modalEl.style.display = 'none';
+            }
+
+            function confirmPasteUpload() {
+                const files = pastePendingFiles;
+                cancelPasteUpload();
+                if (files && files.length) uploadFiles(files);
+            }
+
+            // 页面任意位置粘贴：有文件才拦截并弹窗确认，纯文本粘贴保持默认行为
+            document.addEventListener('paste', (e) => {
+                const cb = (e && e.clipboardData) || window.clipboardData;
+                const raw = collectPasteFiles(cb);
+                if (raw.length === 0) return;
+                e.preventDefault();
+                showPasteConfirm(raw.map((f, i) => withPasteName(f, i)));
+            });
+
             document.addEventListener('DOMContentLoaded', () => {
                 const zone = document.getElementById('uploadZone');
                 if (!zone) return;
@@ -1233,10 +1382,23 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
         
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
-            <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传</p>
+            <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
+        </div>
+
+        <!-- 粘贴上传确认对话框（默认隐藏；使用位置：showPasteConfirm 显示 / cancelPasteUpload 隐藏 / confirmPasteUpload 确认后走 uploadFiles） -->
+        <div id="pasteConfirmModal" class="paste-modal-mask" style="display:none;">
+            <div class="paste-modal">
+                <h3>检测到剪贴板中的文件</h3>
+                <p>共 <b id="pasteConfirmCount">0</b> 个文件，是否上传？</p>
+                <ul id="pasteFileList" class="paste-file-list"></ul>
+                <div class="paste-modal-actions">
+                    <button type="button" class="paste-btn-cancel" onclick="cancelPasteUpload()">取消</button>
+                    <button type="button" class="paste-btn-ok" onclick="confirmPasteUpload()">确认上传</button>
+                </div>
+            </div>
         </div>
         
         <div class="sort-controls">

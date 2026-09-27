@@ -5,3 +5,6 @@ https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest
 https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
 https://tools.ietf.org/html/rfc7233
 https://tus.io/protocols/resumable-upload.html
+https://developer.mozilla.org/en-US/docs/Web/API/Element/paste_event
+https://developer.mozilla.org/en-US/docs/Web/API/ClipboardEvent
+https://developer.mozilla.org/en-US/docs/Web/API/DataTransfer

@@ -13,3 +13,4 @@ tips.txt
 logs/
 obs_shards/
 obs/
+.playwright-mcp/

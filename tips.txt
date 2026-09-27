@@ -149,3 +149,28 @@
    - macOS 小技巧：`cat -A` 是 GNU 的，macOS 自带 `cat` 没有 `-A`，
      看不可见字符用 `cat -v` 或 `sed -n l`。
 
+18. **网页「粘贴上传」怎么做（本项目首页新增的第三种上传入口）**：
+   - **一个监听覆盖两种入口**：浏览器里「右键 → 粘贴」和 `Ctrl/Cmd+V` 触发的是**同一个**
+     `paste` 事件，所以只需 `document.addEventListener('paste', ...)`，不用分别处理。
+   - **拿文件两条路**：先看 `e.clipboardData.files`（Chrome/Edge/Safari 复制文件时会有），
+     为空再遍历 `e.clipboardData.items` 找 `kind === 'file'` 的项调 `getAsFile()`。
+   - **千万别无条件 `preventDefault()`**！纯文本粘贴时如果不放行，页面上的输入框
+     （本项目公告板 `<textarea>`）就粘不进文字了。正确姿势：
+     `const files = collect(e.clipboardData); if (files.length === 0) return; e.preventDefault();`
+     验证方法：在浏览器里合成事件后看 `ev.defaultPrevented` 是 `true` 还是 `false`。
+   - **剪贴板里的截图没有文件名**（`file.name === ''`），必须先兜底命名再上传，
+     否则后端拿不到扩展名。按 `file.type` 映射扩展名，用
+     `new File([file], name, { type: file.type })` 造一个带名文件即可。
+   - **别重复造上传轮子**：把待确认文件存到模块级变量，确认后直接调用**已有的**
+     `uploadFiles(files)`，小文件直传 / 大文件分片 / 秒传逻辑全部自动复用。
+   - **一定要做「取消」的负向测试**：点取消后要用 HTTP 确认文件 **404**，
+     只断言「弹窗消失」是不够的（可能已经偷偷上传了）。
+   - 本机 `http://127.0.0.1` 也属于安全上下文（`isSecureContext === true`），
+     但真实部署的 `http://<局域网IP>` 不是——`ClipboardEvent` 合成事件两种环境都能用于测试。
+   - **Playwright 怎么模拟粘贴**：
+     `const dt = new DataTransfer(); dt.items.add(new File([bytes], 'x.png', {type:'image/png'}));`
+     `document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));`
+     然后 `page.locator('.paste-btn-ok').click()` 走真实点击。
+   - 跑本任务测试：`python3 test_paste_upload.py`。
+
+
