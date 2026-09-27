@@ -1,16 +1,51 @@
-.env
+# ---- 日志 ----
+logs/
+*.log
+.log/
+
+# ---- Node ----
+node_modules/
+
+# ---- Python ----
 __pycache__/
+*.pyc
 .venv/
 .pytest_cache/
 test_obs/
-.log/
-.DS_Store
-*.pyc
-*.log
-.trae/
+
+# ---- 环境变量 / 密钥 ----
+.env
+**/.env
+
+# ---- OBS 运行时存储（上传的视频/文件，不入库）----
+# 注意：必须用前导 / 锚定到根目录；写成 `obs/` 会连带忽略 src/obs/ 与 tools/obs/（源码！）
+/obs/
+/obs_shards/
+!/obs/.gitkeep
+!/obs_shards/.gitkeep
+
+# ---- 上传 / 构建产物 ----
+uploads/
+dist/
+build/
+
+# ---- 内置 ffmpeg/ffprobe 静态二进制（体积大，不入库；用 scripts/install_ffmpeg.sh 获取）----
+/bin/
+
+# ---- Agent 运行时数据 ----
+sessions/
+tmp.png
+test_sync.txt
 user_history.md
 tips.txt
-logs/
-obs_shards/
-obs/
+
+# ---- 平台外部挂载（tools/ 来自宿主机的只读 9p bind mount，非本仓库内容）----
+# 上游仓库不含 tools/，且该目录只读，纳入版本控制会导致 rebase 冲突，故整体忽略
+/tools/
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+.trae/
+
+# ---- Playwright ----
 .playwright-mcp/

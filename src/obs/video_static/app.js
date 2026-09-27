@@ -356,8 +356,34 @@
         const ctx = createSha256(); ctx.update(new Uint8Array(buffer)); return ctx.digestHex();
     }
 
+    // 上传/接口地址：先试宿主机本地 http://localhost:19082，不可达再回退域名 http://ocs.dimond.top（二者指向同一服务）
+    const OBS_HOSTS = ['http://localhost:19082', 'http://ocs.dimond.top'];
+    let _obsBasePromise = null;
+    function obsBase() {
+        if (!_obsBasePromise) {
+            _obsBasePromise = (async function () {
+                for (const h of OBS_HOSTS) {
+                    try {
+                        const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+                        const t = setTimeout(() => { if (ctl) { try { ctl.abort(); } catch (e) {} } }, 1200);
+                        await fetch(h + '/health', { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+                        clearTimeout(t);
+                        return h;
+                    } catch (e) { /* 换下一个 host */ }
+                }
+                return '';   // 都不可达：回退为相对当前页 origin
+            })();
+        }
+        return _obsBasePromise;
+    }
+    async function obsFetch(url, opts) {
+        const base = await obsBase();
+        return fetch(base + url, opts);
+    }
+    obsBase();   // 页面加载即预热探测
+
     async function jsonFetch(url, opts) {
-        const res = await fetch(url, opts);
+        const res = await obsFetch(url, opts);
         const text = await res.text();
         let data; try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
         if (!res.ok) throw new Error(data.error || data.raw || ('HTTP ' + res.status));
@@ -1398,7 +1424,8 @@
         if (!confirm('删除「' + v.name + '」及其 HLS 分片？')) return;
         if (triggerEl) triggerEl.disabled = true;
         try {
-            const res = await fetch(v.url, { method: 'DELETE' });
+            // 走 obsFetch：先试 http://localhost:19082，不可达再回退 http://ocs.dimond.top
+            const res = await obsFetch(v.url, { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
             await loadFeed();
         } catch (err) {
@@ -1489,7 +1516,7 @@
                 const uploadPct = Math.round((i / remaining.length) * 90) + 5;
                 progressText.textContent = '上传中 ' + uploadPct + '%  (' + (i+1) + '/' + remaining.length + ' 分片)';
                 progressFill.style.width = uploadPct + '%';
-                await fetch('/upload/chunk/' + uploadId + '/' + idx, {method:'PUT', body:file.slice(start,end), signal:currentAbort.signal});
+                await obsFetch('/upload/chunk/' + uploadId + '/' + idx, {method:'PUT', body:file.slice(start,end), signal:currentAbort.signal});
             }
             progressText.textContent='完成中…'; progressFill.style.width='98%';
             await jsonFetch('/upload/complete/' + uploadId, {method:'POST', signal:currentAbort.signal});

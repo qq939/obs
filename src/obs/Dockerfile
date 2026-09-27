@@ -13,6 +13,7 @@ COPY . .
 # 创建上传目录
 RUN mkdir -p obs obs/.chunks
 
-EXPOSE 8088
+# 容器统一 Web App 端口（server.py 的 PORT 默认值同为 8082）
+EXPOSE 8082
 
 CMD ["python", "server.py"]

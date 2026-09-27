@@ -102,7 +102,7 @@ def test_upload_form(client, tmp_path):
         resp = client.post("/", files=files)
 
     assert resp.status_code == 201
-    assert "http://obs.dimond.top/test.txt" in resp.text or "OK" in resp.text
+    assert "http://ocs.dimond.top/test.txt" in resp.text or "OK" in resp.text
 
 def test_curl_style_upload(client, tmp_path):
     """测试 curl 风格的上传（PUT 方法）"""
@@ -114,7 +114,7 @@ def test_curl_style_upload(client, tmp_path):
         resp = client.put("/curl_test.txt", content=f.read())
 
     assert resp.status_code == 201
-    assert "http://obs.dimond.top/curl_test.txt" in resp.text
+    assert "http://ocs.dimond.top/curl_test.txt" in resp.text
 
 def test_download(client):
     """测试文件下载"""

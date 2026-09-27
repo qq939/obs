@@ -1,13 +1,9 @@
-# 服务对外访问地址前缀（全局参数，用于渲染替换页面文字和下载前缀）
+# 服务对外访问地址前缀（站点域名，用于服务端生成的静态链接与示例文字）
+#   - 站点域名：http://ocs.dimond.top（= http://dimond.top:19082 = 宿主机 http://localhost:19082 = 容器内 http://localhost:8082）
+#   - 网页端的「上传/下载」动作不走这里，而是由前端 JS 先试直连 http://localhost:19082、失败再回退本域名
 # 使用位置：
-#   - 第 750 行  首页「文件托管」curl 上传示例
-#   - 第 771 行  首页 HTML 的 {url_head} 占位符渲染替换
-#   - 第 777 行  首页文件列表的下载链接前缀
-#   - 第 830 行  /upload/init 秒传命中的返回 url
-#   - 第 1089 行 表单上传成功响应文本
-#   - 第 1113 行 PUT 上传返回的文件 url
-#   - 第 1337 行 启动日志中的上传命令示例
-url_head = "http://obs.dimond.top"
+#   - 首页「文件托管」curl 上传示例、文件列表下载链接前缀、上传成功响应文本、启动日志示例
+url_head = "http://ocs.dimond.top"
 
 import os
 import time
@@ -26,11 +22,13 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import uvicorn
 import aiofiles
 from contextlib import asynccontextmanager
 import hashlib
+import base64
 
 # 视频相关配置
 HLS_DIR = os.environ.get("HLS_DIR", "obs_shards")
@@ -42,7 +40,8 @@ load_dotenv("env")
 load_dotenv("asset/.env")
 
 # 服务器配置
-PORT = int(os.environ.get("PORT", 8088))
+# PORT 默认 8082：容器内 Web App 统一端口（可用环境变量覆盖）
+PORT = int(os.environ.get("PORT", 8082))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")
 # 日志目录（全局参数；docker-compose 挂载到主机 logs/，容器内为 /app/logs）
 # 使用位置：log_line() 拼接 {LOG_DIR}/server.log；lifespan 启动日志打印 logs dir
@@ -266,7 +265,8 @@ async def generate_hls(name: str) -> bool:
 
 async def _do_generate_hls(name: str) -> None:
     """实际执行 ffmpeg 生成：先写临时目录，成功后再原子替换到 hls/<name>/，避免半成品被读到"""
-    src_path = os.path.join(get_upload_dir(), name)
+    # 用绝对路径：ffmpeg 以 cwd=tmp_dir 运行，UPLOAD_DIR 为相对路径（如 "obs"）时相对路径会解析失败
+    src_path = os.path.abspath(os.path.join(get_upload_dir(), name))
     if not os.path.isfile(src_path):
         raise RuntimeError("源视频不存在")
     hls_root = get_hls_dir()
@@ -551,6 +551,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# 跨域：页面可能从 ocs.dimond.top 加载，却把上传/接口请求发往 http://localhost:19082（或反之）。
+# 不放开 CORS，分片上传的预检（PUT + X-Chunk-SHA256）会被浏览器拦截。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
 # WebSocket 连接管理器
 class ConnectionManager:
     def __init__(self):
@@ -640,6 +650,79 @@ async def websocket_endpoint(websocket: WebSocket):
 async def health():
     # 轻量健康探针：不触碰上传目录/视频解码等重资源，供 docker-compose healthcheck 探测
     return {"status": "ok"}
+
+# ============================================================================
+# 平台接口：/ask/claude —— 向 Claude 提问
+# 规范（systemreadme.md 核心一/二）：所有 Claude 调用统一走 run_claude.js，
+# 这样问答才会记录到 logs/agent_tui.log。禁止直接调用 claude CLI。
+# 编码识别：q 含空格或长度 < 50 -> URL 解码；否则 -> base64 解码。
+# 成功 200 纯文本；失败 500 + 错误信息。
+# ============================================================================
+WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/agent/.claude/workspace/project")
+ASK_TIMEOUT_SECONDS = int(os.environ.get("ASK_TIMEOUT_SECONDS", 3600))
+
+def _decode_question(q: str) -> str:
+    """按平台规范识别 q 的编码方式并解码。"""
+    if " " in q or len(q) < 50:
+        return unquote(q)
+    try:
+        return base64.b64decode(q).decode("utf-8")
+    except Exception:
+        return unquote(q)
+
+async def _run_claude(question: str):
+    """spawn node run_claude.js，返回 (status_code, text)。"""
+    msg_b64 = base64.b64encode(question.encode("utf-8")).decode("ascii")
+    run_claude = os.path.join(WORKSPACE_DIR, "run_claude.js")
+    if not os.path.exists(run_claude):
+        return 500, f"run_claude.js not found at {run_claude}"
+    env = {
+        **os.environ,
+        "ANTHROPIC_DISABLE_PREFLIGHT": "1",
+        "CLAUDE_CAPTURE_STDIO": "1",
+        "CLAUDE_MSG": msg_b64,
+        "CLAUDE_PERMISSION_MODE": os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", run_claude,
+            cwd=WORKSPACE_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except Exception as e:
+        return 500, f"spawn error: {e}"
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=ASK_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        with suppress(Exception):
+            proc.kill()
+        return 504, "Request timeout"
+    if proc.returncode == 0:
+        return 200, out.decode("utf-8", "replace").strip()
+    return 500, (err.decode("utf-8", "replace").strip() or f"Exit code: {proc.returncode}")
+
+@app.api_route("/ask/claude", methods=["GET", "POST"])
+async def ask_claude(request: Request):
+    q: Optional[str] = request.query_params.get("q")
+    if request.method == "POST":
+        raw = await request.body()
+        if raw:
+            body_text = raw.decode("utf-8", "replace")
+            try:
+                data = json.loads(body_text)
+                if isinstance(data, dict):
+                    q = data.get("q") or data.get("message") or q
+            except Exception:
+                q = body_text or q
+    if not q:
+        return Response(content="Missing q parameter", status_code=400, media_type="text/plain; charset=utf-8")
+    question = _decode_question(q)
+    if not question.strip():
+        return Response(content="Empty question", status_code=400, media_type="text/plain; charset=utf-8")
+    status, text = await _run_claude(question)
+    return Response(content=text, status_code=status, media_type="text/plain; charset=utf-8")
 
 @app.get("/notice")
 async def get_notice_http():
@@ -876,7 +959,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
             // crypto.subtle 只在安全上下文（https / localhost）可用；
-            // 通过 http://obs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
+            // 通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
             // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
             const HAS_SUBTLE = !!(globalThis.crypto && globalThis.crypto.subtle && globalThis.crypto.subtle.digest);
             // 纯 JS SHA-256 兜底实现（非安全上下文用）。输出与 crypto.subtle.digest("SHA-256") 完全一致。
@@ -966,7 +1049,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             async function deleteFile(filename) {
                 if (!confirm(`确定要删除 ${filename} 吗？`)) return;
                 try {
-                    const response = await fetch(`/${filename}`, { method: 'DELETE' });
+                    const response = await obsFetch(`/${filename}`, { method: 'DELETE' });
                     if (response.ok) {
                         window.location.reload();
                     } else {
@@ -978,7 +1061,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             }
 
             // 单文件直传（≤10MB）：整段上传 + 整段校验（X-File-SHA256，服务端校验后才落账）
-            function uploadOneFileDirect(file, onProgress) {
+            // 且先试 http://localhost:19082，不可达再回退 http://ocs.dimond.top
+            async function uploadOneFileDirect(file, onProgress) {
+                const base = await obsBase();
                 return new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
                     xhr.upload.onprogress = (e) => {
@@ -999,7 +1084,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         } catch (e) {
                             digest = '';
                         }
-                        xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
+                        xhr.open('PUT', `${base}/${encodeURIComponent(file.name)}`);
                         if (digest) xhr.setRequestHeader('X-File-SHA256', digest);
                         xhr.send(file);
                     };
@@ -1022,7 +1107,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const hash = await fileFingerprint(chunkHashes);
 
                 // 2) 初始化会话（含秒传判定与已上传分片枚举）
-                const initResp = await fetch('/upload/init', {
+                const initResp = await obsFetch('/upload/init', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ filename: file.name, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
@@ -1048,7 +1133,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, size));
                         let ok = false;
                         for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-                            const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
+                            const r = await obsFetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
                                 method: 'PUT',
                                 // 逐片校验用哈希；重试直接复用，避免重复计算
                                 headers: { 'X-Chunk-SHA256': chunkHashes[i] },
@@ -1067,7 +1152,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 await Promise.all(workers);
 
                 // 4) 合并（服务端按分片指纹再校验一次）
-                const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
+                const c = await obsFetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, chunk_size: chunkSize, hash_algo: hashAlgo, hash })
@@ -1435,6 +1520,80 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 };
             });
         </script>
+        <script>
+            // 下载/打开：先试宿主机本地地址 http://localhost:19082，不可用再回退域名 http://ocs.dimond.top
+            // 页面文字只展示域名 http://ocs.dimond.top；本地地址仅用于加速探测（二者指向同一服务）
+            var DOWNLOAD_HOST_PRIMARY = "http://localhost:19082";
+            var DOWNLOAD_HOST_FALLBACK = "http://ocs.dimond.top";
+
+            // 上传/接口地址：先试 http://localhost:19082，不可达再回退域名 http://ocs.dimond.top
+            var OBS_HOSTS = [DOWNLOAD_HOST_PRIMARY, DOWNLOAD_HOST_FALLBACK];
+            var _obsBasePromise = null;
+            function obsBase() {
+                if (!_obsBasePromise) {
+                    _obsBasePromise = (async function () {
+                        for (var i = 0; i < OBS_HOSTS.length; i++) {
+                            var h = OBS_HOSTS[i];
+                            try {
+                                var ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+                                var t = setTimeout(function () { if (ctl) { try { ctl.abort(); } catch (e) {} } }, 1200);
+                                await fetch(h + "/health", { method: "HEAD", mode: "no-cors", cache: "no-store",
+                                                             signal: ctl ? ctl.signal : undefined });
+                                clearTimeout(t);
+                                return h;
+                            } catch (e) { /* 换下一个 host */ }
+                        }
+                        return "";   // 都不可达：回退为相对当前页 origin
+                    })();
+                }
+                return _obsBasePromise;
+            }
+            async function obsFetch(url, opts) {
+                var base = await obsBase();
+                return fetch(base + url, opts);
+            }
+            obsBase();   // 页面加载即预热探测，首次上传无需等待
+
+            function _fileUrl(host, name) {
+                return host + "/" + String(name).split("/").map(encodeURIComponent).join("/");
+            }
+
+            function _triggerDownload(url, name, isDownload) {
+                var a = document.createElement("a");
+                a.href = url;
+                if (isDownload) { a.download = name; a.target = "_blank"; a.rel = "noopener"; }
+                else { a.target = "_blank"; a.rel = "noopener"; }
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            }
+
+            function downloadWithFallback(ev, el, isDownload) {
+                if (ev) ev.preventDefault();
+                var name = el.getAttribute("data-name") || "";
+                var primary = _fileUrl(DOWNLOAD_HOST_PRIMARY, name);
+                var fallback = _fileUrl(DOWNLOAD_HOST_FALLBACK, name);
+                var settled = false;
+                var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+                var timer = setTimeout(function () { if (ctrl) { try { ctrl.abort(); } catch (e) {} } }, 1500);
+                try {
+                    // no-cors HEAD 只用于探测可达性：同/跨域均能拿到 opaque 响应，网络不可达时才 reject
+                    fetch(primary, { method: "HEAD", mode: "no-cors", cache: "no-store",
+                                     signal: ctrl ? ctrl.signal : undefined })
+                        .then(function () {
+                            if (settled) return; settled = true; clearTimeout(timer);
+                            _triggerDownload(primary, name, isDownload);
+                        })
+                        .catch(function () {
+                            if (settled) return; settled = true; clearTimeout(timer);
+                            _triggerDownload(fallback, name, isDownload);
+                        });
+                } catch (e) {
+                    _triggerDownload(fallback, name, isDownload);
+                }
+                return false;
+            }
+        </script>
     </head>
     <body>
         <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
@@ -1451,7 +1610,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             </div>
         </div>
 
-        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
+        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
         
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
             <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
@@ -1494,9 +1653,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             file_url = f"{url_head}/{f}"
             html += f'''
             <li>
-                <a href="{file_url}" target="_blank">{f}</a> 
+                <a href="{file_url}" target="_blank" data-name="{f}" onclick="return downloadWithFallback(event, this, false)">{f}</a>
                 <span class="actions">
-                    <a href="{file_url}" download>下载</a>
+                    <a href="{file_url}" download data-name="{f}" onclick="return downloadWithFallback(event, this, true)">下载</a>
                     <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
                 </span>
             </li>
