@@ -857,3 +857,39 @@ videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button
 重建 `obs-obs` 镜像生效。
 
 ---
+
+## 续 9 — 首页标题「文件托管服务」点击跳转 /video
+
+**用户原话**：`点击文托管服务的标题，要跳转到/video页面。`
+
+**背景**：首页原本只有浏览器标签的 `<title>文件托管服务</title>`，
+**页面可见区域没有该标题元素**（Playwright 实测 + `curl | grep '<h1'` 均为空），
+所以先补一个可见标题再做成链接。
+
+**实现**（`src/obs/server.py` 首页内联 HTML/CSS）：
+
+- `<body>` 开头新增：
+  `<h1 class="site-title"><a href="/video">文件托管服务</a></h1>`
+- 新增样式，让它「像标题而不是默认蓝链接」：
+  ```css
+  .site-title { margin: 0 0 16px 0; font-size: 1.6em; }
+  .site-title a { color: #333; text-decoration: none; }
+  .site-title a:hover { text-decoration: underline; }
+  ```
+
+**测试**：`test_home_title_link.py`（3 组，每组 60s 超时，TDD 先红后绿）：
+① 源码：`<body>` 内存在 `<h1><a href="/video">文件托管服务</a></h1>`、
+   `.site-title a` 有颜色且去掉默认下划线、公告板等既有内容未被挤掉；
+② HTTP：首页真实下发该标题链接、`/video` 可达 200、标题未重复插入；
+③ 回归：公告板/排序/上传区/粘贴上传/health/videos/video 均正常。
+
+**浏览器实测**（Playwright）：
+- 标题可见（`height 35.5px`），`href="/video"`，`color rgb(51,51,51)`、
+  `text-decoration: none`、`cursor: pointer`；
+- **点击标题** → URL 变为 `http://127.0.0.1/video`、标题变 `OBS 视频流`，跳转生效；
+- 截图确认深色标题观感，位于公告板上方。
+
+**结果**：3 组全绿；**9 个测试文件全量回归 PASS**（新增 `test_home_title_link`）。
+重建 `obs-obs` 镜像生效。
+
+---

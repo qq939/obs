@@ -232,5 +232,28 @@
      **原文件 404 + `/hls/...` 404 + /videos 列表不含**，三条缺一不可。
    - 跑本任务测试：`python3 test_video_delete_button.py`。
 
+23. **让标题可点击跳转（本项目首页「文件托管服务」→ /video）**：
+   - **先确认元素真的存在**！本项目首页只有 `<head>` 里给浏览器标签用的
+     `<title>文件托管服务</title>`，**页面可见区域根本没有该标题**。
+     无脑改 `title` 是没用的（标签标题不可点，也不该加 `<a>`）。
+     排查手法：`curl -s http://host/ | grep -nE '<h1|<h2|标题文字'`，
+     再看 `<body>` 之后有没有对应元素；Playwright 里 `document.querySelector('.site-title')`
+     返回 `null` 就说明得先补元素。
+   - 正确做法：在 `<body>` 内放真实标题并套链接：
+     `<h1 class="site-title"><a href="/video">文件托管服务</a></h1>`。
+   - **纯 `<a>` 会变成默认蓝色带下划线**，和「标题」观感冲突，要单独兜住样式：
+     ```css
+     .site-title a { color: #333; text-decoration: none; }
+     .site-title a:hover { text-decoration: underline; }   /* hover 才给提示 */
+     ```
+   - 断言「像标题」而不只是「是链接」：测试里查 `.site-title a` 规则内
+     **有 `color` 且 `text-decoration: none`**；只断言 `href` 会漏掉观感问题。
+     注意别用 `.site-title[^{]*\{...\}` 这种宽正则，会先匹配到不含颜色的那条规则
+     （本项目就踩了，改成正则精确锚定 `.site-title\s+a`）。
+   - 端到端验证最硬的证据是**真点一下**：Playwright `page.locator('.site-title a').click()`
+     然后断言 `page.url()` 变成目标地址，比只看 HTML 靠谱。
+   - 跑本任务测试：`python3 test_home_title_link.py`。
+
+
 
 

@@ -706,6 +706,10 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <style>
             body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
             h1 { color: #333; }
+            /* 首页标题：点击跳转到 /video 视频页（使用位置：<body> 内的 .site-title） */
+            .site-title { margin: 0 0 16px 0; font-size: 1.6em; }
+            .site-title a { color: #333; text-decoration: none; }
+            .site-title a:hover { text-decoration: underline; }
             ul { list-style: none; padding: 0; }
             li { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
             a { text-decoration: none; color: #007bff; }
@@ -1433,6 +1437,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         </script>
     </head>
     <body>
+        <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
+        <h1 class="site-title"><a href="/video">文件托管服务</a></h1>
+
         <!-- 公告板模块 -->
         <div class="notice-board">
             <div id="ws-status-indicator" title="Connecting..."></div>
