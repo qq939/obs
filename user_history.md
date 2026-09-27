@@ -758,3 +758,102 @@ Docker Desktop(macOS) 的 bind mount 磁盘 IO；若无 HLS 且视频码率高�
 重建 `obs-obs` 镜像生效。
 
 ---
+
+## 续 7 — 上传实时速度 + 10MB 阈值（整段/分段校验）+ HLS 仅视频
+
+**用户原话**：`上传的时候要显示实时上传速度。另外要确保obs的特性，就是小于10M（我记得好像是10M，你沿用旧数字即可）是整段校验整段上传。大于10M是分段校验分段上传（这样能保证断点续传）。只有视频文件才在凌晨四点开始HLS切分。`
+
+### 1) 实时上传速度
+
+- `createSpeedMeter(windowMs)`：滑动窗口（3s）内算**瞬时速度**，全程算**平均速度**；
+  每次采样字节没增长（上传停滞 / 进入校验阶段）→ 瞬时速度归零，避免显示假速度；
+  窗口外的旧样本主动丢弃，速度能及时「回升」而不被历史流量稀释。`nowMs` 可注入，便于测试。
+- `fmtSpeed(bytesPerSec)`：B/s → KB/s → MB/s → GB/s；0/负数/NaN 返回空串（不显示占位）。
+- `reportUploadStatus({stage,index,totalFiles,filename,pct,overallPct,speedText})`：统一进度文案，
+  形如 `上传中... (2/5) a.mp4 45% [1.2MB/s] [总进度 30%]`；无速度时不留空括号。
+- `uploadFiles` 里每个文件建一个速度计，并在阶段切换时沿用上一次速度，避免闪成 0。
+
+### 2) 10MB 阈值：整段 vs 分段
+
+沿用旧数字 `CHUNK_SIZE_BROWSER = 10 * 1024 * 1024`，
+`file.size <= CHUNK_SIZE_BROWSER ? uploadOneFileDirect : uploadOneFileResumable`。
+
+- **≤10MB 整段校验 + 整段上传**：直传前对**整个文件**算一次 SHA-256，放进
+  `X-File-SHA256` 请求头；服务端 [upload_file_put](file:///Users/jimjiang/Downloads/obs/src/obs/server.py#L1793-L1836)
+  落盘后比对哈希，**不一致则删除文件并返回 400**，绝不留半成品；
+  未声明该头（如 `curl --upload-file`）视为旧客户端，保持兼容不校验。
+- **>10MB 分段校验 + 分段上传**：逐片算 SHA-256 走 `X-Chunk-SHA256`，服务端
+  [upload_chunk](file:///Users/jimjiang/Downloads/obs/src/obs/server.py#L1534-L1577) 落盘即校验，
+  不符/缺声明一律 422 并丢弃分片；`/upload/init` 秒传 + 枚举已上传分片、
+  `/upload/status` 回传 `uploaded` 与 `chunkHashes` → **断点续传**。
+
+### 3) 只有视频才进 HLS 切分
+
+[_list_missing_hls](file:///Users/jimjiang/Downloads/obs/src/obs/server.py#L322-L336) 已按
+`VIDEO_EXTS = {".mp4",".webm",".ogv",".mov",".m4v",".mkv"}` 过滤，非视频文件不进队列。
+本次用「同名不同扩展名」造数据做了行为验证。
+
+**测试**：`test_upload_speed_and_threshold.py`（5 组，每组 120s 超时，TDD 先红后绿）：
+① 源码：阈值=10MB、速度三函数、分流分支、整段校验头、分片校验+续传；
+② node 跑真实 JS **23 条断言**：单位换算边界、首个样本 0、0.5s/1s 速度换算、
+   停滞归零、窗口滑动后回升、进度文案各字段；
+③ HTTP 分片协议：错哈希 422、缺声明 422、传 1 片后中断 → `status` 枚举 `uploaded=[0]` →
+   重新 init 复用同一 uploadId → 补齐合并后逐字节一致；
+④ 整段校验：无头兼容 201、正确哈希 201、错误哈希 400 且文件 404（未留损坏文件）；
+⑤ HLS 仅视频：`.mp4` 进队列 / `.txt` 不进 / dry-run 队列全为视频扩展名 + 回归。
+
+**结果**：5 组全绿。
+
+---
+
+## 续 8 — /video 第三页「设置」→「删除」按钮 + 与上传按钮格式统一
+
+**用户原话**：
+1. `在/video页面第三页设置两个字替换成"删除"按钮，删除按钮的作用是删除当前正在播放的视频文件和HLS文件。`
+2. `删除和上传的按钮格式要保持一致`
+
+### 1) 「设置」二字 → 「删除」按钮
+
+- [index.html](file:///Users/jimjiang/Downloads/obs/src/obs/video_static/index.html#L42-L45) 设置页
+  `panel-head` 里的 `<span>设置</span>` 替换为
+  `<button class="panel-head-btn btn-delete-current" id="btnDeleteCurrent">删除</button>`。
+- [app.js](file:///Users/jimjiang/Downloads/obs/src/obs/video_static/app.js#L1389-L1418) 抽出
+  `deleteCurrentVideo(triggerEl)`：取 `videos[activeIndex]`（**当前正在播放**的那一项），
+  `confirm` 后 `fetch(v.url, {method:'DELETE'})` 并 `loadFeed()` 刷新；
+  播放器浮层「删除」按钮与设置页新按钮**共用同一函数**，行为完全一致。
+- [server.py delete_file](file:///Users/jimjiang/Downloads/obs/src/obs/server.py#L2077-L2104)：
+  删原视频后，把 `hls/{filename}/` 目录一并 `shutil.rmtree`（走 `asyncio.to_thread` 不阻塞事件循环），
+  不存在则忽略；`hls_removed` 写入日志。这样删除后不会留下孤儿 HLS 分片。
+
+### 2) 两个按钮格式统一
+
+原先删除按钮是「红边透明底」描边风格、上传是「实心渐变」风格，padding/阴影都不同。
+重构为**公共基类**：
+
+```css
+.panel-head-btn { /* 定位 + border/background/color/字号/内边距/圆角/阴影/过渡 全在这里 */ }
+.btn-delete-current { left: 12px; }   /* 仅左侧定位 */
+.fab-upload        { right: 12px; }   /* 仅右侧定位 */
+```
+
+**测试**：`test_video_delete_button.py`（5 组，每组 300s 超时，TDD 先红后绿）：
+① 源码：设置页标题不再是「设置」、有 `#btnDeleteCurrent`、app.js 绑定并取 `videos[activeIndex]`、
+   后端 DELETE 用 `get_hls_dir()` + `rmtree`；
+② HTTP：`/video` 下发删除按钮，速度档位/进度条/上传按钮仍在；
+③ **行为（真实生成 HLS 后删）**：造 3s 视频 → 容器内 `generate_hls` 生成分片 →
+   `DELETE` 返回 200 → 原视频文件系统+HTTP 均 404 → `hls/{name}/` 目录消失 → `/hls/...` 404 →
+   `/videos` 列表不再包含；
+④ 回归：删不存在文件 404、删无 HLS 的非视频文件 200、首页/health/videos/hls-cron 正常；
+⑤ 格式一致：两按钮共用 `panel-head-btn` 基类、基类集中视觉属性、各自只写 left/right、
+   线上 CSS 一致。
+
+**浏览器实测**（Playwright）：
+- 取两按钮 18 项 computed style 逐一比对 → `identical: true`，**零差异**（高度均 29px）；
+- 第三页截图确认：左右对称的红色渐变胶囊，白字、同圆角、同高度，格式完全一致。
+
+**结果**：5 组全绿；**8 个测试文件全量回归 PASS**
+（integration / arrow_keys_swap / speed_vertical_layout / paste_upload /
+videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button）。
+重建 `obs-obs` 镜像生效。
+
+---

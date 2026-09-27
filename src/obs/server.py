@@ -973,7 +973,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 }
             }
 
-            // 单文件直传（≤10MB）：XHR + 上传进度
+            // 单文件直传（≤10MB）：整段上传 + 整段校验（X-File-SHA256，服务端校验后才落账）
             function uploadOneFileDirect(file, onProgress) {
                 return new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
@@ -987,8 +987,19 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         else reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
                     };
                     xhr.onerror = () => reject(new Error('网络错误'));
-                    xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
-                    xhr.send(file);
+                    // 整段校验：直传前算一次整文件 SHA-256，服务端比对通过才保留文件
+                    const start = async () => {
+                        let digest = '';
+                        try {
+                            digest = await sha256Hex(file);
+                        } catch (e) {
+                            digest = '';
+                        }
+                        xhr.open('PUT', `/${encodeURIComponent(file.name)}`);
+                        if (digest) xhr.setRequestHeader('X-File-SHA256', digest);
+                        xhr.send(file);
+                    };
+                    start();
                 });
             }
 
@@ -1068,16 +1079,29 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const totalFiles = files.length;
                 let success = 0, fail = 0;
                 const failedNames = [];
+                const lastSpeedByFile = {};   // 每个文件最近一次测得的速度（用于阶段切换时沿用）
                 let overallBytes = 0, totalBytes = 0;
                 for (let i = 0; i < totalFiles; i++) totalBytes += files[i].size;
                 for (let i = 0; i < totalFiles; i++) {
                     const file = files[i];
                     statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
+                    // 每个文件一个速度计：滑窗 3s 内算实时速度，全程算平均速度
+                    const meter = createSpeedMeter(3000);
                     const report = (pct, loaded, stage) => {
-                        const overallPct = totalBytes > 0 ? Math.round((overallBytes + (loaded || 0)) / totalBytes * 100) : 0;
-                        statusEl.textContent = `${stage || '上传中'}... (${i + 1}/${totalFiles}) ${file.name} ${pct}% [总进度 ${overallPct}%]`;
+                        const bytes = loaded || 0;
+                        const sp = meter(bytes);
+                        // 传入字节没变化（如进入「校验中」阶段）时沿用上一次测得的速度，避免闪成 0
+                        const shownSpeed = sp.speed > 0 ? sp.speed : (lastSpeedByFile[i] || 0);
+                        if (sp.speed > 0) lastSpeedByFile[i] = sp.speed;
+                        const overallPct = totalBytes > 0 ? Math.round((overallBytes + bytes) / totalBytes * 100) : 0;
+                        statusEl.textContent = reportUploadStatus({
+                            stage: stage, index: i + 1, totalFiles: totalFiles, filename: file.name,
+                            pct: pct, overallPct: overallPct,
+                            speedText: fmtSpeed(shownSpeed)
+                        });
                     };
                     try {
+                        // ≤10MB：整段校验 + 整段上传；>10MB：分段校验 + 分段上传（断点续传）
                         if (file.size <= CHUNK_SIZE_BROWSER) {
                             await uploadOneFileDirect(file, report);
                         } else {
@@ -1102,6 +1126,47 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             function handleDragUpload(fileList) {
                 if (!fileList || fileList.length === 0) return;
                 uploadFiles(fileList);
+            }
+
+            // 上传速度计：滑动窗口内算「实时速度」，全程算「平均速度」
+            // sample(bytes, nowMs) → { speed, avg }（字节/秒）；nowMs 可注入便于测试
+            function createSpeedMeter(windowMs) {
+                const window = windowMs > 0 ? windowMs : 3000;
+                let samples = [];
+                let firstT = 0, firstBytes = 0, prevBytes = null;
+                return function sample(bytes, nowMs) {
+                    const t = (nowMs === undefined) ? performance.now() : nowMs;
+                    if (samples.length === 0) { firstT = t; firstBytes = bytes; }
+                    samples.push({ t: t, bytes: bytes });
+                    // 丢弃滑出窗口的旧样本（至少保留 2 个，避免除零）
+                    while (samples.length > 2 && t - samples[0].t > window) samples.shift();
+                    const oldest = samples[0];
+                    const dt = (t - oldest.t) / 1000;
+                    let inst = dt > 0 ? (bytes - oldest.bytes) / dt : 0;
+                    // 本次采样字节没有增长（上传停滞 / 进入校验阶段）→ 实时速度归零，避免显示假速度
+                    const stalled = (prevBytes !== null && bytes <= prevBytes);
+                    prevBytes = bytes;
+                    if (stalled) inst = 0;
+                    const totalDt = (t - firstT) / 1000;
+                    const avg = totalDt > 0 ? (bytes - firstBytes) / totalDt : 0;
+                    return { speed: inst > 0 ? inst : 0, avg: avg > 0 ? avg : 0 };
+                };
+            }
+
+            // 人类可读的传输速度（使用位置：reportUploadStatus）
+            function fmtSpeed(bytesPerSec) {
+                if (!bytesPerSec || bytesPerSec <= 0 || !isFinite(bytesPerSec)) return '';
+                const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+                let n = Number(bytesPerSec), i = 0;
+                while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+                return (i === 0 ? String(Math.round(n)) : n.toFixed(1)) + units[i];
+            }
+
+            // 统一进度文案（使用位置：uploadFiles 的 report 回调）
+            function reportUploadStatus(o) {
+                const head = (o.stage || '上传中') + '... (' + o.index + '/' + o.totalFiles + ') ' + o.filename;
+                const speed = o.speedText ? ' [' + o.speedText + ']' : '';
+                return head + ' ' + o.pct + '%' + speed + ' [总进度 ' + o.overallPct + '%]';
             }
 
             // 从剪贴板事件中提取文件；无文件（纯文本粘贴）返回空数组
@@ -1732,12 +1797,16 @@ async def upload_file_form(request: Request):
 
 @app.put("/{filename}")
 async def upload_file_put(filename: str, request: Request):
+    """整段直传（≤10MB 走此路径）。
+    若客户端声明了 X-File-SHA256（整段校验），落盘后必须比对通过，否则删除文件并报错；
+    未声明则视为旧客户端（如 curl --upload-file），保持兼容不做校验。"""
     filename = unquote(filename)
     if not filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
-        
+
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     save_path = os.path.join(upload_dir, filename)
+    expected_hash = (request.headers.get("x-file-sha256") or "").strip().lower()
     try:
         async with aiofiles.open(save_path, 'wb') as out_file:
             # 保持与客户端流大小一致；若设置了 MAX_UPLOAD_SIZE，则进行累计校验
@@ -1748,10 +1817,23 @@ async def upload_file_put(filename: str, request: Request):
                 total_written += len(chunk)
                 if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
                     raise HTTPException(status_code=413, detail="文件过大")
-                
+
+        # 整段校验：声明了整文件 SHA-256 就比对，不通过则删除，避免留下损坏文件
+        if expected_hash:
+            actual_hash = await asyncio.to_thread(file_sha256, save_path)
+            if actual_hash != expected_hash:
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
+                log_line(f"上传失败(PUT-校验) file={filename} 整段 SHA-256 不一致")
+                raise HTTPException(status_code=400, detail="整段 SHA-256 校验失败")
+
         file_url = f"{url_head}/{filename}"
         log_line(f"上传完成(PUT) file={filename} bytes={total_written} -> {save_path}")
         return Response(content=file_url, media_type="text/plain", status_code=201)
+    except HTTPException:
+        raise
     except Exception as e:
         log_line(f"上传失败(PUT) file={filename} error={e}")
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
@@ -1994,18 +2076,31 @@ async def download_file(filename: str, request: Request):
 
 @app.delete("/{filename}")
 async def delete_file(filename: str, request: Request):
+    """删除文件：同时清理该文件的 HLS 分片目录，避免留下孤儿产物。
+    使用位置：首页文件列表删除按钮、视频页播放器浮层删除按钮、视频页设置页「删除」按钮。"""
     filename = unquote(filename)
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, filename)
-    
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        try:
-            os.remove(file_path)
-            return Response(content="Deleted", status_code=200)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
-    else:
+
+    if not (os.path.exists(file_path) and os.path.isfile(file_path)):
         raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        os.remove(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+
+    # 一并删除 HLS 分片目录（不存在则忽略；失败不影响原文件删除结果）
+    hls_sub = os.path.join(get_hls_dir(), filename)
+    hls_removed = False
+    if os.path.isdir(hls_sub):
+        try:
+            await asyncio.to_thread(shutil.rmtree, hls_sub, True)
+            hls_removed = True
+        except Exception as e:
+            log_line(f"删除 HLS 目录失败 file={filename} error={e}")
+    log_line(f"删除文件 file={filename} hls_removed={hls_removed}")
+    return Response(content="Deleted", status_code=200)
 
 # 启动服务器
 if __name__ == "__main__":

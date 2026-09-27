@@ -173,4 +173,64 @@
      然后 `page.locator('.paste-btn-ok').click()` 走真实点击。
    - 跑本任务测试：`python3 test_paste_upload.py`。
 
+19. **前端「上传实时速度」怎么算才不跳变（本项目 3s 滑动窗口）**：
+   - 别用「总字节 ÷ 总耗时」当实时速度——上传到后半程数字会变得非常迟钝。
+     正确做法：**滑动窗口**，只保留最近 N 秒的采样点，用
+     `(最新字节 - 窗口内最早字节) / (时间差)` 算瞬时速度；全程累计值另算作「平均速度」。
+   - **样本要主动淘汰**：`while (samples.length > 2 && now - samples[0].t > window) samples.shift();`
+     否则卡顿几秒后恢复，速度会被历史流量稀释，显示得极低。
+   - **字节没增长时必须把瞬时速度归零**：否则「校验中」等不传数据的阶段会一直显示上一个假速度。
+   - **时间源要可注入**（`sample(bytes, nowMs)`，缺省才用 `performance.now()`），
+     这样能在 node 里用固定时间戳断言精确数值，不用 sleep 等真实时间。
+   - 单元换算注意：`0 / 负数 / NaN` 应返回空串而不是 `0B/s`，避免 UI 出现怪异占位；
+     `1024 → 1.0KB`、`1536 → 1.5KB` 这类边界一定要写进测试。
+   - 跑本任务测试：`python3 test_upload_speed_and_threshold.py`。
+
+20. **「整段校验」与「分段校验」怎么选（本项目 10MB 阈值）**：
+   - **小文件（≤10MB）整段传 + 整段校验**：前端对**整个 Blob** 算一次 SHA-256 放请求头，
+     服务端落盘后比对，不符就 `os.remove` 再报错。简单可靠，**绝不能留半成品文件**。
+   - **大文件（>10MB）分片传 + 逐片校验**：每片单独算哈希放 `X-Chunk-SHA256`，
+     服务端**落盘即校验**、不符立刻删掉该分片并返回 422；
+     再配合 `/upload/init`（秒传 + 返回已传分片列表）与 `/upload/status`（枚举 `uploaded`）
+     就能实现**断点续传**。
+   - **一定要兼容旧客户端**：校验头「缺失」时不能直接拒绝，否则 `curl --upload-file` 全挂。
+     策略 = 有声明才校验，没声明保持原行为（本项目就是这么做的，测试里专门有一条）。
+   - 测试要点：错误哈希必须断言 **HTTP 4xx + 目标文件 404**（证明确实没落盘），
+     只断言状态码是不够的。
+   - 跑本任务测试：`python3 test_upload_speed_and_threshold.py`。
+
+21. **「两个按钮格式保持一致」的正确做法：抽公共基类**：
+   - 反例：两个按钮各写一套 `background/padding/border-radius/box-shadow`，
+     改一个忘了另一个，视觉立刻不一致（本项目初始就是「描边 vs 实心」两种风格）。
+   - 正解：把**所有视觉属性**集中到基类 `.panel-head-btn`，
+     具体按钮只保留**差异部分**（本项目只有 `left: 12px` / `right: 12px` 左右定位）：
+     ```css
+     .panel-head-btn { border; background; color; font-size; font-weight; line-height;
+                       padding; border-radius; cursor; box-shadow; transition; ... }
+     .btn-delete-current { left: 12px; }
+     .fab-upload        { right: 12px; }
+     ```
+   - **测试怎么断言「一致」**：
+     ① 源码层：两个按钮都带同一基类；基类规则集包含全部视觉属性；
+     ② 反向断言：各自规则集里**不允许再出现** `background/color/padding/...`，
+        防止以后有人又塞回去；
+     ③ 浏览器层（最硬的证据）：用 `getComputedStyle` 逐个属性比对两个元素，
+        断言差异为空对象。本项目实测 18 项属性零差异。
+   - Playwright 里做这件事的写法：
+     `[...props].forEach(p => { if (a[p] !== b[p]) diff[p] = [a[p], b[p]]; })`，
+     返回 `{ identical: Object.keys(diff).length === 0, diff }` 一眼看出差在哪。
+   - 跑本任务测试：`python3 test_video_delete_button.py`。
+
+22. **删除资源要「删干净」：文件 + 派生产物一起清**：
+   - 本项目视频有派生数据（`hls/{filename}/` 分片目录）。只删原文件会留下
+     **孤儿分片目录**，既占磁盘又可能被列表逻辑误命中。
+   - 做法：删原文件后顺手 `shutil.rmtree(hls_dir/filename, ignore_errors=True)`；
+     目录不存在就静默跳过（非视频文件本来就没有 HLS）。
+   - 用 `await asyncio.to_thread(shutil.rmtree, path, True)` 而不是直接调用，
+     避免大目录删除阻塞事件循环（这条是之前并发卡顿踩过的坑）。
+   - 测试：真造一个视频 → 生成 HLS → 调 DELETE → 断言
+     **原文件 404 + `/hls/...` 404 + /videos 列表不含**，三条缺一不可。
+   - 跑本任务测试：`python3 test_video_delete_button.py`。
+
+
 
