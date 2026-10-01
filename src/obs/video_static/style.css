@@ -420,6 +420,23 @@ html, body {
 .setting-row .switch input:checked + i { background: #fe2c55; }
 .setting-row .switch input:checked + i::after { transform: translateX(20px); }
 
+/* 视频数量（只显示数字）/ 随播 / 自播：三项在同一行内均分 */
+.setting-row-inline { gap: 12px; }
+.setting-row-inline .inline-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: rgba(255,255,255,.6);
+}
+/* 数量只显示数字，去掉 setting-row b 的右对齐/限宽（那是给长文本用的） */
+.setting-row-inline .inline-item b {
+    color: #fff;
+    font-weight: 600;
+    max-width: none;
+    text-align: left;
+    word-break: normal;
+}
+
 /* Playback speed selector（竖向：标签占一行，档位各自占一行） */
 .speed-row { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 .speed-options { display: flex; flex-direction: column; gap: 6px; }

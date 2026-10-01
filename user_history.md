@@ -893,3 +893,45 @@ videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button
 重建 `obs-obs` 镜像生效。
 
 ---
+
+## 2026-09-18（续 9）
+
+### 任务：视频页「数量 / 随播 / 自播」同一行 + 文案简写
+
+**worknote 2026-09-18**：用户要求「视频数量、随机播放、自动播放放到一行；视频数量直接显示数字不需要
+『视频数量』四个字；随机播放简写成随播，自动播放简写为自播」。
+
+**环境提示**：开工时发现 `origin/main` 已被其他会话快进到 `ac04e48`（期间新增了粘贴上传、
+上传实时速度、10M 阈值、HLS 定时任务、删除按钮、标题跳转等 6 个提交），
+先确认上一轮的 A/B/C 改动仍在（`chunk_fingerprint` / `computeChunkHashes` / `UPLOAD_CONCURRENCY` 均在）。
+
+**实现**：
+
+- `src/obs/video_static/index.html`：原来「数量 / 随机播放 / 自动播放」是**三个独立的
+  `.setting-row`**（各占一行），合并成一个 `.setting-row.setting-row-inline`，
+  内部三个 `span.inline-item`；数量只保留 `<b id="videoCount">0</b>`（去掉「视频数量」四个字）；
+  文案改为「随播」「自播」（开关 id `randomSwitch` / `autoplaySwitch` 保持不变）。
+- `src/obs/video_static/style.css`：新增 `.setting-row-inline`（`gap:12px`）、
+  `.inline-item`（`inline-flex; align-items:center; gap:8px`），
+  并覆盖 `.setting-row b` 继承来的 `max-width:60%; text-align:right`
+  （那是给文件名类长文本用的，会把数字推到右边）。
+
+**测试**：新建 `test_settings_row.py`（6 组，60s 超时），按 TDD 先删上一任务的
+`test_home_title_link.py`（其标题跳转断言搬进本脚本回归组，覆盖没丢），先跑红灯（线上仍旧排版）
+再实现转绿：
+① HTML 片段里三项都在同一个 `.setting-row-inline` 内、且片段内只有 1 个 `<div`（多 div 才可能换行）、
+   旧的三个整行 `setting-row` 已移除、CSS 里 `.inline-item` 为 `inline-flex`；
+② 页面不含「视频数量」字样、`#videoCount` 为纯数字、整行去标签后文本恰为「数字+随播+自播」；
+③ 文案为「随播/自播」，且「随播→randomSwitch、自播→autoplaySwitch」绑定正确；
+④ 开关行为回归：app.js 仍按原 id 取元素、监听与 `textContent = videos.length` 赋值完好、默认勾选；
+⑤ 源码（index.html / style.css / app.js）与线上下发**逐字节一致**；
+⑥ 回归：首页标题跳转 /video、速度档位 1-2-7、删除与上传按钮、自动切下一个、-3x 倒放、
+   `/health`、PUT 直传、首页拖拽区。
+6 组全绿，回归 `test_integration.py` 8 组全绿。
+
+**浏览器实测**（browser_use 子代理，`http://localhost/video` 按一次 ArrowRight 进设置页）：
+三项确实在同一水平线（`display:flex; flex-wrap:nowrap`，顶部 y = 258/253/253），
+整行可见文本为 `29 随播 自播`，无换行/重叠/截断；数字无中文标签；
+右侧开关右边缘正好落在面板内容右边界。已截图确认。
+
+---

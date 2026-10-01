@@ -255,5 +255,33 @@
    - 跑本任务测试：`python3 test_home_title_link.py`。
 
 
+## 把多个设置项塞进同一行（数量 + 两个开关）
+
+- 原写法是「一项一个 `.setting-row`」= 每项各占一行；要合到一行，
+  就把它们放进**同一个** `.setting-row`，里面再各包一个 `.inline-item`：
+  ```html
+  <div class="setting-row setting-row-inline">
+      <span class="inline-item"><b id="videoCount">0</b></span>
+      <span class="inline-item">随播<label class="switch">…</label></span>
+      <span class="inline-item">自播<label class="switch">…</label></span>
+  </div>
+  ```
+  父级 `.setting-row` 的 `display:flex; justify-content:space-between` 已能横向排布，
+  子项只需 `display:inline-flex; align-items:center; gap:8px` 让「文字 + 开关」贴在一起。
+- **复用容器时要覆盖继承来的样式**：`.setting-row b` 带 `max-width:60%; text-align:right`
+  （本来是给文件名那种长文本用的），数字会被推到右边，得在更具体的选择器里改回来：
+  ```css
+  .setting-row-inline .inline-item b { max-width: none; text-align: left; word-break: normal; }
+  ```
+- 断言「同一行」不用截图也能测：**div 配对计数**取出那一行的 HTML 片段，
+  确认三个控件都在片段内、且片段里只有 1 个 `<div`（多出来的 div 才可能换行）。
+  再去掉标签看整行文本是否恰好等于期望的 `29随播自播`，比逐个 `in` 断言更严。
+- 文案简化后记得**连注释一起改**：测试断言「页面不出现『视频数量』」时，
+  自己写的 HTML 注释里带上那四个字也会把测试搞红。
+- VSCode 提示：改 HTML 属性/标签可用 `Cmd + D` 选中同名片段批量改；
+  `Cmd + Shift + L` 可以一次选中全部相同文本，改 `setting-row` 这类重复 class 很快。
+
+
+
 
 

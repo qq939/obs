@@ -46,9 +46,12 @@
                     <!-- 播放列表：固定在设置页上方，竖向排列的 5 格 (uuid, t) 队列视图（前 2 + 当前 + 后 2） -->
                     <div class="playlist-strip" id="playlistStrip"></div>
                     <div class="panel-body">
-                        <div class="setting-row"><span>视频数量</span><b id="videoCount">0</b></div>
-                        <div class="setting-row"><span>随机播放</span><label class="switch"><input type="checkbox" id="randomSwitch" checked><i></i></label></div>
-                        <div class="setting-row"><span>自动播放</span><label class="switch"><input type="checkbox" id="autoplaySwitch" checked><i></i></label></div>
+                        <!-- 数量（只显示数字）/ 随播 / 自播 放在同一行 -->
+                        <div class="setting-row setting-row-inline">
+                            <span class="inline-item"><b id="videoCount">0</b></span>
+                            <span class="inline-item">随播<label class="switch"><input type="checkbox" id="randomSwitch" checked><i></i></label></span>
+                            <span class="inline-item">自播<label class="switch"><input type="checkbox" id="autoplaySwitch" checked><i></i></label></span>
+                        </div>
                         <div class="setting-row speed-row">
                             <span>播放速度</span>
                             <div class="speed-options" id="speedOptions">
