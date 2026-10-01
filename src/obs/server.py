@@ -1133,13 +1133,17 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, size));
                         let ok = false;
                         for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-                            const r = await obsFetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
-                                method: 'PUT',
-                                // 逐片校验用哈希；重试直接复用，避免重复计算
-                                headers: { 'X-Chunk-SHA256': chunkHashes[i] },
-                                body: blob,
-                            });
-                            ok = r.status === 201;
+                            try {
+                                const r = await obsFetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
+                                    method: 'PUT',
+                                    // 逐片校验用哈希；重试直接复用，避免重复计算
+                                    headers: { 'X-Chunk-SHA256': chunkHashes[i] },
+                                    body: blob,
+                                });
+                                ok = r.status === 201;
+                            } catch (e) {
+                                // 网络/跨域等异常同样进入下一次重试：避免单个分片抖动导致整文件上传失败
+                            }
                         }
                         if (!ok) throw new Error('分片上传失败: ' + i);
                         doneBytes += blob.size;
