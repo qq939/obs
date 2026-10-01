@@ -437,11 +437,14 @@ html, body {
     word-break: normal;
 }
 
-/* Playback speed selector（「速」+ 1x/2x/7x 同一行） */
-.speed-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
-.speed-options { display: flex; flex-direction: row; gap: 6px; }
+/* Playback speed selector（「速」+ 1x/2x/7x 同一行；「速」尽量少占地方，
+   三个档位等宽、加宽、间隔加大，横向均匀铺满） */
+.speed-row { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.speed-row > span { flex: 0 0 auto; font-size: 12px; line-height: 1; }
+.speed-options { display: flex; flex: 1; flex-direction: row; min-width: 0; align-items: center; gap: 14px; }
 .speed-btn {
-    padding: 4px 10px;
+    flex: 1;              /* 三档等宽，均匀铺满整行 */
+    padding: 5px 0;       /* 宽度由 flex 决定，横向加宽 */
     width: auto;          /* 档位按内容自适应宽度，同一行排列 */
     box-sizing: border-box;
     border: 1px solid rgba(255,255,255,.2);
