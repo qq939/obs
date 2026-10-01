@@ -1,7 +1,9 @@
 (function () {
     'use strict';
 
-    const CHUNK_SIZE = 2 * 1024 * 1024;
+    // 分片大小必须与服务端 /upload/init 的 chunk_size 一致（10MB），否则整文件指纹对不上
+    const CHUNK_SIZE = 10 * 1024 * 1024;
+    const UPLOAD_CONCURRENCY = 3;   // 分片并发上传路数
     // FEED_COPIES: ghost copies for infinite scroll illusion (3 = [ghost | real | ghost])
     const FEED_COPIES = 3;
     // WINDOW_SIZE: 固定 5 格播放窗口（前 2 + 当前 + 后 2），滑动后空缺随机填充
@@ -1455,36 +1457,43 @@
     let uploadQueue = [];
     let uploadCurrent = null;
 
-    // 计算文件哈希：小文件用 crypto.subtle（快），大文件用手动实现（省内存）
-    async function computeFileHash(file, onProgress) {
-        const SMALL_FILE_THRESHOLD = 50 * 1024 * 1024;  // 50MB 以下用 subtle
-        
-        if (file.size <= SMALL_FILE_THRESHOLD && crypto.subtle && crypto.subtle.digest) {
-            // 小文件：一次性读取 + crypto.subtle（快）
-            if (onProgress) onProgress(50);
-            const buf = await file.arrayBuffer();
-            if (onProgress) onProgress(90);
-            const d = await crypto.subtle.digest('SHA-256', buf);
-            if (onProgress) onProgress(100);
-            return Array.from(new Uint8Array(d)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-        
-        // 大文件：分块读取 + 手动 SHA-256（省内存）
-        const SLICE = 2 * 1024 * 1024;  // 2MB per slice
+    // 分片 sha256（hex）。http 域名等非安全上下文下 crypto.subtle 不存在，统一用纯 JS 实现。
+    async function sha256HexOfBlob(blob) {
         const ctx = createSha256();
-        let processed = 0;
-        for (let start = 0; start < file.size; start += SLICE) {
-            const buf = await file.slice(start, Math.min(start + SLICE, file.size)).arrayBuffer();
+        const SLICE = 2 * 1024 * 1024;   // 2MB 一片读入，避免整个分片常驻内存
+        for (let off = 0; off < blob.size; off += SLICE) {
+            const buf = await blob.slice(off, Math.min(off + SLICE, blob.size)).arrayBuffer();
             ctx.update(new Uint8Array(buf));
-            processed += buf.byteLength;
-            if (onProgress) onProgress(Math.round(processed / file.size * 100));
         }
         return ctx.digestHex();
     }
+    // 各分片 sha256（hex）顺序拼接后再取一次 sha256，得到整文件指纹；
+    // 必须与服务端 chunk_fingerprint 算法一致，否则秒传/合并校验不过。
+    async function computeChunkHashes(file, chunkSize, totalChunks, onProgress) {
+        const hashes = new Array(totalChunks);
+        for (let i = 0; i < totalChunks; i++) {
+            hashes[i] = await sha256HexOfBlob(file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size)));
+            if (onProgress) onProgress(Math.round((i + 1) / totalChunks * 100));
+        }
+        return hashes;
+    }
+    async function fileFingerprint(chunkHashes) {
+        const ctx = createSha256();
+        ctx.update(new TextEncoder().encode(chunkHashes.join('')));
+        return ctx.digestHex();
+    }
 
+    // 分片上传：/upload/init + /upload/chunk + /upload/complete（与主页 / 的客户端协议一致）
+    //  - 参数用服务端约定的 snake_case（chunk_size/total_chunks/hash_algo）
+    //  - 每个分片带 X-Chunk-SHA256，服务端逐片校验
+    //  - 合并请求带完整 body
+    //  - 网络错误也重试（原先只对非 201 重试，单次抖动即整文件失败）
+    //  - currentAbort 可能为 null（拖拽/队列路径未设置），此处做空值保护
     async function uploadOneFile(file) {
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        let hash = '', pct = 0;
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
+        const hashAlgo = 'sha256';
+        const signal = currentAbort ? currentAbort.signal : undefined;
+        let pct = 0;
 
         progressArea.classList.remove('hidden');
         progressTitle.textContent = file.name;
@@ -1492,34 +1501,67 @@
 
         try {
             progressText.textContent = '计算文件哈希…';
-            hash = await computeFileHash(file, (p) => {
+            const chunkHashes = await computeChunkHashes(file, CHUNK_SIZE, totalChunks, (p) => {
                 const hp = Math.round(p * 0.05);
                 if (hp !== pct) { pct = hp; progressText.textContent = '哈希 ' + hp + '%'; }
             });
+            const hash = await fileFingerprint(chunkHashes);
+
             progressText.textContent = '正在连接…';
             const init = await jsonFetch('/upload/init', {
                 method: 'POST', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({filename:file.name, size:file.size, hash, chunkSize:CHUNK_SIZE, totalChunks}),
-                signal: currentAbort.signal
+                body: JSON.stringify({filename:file.name, size:file.size, hash_algo:hashAlgo, hash, chunk_size:CHUNK_SIZE, total_chunks:totalChunks}),
+                signal
             });
             if (init.skip) {
                 progressFill.style.width='100%'; progressText.textContent='100%  秒传成功！';
                 await sleep(800); return;
             }
             const { uploadId, uploaded = [] } = init;
+            const uploadedSet = new Set(uploaded);
             const remaining = [];
-            for (let i = 0; i < totalChunks; i++) if (!uploaded.includes(i)) remaining.push(i);
-            for (let i = 0; i < remaining.length; i++) {
-                const idx = remaining[i];
-                const start = idx * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const uploadPct = Math.round((i / remaining.length) * 90) + 5;
-                progressText.textContent = '上传中 ' + uploadPct + '%  (' + (i+1) + '/' + remaining.length + ' 分片)';
-                progressFill.style.width = uploadPct + '%';
-                await obsFetch('/upload/chunk/' + uploadId + '/' + idx, {method:'PUT', body:file.slice(start,end), signal:currentAbort.signal});
-            }
+            for (let i = 0; i < totalChunks; i++) if (!uploadedSet.has(i)) remaining.push(i);
+
+            let done = 0, next = 0;
+            const worker = async () => {
+                while (true) {
+                    const k = next++;
+                    if (k >= remaining.length) return;
+                    const idx = remaining[k];
+                    const start = idx * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    let ok = false;
+                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+                        try {
+                            const r = await obsFetch('/upload/chunk/' + encodeURIComponent(uploadId) + '/' + idx, {
+                                method: 'PUT',
+                                headers: { 'X-Chunk-SHA256': chunkHashes[idx] },
+                                body: file.slice(start, end),
+                                signal
+                            });
+                            ok = (r.status === 201);
+                        } catch (e) {
+                            if (e && e.name === 'AbortError') throw e;
+                            // 网络/跨域异常同样进入下一次重试，避免整文件因单次抖动失败
+                        }
+                    }
+                    if (!ok) throw new Error('分片上传失败: ' + idx);
+                    done++;
+                    const uploadPct = Math.round((done / remaining.length) * 90) + 5;
+                    progressText.textContent = '上传中 ' + uploadPct + '%  (' + done + '/' + remaining.length + ' 分片)';
+                    progressFill.style.width = uploadPct + '%';
+                }
+            };
+            const workers = [];
+            for (let w = 0; w < Math.min(UPLOAD_CONCURRENCY, remaining.length); w++) workers.push(worker());
+            await Promise.all(workers);
+
             progressText.textContent='完成中…'; progressFill.style.width='98%';
-            await jsonFetch('/upload/complete/' + uploadId, {method:'POST', signal:currentAbort.signal});
+            await jsonFetch('/upload/complete/' + encodeURIComponent(uploadId), {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({filename:file.name, size:file.size, total_chunks:totalChunks, chunk_size:CHUNK_SIZE, hash_algo:hashAlgo, hash}),
+                signal
+            });
             progressFill.style.width='100%'; progressText.textContent='完成！';
             await sleep(500);
         } catch (err) {
