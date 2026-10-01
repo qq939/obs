@@ -437,12 +437,12 @@ html, body {
     word-break: normal;
 }
 
-/* Playback speed selector（竖向：标签占一行，档位各自占一行） */
-.speed-row { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
-.speed-options { display: flex; flex-direction: column; gap: 6px; }
+/* Playback speed selector（「速」+ 1x/2x/7x 同一行） */
+.speed-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+.speed-options { display: flex; flex-direction: row; gap: 6px; }
 .speed-btn {
     padding: 4px 10px;
-    width: 100%;          /* 每个档位各占一整行 */
+    width: auto;          /* 档位按内容自适应宽度，同一行排列 */
     box-sizing: border-box;
     border: 1px solid rgba(255,255,255,.2);
     border-radius: 6px;
