@@ -26,6 +26,33 @@ try {
     console.error('[WARN] Failed to write to log file:', e.message);
 }
 
+// ---------------------------------------------------------------------------
+// 本卡片自己的注入：project/claudeagent.md
+//   - CLAUDE.md 是平台级注入（所有卡片共享，平台维护）
+//   - claudeagent.md 是**这一张卡片自己的**注入（写本卡片的核心目标/职责/对外接口），
+//     由卡片 agent 维护，control 建卡片时会生成模板
+// 这里把它注入到每次调用的消息前面，于是无论走面板「发送」还是容器 /ask/claude，
+// Claude 都带着本卡片的核心目标在干活。
+// ---------------------------------------------------------------------------
+const AGENT_PROFILE_FILE = path.join(WORKSPACE_DIR, 'claudeagent.md');
+const AGENT_PROFILE_MAX_CHARS = 4000;
+let agentProfile = '';
+try {
+    if (fs.existsSync(AGENT_PROFILE_FILE)) {
+        agentProfile = fs.readFileSync(AGENT_PROFILE_FILE, 'utf8').trim();
+    }
+} catch (e) {
+    console.error('[WARN] Failed to read claudeagent.md:', e.message);
+}
+if (agentProfile) {
+    if (agentProfile.length > AGENT_PROFILE_MAX_CHARS) {
+        agentProfile = agentProfile.slice(0, AGENT_PROFILE_MAX_CHARS) + '\n...(已截断)';
+    }
+    message = `【本卡片的核心目标 · claudeagent.md】\n${agentProfile}\n\n----------\n\n${message}`;
+} else {
+    console.error('[WARN] claudeagent.md 不存在或为空；建议先写清本卡片的核心目标');
+}
+
 // 处理图片（可选）
 // CLAUDE_IMG 可以是文件路径或布尔标记：
 //   - 路径（如 /home/agent/.claude/workspace/project/tmp.png）：优先使用该路径

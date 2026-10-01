@@ -192,9 +192,9 @@ curl http://dimond.top:{host_port}/
 
 上传方式（HTTP PUT，无需认证）：
 ```bash
-curl --upload-file <本地文件> http://ocs.dimond.top/<文件名>
+curl --upload-file <本地文件> http://obs.dimond.top/<文件名>
 ```
 
-- 上传成功后返回：`http://ocs.dimond.top/<文件名>`
+- 上传成功后返回：`http://obs.dimond.top/<文件名>`
 - 文件名建议英文+数字+短横线，避免中文 URL 编码问题
 - 单次限制 10MB
