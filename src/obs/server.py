@@ -1562,40 +1562,26 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 return host + "/" + String(name).split("/").map(encodeURIComponent).join("/");
             }
 
-            function _triggerDownload(url, name, isDownload) {
-                var a = document.createElement("a");
-                a.href = url;
-                if (isDownload) { a.download = name; a.target = "_blank"; a.rel = "noopener"; }
-                else { a.target = "_blank"; a.rel = "noopener"; }
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-            }
-
-            function downloadWithFallback(ev, el, isDownload) {
-                if (ev) ev.preventDefault();
-                var name = el.getAttribute("data-name") || "";
-                var primary = _fileUrl(DOWNLOAD_HOST_PRIMARY, name);
-                var fallback = _fileUrl(DOWNLOAD_HOST_FALLBACK, name);
-                var settled = false;
-                var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
-                var timer = setTimeout(function () { if (ctrl) { try { ctrl.abort(); } catch (e) {} } }, 1500);
-                try {
-                    // no-cors HEAD 只用于探测可达性：同/跨域均能拿到 opaque 响应，网络不可达时才 reject
-                    fetch(primary, { method: "HEAD", mode: "no-cors", cache: "no-store",
-                                     signal: ctrl ? ctrl.signal : undefined })
-                        .then(function () {
-                            if (settled) return; settled = true; clearTimeout(timer);
-                            _triggerDownload(primary, name, isDownload);
-                        })
-                        .catch(function () {
-                            if (settled) return; settled = true; clearTimeout(timer);
-                            _triggerDownload(fallback, name, isDownload);
-                        });
-                } catch (e) {
-                    _triggerDownload(fallback, name, isDownload);
+            // 下载/查看地址：页面加载后统一改写为「先 http://localhost:19082，不可达再 http://ocs.dimond.top」。
+            // 关键：不能在点击回调里先 preventDefault 再异步探测、之后用 a.click() 触发下载——
+            // 程序化点击发生在用户手势之外，会被浏览器当作弹窗拦截（点击「没反应」）；
+            // 而复制链接粘贴到地址栏属于直接导航，不受拦截，所以才「粘贴能下、点击不能」。
+            // 正确做法：在页面加载时把 href 写好，点击走浏览器原生跳转；服务端响应带
+            // Content-Disposition: attachment，原生跳转即直接下载。
+            function applyDownloadHosts(base) {
+                var links = document.querySelectorAll("a[data-name]");
+                for (var i = 0; i < links.length; i++) {
+                    var name = links[i].getAttribute("data-name") || "";
+                    links[i].href = _fileUrl(base || "", name);   // base 为空则用相对地址（当前 origin）
                 }
-                return false;
+            }
+            function initDownloadHosts() {
+                obsBase().then(applyDownloadHosts);
+            }
+            if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", initDownloadHosts);
+            } else {
+                initDownloadHosts();
             }
         </script>
     </head>
@@ -1657,9 +1643,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             file_url = f"{url_head}/{f}"
             html += f'''
             <li>
-                <a href="{file_url}" target="_blank" data-name="{f}" onclick="return downloadWithFallback(event, this, false)">{f}</a>
+                <a href="{file_url}" target="_blank" data-name="{f}">{f}</a>
                 <span class="actions">
-                    <a href="{file_url}" download data-name="{f}" onclick="return downloadWithFallback(event, this, true)">下载</a>
+                    <a href="{file_url}" download data-name="{f}">下载</a>
                     <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
                 </span>
             </li>
