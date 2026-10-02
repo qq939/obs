@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 test_obs/
+test_obs_*/
 .log/
 .DS_Store
 *.pyc

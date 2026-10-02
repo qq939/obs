@@ -964,3 +964,33 @@ videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button
 
 ---
 
+[2026-10-02 16:00:00] $ 可是我确实需要 downloadWithFallback 啊，这样先能确认 `localhost:19082` 这个更快的路径能不能通，然后再试 `ocs.dimond.top` 这个公网地址。怎么办？
+
+**为什么会「点链接没反应」**：旧实现在 `click` 回调里先 `preventDefault()`，再做异步 HEAD 探测，
+最后在 `.then()` 里 `a.click()` —— 用户手势（user activation）已经过期，
+浏览器把这次异步触发的导航/下载当弹窗拦截，所以只能复制链接到地址栏。
+
+**正确做法：把探测从「点击时」挪到「页面加载时」（预热）**
+- 页面加载即 `fetch(快线路/health, {mode:'no-cors', signal: AbortController 900ms})` 探测；
+- 可达 → 同步改写文件列表 `a[data-file]` 的 `href` 到快线路；
+- 不可达 → 保留服务端渲染的公网域名 `href`（**任何时刻链接都可点**）；
+- 点击**不做任何 JS 拦截**，走浏览器原生同步导航 → 用户手势天然保留，下载不再被拦。
+
+**实现**（`src/obs/server.py`）
+- 首页脚本新增 `OBS_FAST_HOST="http://localhost:19082"` + `obsProbe()`（no-cors + AbortController 超时）
+  + `obsWriteDownloadLinks()`（按 `data-file` 同步改 href）+ `resolveObsFastHost()`，注册在 `DOMContentLoaded`。
+- 文件列表链接加 `data-file="{f}"`；服务端默认 `href` 仍为 `url_head`（公网），保证探测未完成时也可点。
+- 未改动 `/video`（其 `app.js` 无下载链接逻辑）。
+
+**验证**
+- 新增 `test_download_fast_host.py`（4 用例，60s 超时，自起 uvicorn 8093）：data-file/公网默认 href、
+  预热探测代码、**无点击期劫持**（无 downloadWithFallback、下载链接无 onclick）、`/health` 可探测 → 全 PASS。
+- 重建 `obs-obs` 镜像生效（`:80` 首页含 `resolveObsFastHost` ×3、`data-file=` ×86）。
+- **真浏览器（Playwright MCP）双场景点击实测**：
+  - 快线路可达（route mock 19082）→ href 改写为 `http://localhost:19082/pw_click.txt` → 点击 → **下载事件触发** `pw_click.txt`；
+  - 快线路不可达 → href 保持 `http://ocs.dimond.top/pw_click.txt` → 点击 → **下载事件触发**；
+  - 无 `pageerror`；控制台仅 2 条无害项（探测连接被拒 + favicon 404）。
+
+---
+
+

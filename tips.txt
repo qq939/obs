@@ -296,6 +296,18 @@
 - VSCode 提示：`Cmd + /` 快速注释/取消注释当前行；`Option + Shift + ↓/↑` 复制当前行，
   写「对称」的测试用例（如 init 与 chunk 两次预检）时很省事。
 
+- **别在 `click` 回调里做异步再触发下载**：`preventDefault()` → 异步 `fetch` 探测 → `.then()` 里
+  `a.click()`，用户手势（user activation）已过期，浏览器会把它当弹窗拦掉，表现就是
+  「点链接没反应，只能复制地址到地址栏」。正解是把探测挪到 `DOMContentLoaded` **预热**，
+  结果写进 `<a href>`，点击走原生同步导航。
+- **给链接留一个「一定可用」的默认 href**：预热没完成/快线路不通时用公网域名兜底，
+  这样链接任何时刻都能点，不会被异步探测拖累。改链用 `data-file` 定位，别劫持 `onclick`。
+- **验证「点击能下载」要用真浏览器**：Playwright 里 `page.waitForEvent('download')` + `.click()`，
+  再用 `page.route('http://localhost:19082/**', ...)` mock 快线路，就能分别覆盖「快线路可达」与
+  「快线路不可达回退公网」两条路径，比只看 HTML 有说服力。
+- VSCode 提示：`Cmd + Shift + P` 打开命令面板，输入 `Format Document` 可格式化整页；
+  `F2` 重命名符号，批量改 `OBS_FAST_HOST` 这类常量名比查找替换安全。
+
 
 
 

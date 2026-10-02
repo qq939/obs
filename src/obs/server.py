@@ -887,6 +887,33 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
+            // ---- 下载快线路（本机/局域网端口）----
+            // 页面从公网域名打开时，若本机端口可达就优先用它下载（更快），否则回退服务端渲染的公网链接。
+            // 关键：探测在「页面加载时」预热完成，click 时 href 已就绪 —— 走浏览器原生同步下载，
+            // 绝不在点击回调里做异步，避免丢失用户手势被浏览器拦截（旧「点击期异步回退」的病根）。
+            // 使用位置：resolveObsFastHost()（DOMContentLoaded 预热）、obsWriteDownloadLinks()
+            const OBS_FAST_HOST = "http://localhost:19082";
+            // no-cors 探测：跨端口/域名只要网络可达就 resolve（opaque 响应）；超时或报错视为不可达
+            function obsProbe(host, timeoutMs) {
+                return new Promise((resolve) => {
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => { ctrl.abort(); resolve(false); }, timeoutMs);
+                    fetch(host + '/health', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+                        .then(() => { clearTimeout(timer); resolve(true); })
+                        .catch(() => { clearTimeout(timer); resolve(false); });
+                });
+            }
+            // 把文件列表里的预览/下载链接同步改写到指定主机（不改动 click 行为）
+            function obsWriteDownloadLinks(host) {
+                document.querySelectorAll('a[data-file]').forEach((a) => {
+                    a.href = host + '/' + a.getAttribute('data-file');
+                });
+            }
+            // 预热：快线路可达则改链；不可达则保留服务端渲染的公网链接（照常可点）
+            async function resolveObsFastHost() {
+                if (await obsProbe(OBS_FAST_HOST, 900)) obsWriteDownloadLinks(OBS_FAST_HOST);
+            }
+            document.addEventListener('DOMContentLoaded', resolveObsFastHost);
             // crypto.subtle 只在安全上下文（https / localhost）可用；
             // 通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
             // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
@@ -1506,9 +1533,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             file_url = f"{url_head}/{f}"
             html += f'''
             <li>
-                <a href="{file_url}" target="_blank">{f}</a> 
+                <a href="{file_url}" target="_blank" data-file="{f}">{f}</a> 
                 <span class="actions">
-                    <a href="{file_url}" download>下载</a>
+                    <a href="{file_url}" download data-file="{f}">下载</a>
                     <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
                 </span>
             </li>
