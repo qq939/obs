@@ -7,7 +7,7 @@
 #   - 第 1089 行 表单上传成功响应文本
 #   - 第 1113 行 PUT 上传返回的文件 url
 #   - 第 1337 行 启动日志中的上传命令示例
-url_head = "http://obs.dimond.top"
+url_head = "http://ocs.dimond.top"
 
 import os
 import time
@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import uvicorn
@@ -551,6 +552,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# CORS：页面可能从域名（http://ocs.dimond.top）加载、而分片上传请求发往 http://localhost:19082（或反之），
+# 浏览器会对 OPTIONS 预检（PUT + X-Chunk-SHA256 / X-File-SHA256）直接拦截，故放开跨域。
+# 使用位置：OPTIONS /upload/init、OPTIONS /upload/chunk/... 等预检请求返回 200 + access-control-allow-origin。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # WebSocket 连接管理器
 class ConnectionManager:
     def __init__(self):
@@ -876,7 +888,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
             // crypto.subtle 只在安全上下文（https / localhost）可用；
-            // 通过 http://obs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
+            // 通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
             // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
             const HAS_SUBTLE = !!(globalThis.crypto && globalThis.crypto.subtle && globalThis.crypto.subtle.digest);
             // 纯 JS SHA-256 兜底实现（非安全上下文用）。输出与 crypto.subtle.digest("SHA-256") 完全一致。

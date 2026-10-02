@@ -3,7 +3,7 @@
 TDD 测试脚本 - 本次任务：
   1) 修复「http（非安全上下文）下手机上传大文件失败」：
      浏览器仅在安全上下文（https / localhost）才提供 crypto.subtle，
-     通过 http://obs.dimond.top 或 http://<局域网IP> 访问时 crypto.subtle 为 undefined，
+     通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时 crypto.subtle 为 undefined，
      >10MB 的文件走分片路径调用 crypto.subtle.digest 直接抛错 => 全部上传失败。
      修复：crypto.subtle 不可用时，用纯 JS SHA-256 兜底（哈希结果与 crypto.subtle 一致）。
   2) 修复「logs 目录没挂载」：服务端把日志写到 logs/server.log，
@@ -30,7 +30,7 @@ COMPOSE = os.path.join(ROOT, "docker-compose.yml")
 DOCKERFILE = os.path.join(ROOT, "Dockerfile.obs")
 HOST_LOG = os.path.join(ROOT, "logs", "server.log")
 BASE_URL = "http://127.0.0.1:80"
-URL_HEAD = "http://obs.dimond.top"
+URL_HEAD = "http://ocs.dimond.top"
 
 
 def timeout(seconds):

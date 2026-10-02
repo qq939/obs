@@ -935,3 +935,32 @@ videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button
 右侧开关右边缘正好落在面板内容右边界。已截图确认。
 
 ---
+
+[2026-10-02 15:46:42] $ 验证：CORS 预检 `OPTIONS /upload/init` → 200；上传往返 `PUT` 201 → `GET` 200 → `DELETE` 200，返回 URL 为 `http://ocs.dimond.top/verify2.txt`
+
+**核查结论：验收不通过 —— 所声称的改动在本仓库根本不存在**
+- 仓库 HEAD=`ac04e48`（工作区干净），全仓库从无提交 `84ff6a2`（`git cat-file -t 84ff6a2` 报 unknown，reflog/branch 亦无）；
+  `git log --all -S 'CORSMiddleware'` / `-S 'ocs.dimond.top'` 均无任何提交命中。
+- 实测 `src/obs/server.py` 与线上服务：`url_head = http://obs.dimond.top`，无任何 CORS 中间件
+  → `OPTIONS /upload/init` 返回 **405**，`PUT` 返回体是 `http://obs.dimond.top/verify2.txt`。
+- 前端也没有 `DOWNLOAD_HOST_PRIMARY/FALLBACK`、`obsBase/obsFetch`、`OBS_HOSTS` 等回退逻辑。
+
+**修复（TDD：先红后绿）**
+- 新增 `test_cors_domain_verify.py`（3 个用例，每例 60s 超时，起真实 uvicorn 于 8092 + 临时上传目录）：
+  修改前运行 → 红（`OPTIONS /upload/init` 405、`OPTIONS /upload/chunk` 405、PUT 返回 obs 域名）。
+- `src/obs/server.py`：① `url_head` `obs.dimond.top` → `ocs.dimond.top`；② 引入并挂载
+  `CORSMiddleware(allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])`；③ 同步注释域名。
+- 同步域名断言：`test_server.py`（3 处）、`test_http_upload_logs.py`（`URL_HEAD` + 注释）、
+  `src/obs/test_ref_features.py`（2 处）全部 `obs` → `ocs`。
+- 先 `git stash -u` → `git pull --rebase origin main`（并入远端 `576fb1d/cf71de0/38ebafa`）→ `stash pop`；
+  再 `docker compose up -d --build` 重建 `obs-obs` 镜像生效。
+
+**验证结果（本地 8092 与线上 `http://localhost:80` 均通过）**
+- `OPTIONS /upload/init`（Origin=ocs.dimond.top + POST + content-type）→ **200** + `access-control-allow-origin: *`
+- `OPTIONS /upload/chunk/...`（PUT + `x-chunk-sha256`）→ **200**
+- `PUT /verify2.txt` → **201**，响应体 `http://ocs.dimond.top/verify2.txt`；`GET` **200**；`DELETE` **200**；删除后 `GET` **404**
+- 首页域名统计：`ocs.dimond.top` × 88，`obs.dimond.top` × 0
+- 端点冒烟：`/health / /video /video/app.js /video/style.css /videos /hls/cron` 全 **200**
+
+---
+

@@ -281,6 +281,21 @@
 - VSCode 提示：改 HTML 属性/标签可用 `Cmd + D` 选中同名片段批量改；
   `Cmd + Shift + L` 可以一次选中全部相同文本，改 `setting-row` 这类重复 class 很快。
 
+- **「跨域 + 域名」别只改字符串**：`url_head` 一改，首页/上传响应/列表 href 全跟着变，
+  但真正卡住的是浏览器预检。验收要用**真实 OPTIONS 预检**验证，且必须带
+  `Origin` + `Access-Control-Request-Method` + `Access-Control-Request-Headers` 三个头，
+  否则 FastAPI 只会回 405，看不出有没有 CORS：
+  ```bash
+  curl -s -D - -o /dev/null -X OPTIONS http://localhost/upload/init \
+    -H 'Origin: http://ocs.dimond.top' \
+    -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type'
+  ```
+- **验收测试要自起服务**：`test_cors_domain_verify.py` 自己 `import server` + 起 uvicorn(8092)，
+  不依赖线上容器，先跑成红（405 / obs 域名）再改代码转绿，改完再重建镜像复核 :80。
+- VSCode 提示：`Cmd + /` 快速注释/取消注释当前行；`Option + Shift + ↓/↑` 复制当前行，
+  写「对称」的测试用例（如 init 与 chunk 两次预检）时很省事。
+
 
 
 

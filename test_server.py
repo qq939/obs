@@ -118,9 +118,9 @@ def test_homepage_list():
     assert "file_24.txt" in html
     assert "file_10.txt" in html
     
-    # Check if URL uses obs.dimond.top
-    assert "http://obs.dimond.top/file_0.txt" in html
-    assert "http://obs.dimond.top/file_24.txt" in html
+    # Check if URL uses ocs.dimond.top
+    assert "http://ocs.dimond.top/file_0.txt" in html
+    assert "http://ocs.dimond.top/file_24.txt" in html
 
     # Check if upload form exists (drag-and-drop + multi-select + paste, chunked upload with progress)
     assert 'uploadFiles' in html
@@ -437,6 +437,6 @@ def test_upload_returns_md5():
     assert body.get("filename") == filename
     expected_md5 = hashlib.md5(content).hexdigest()
     assert body.get("md5") == expected_md5
-    assert body.get("url") == f"http://obs.dimond.top/{filename}"
+    assert body.get("url") == f"http://ocs.dimond.top/{filename}"
     # 校验服务器返回的 md5 与本地计算一致
     assert body.get("md5") == hashlib.md5(content).hexdigest()
