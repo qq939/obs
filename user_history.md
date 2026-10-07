@@ -994,3 +994,35 @@ videos_concurrency / hls_cron / upload_speed_and_threshold / video_delete_button
 ---
 
 
+## 2026-09-16 (分片MD5校验)
+**User Request:** 采用分片md5策略校验上传。前端不计算md5。后端计算完md5返回给前端验证，验证失败则重传该分片。
+**Action:**
+1. 在 [test_chunk_md5.py](file:///c:/Users/jiang/Downloads/obs/test_chunk_md5.py) 中编写TDD测试用例：
+   - `test_chunk_upload_returns_md5`: 测试后端返回分片MD5
+   - `test_chunk_md5_mismatch_triggers_retry`: 测试MD5不匹配时重传
+   - `test_full_upload_with_chunk_md5_verification`: 完整流程测试
+2. 修改 [server.py](file:///c:/Users/jiang/Downloads/obs/server.py) 后端：
+   - 修复 `make_upload_id()` Windows兼容性问题（冒号改为下划线）
+   - `/upload/chunk` 接口计算分片MD5并返回 `{"md5": chunk_md5}`
+   - `/upload/init` 接口返回已上传分片的MD5映射 `chunk_md5s`
+3. 修改前端 `resumableUpload()` 函数：
+   - 新增 `calcChunkMd5()` 计算本地分片MD5
+   - 新增 `uploadAndVerifyChunk()` 上传并验证MD5
+   - 已上传分片验证MD5，失败则重传
+   - 服务器返回MD5与本地对比，不一致则重试
+4. 20个测试全部通过（3个新增 + 2个resumable + 15个server）
+5. Git 提交并推送到远程仓库。
+
+## 2026-09-18 (拉新代码rebase并推送obs分支)
+**User Request:** 拉新代码rebase，新代码解决了下载按钮无法点击下载的bug。rebase以后上传到obs分支
+**Action:**
+1. `git stash` 暂存本地 user_history.md 修改。
+2. `git fetch --all --prune`，发现 `origin/ai` 已被删除、`origin/main` 有新提交（ef7ae35..7758628）。
+3. 确认 `ai` 是 `origin/main` 的祖先提交（`git merge-base --is-ancestor` 退出码 0），即本地所有提交已包含在新代码中。
+4. 基于 `ai` 新建 `obs` 分支，`git rebase origin/main` 快进到最新提交 7758628。
+5. `git stash pop` 恢复 user_history.md（自动合并成功）。
+6. 新代码已重构：`server.py` 迁移到 `src/obs/server.py`，采用分片 SHA256 指纹校验（`X-Chunk-SHA256`），新增 `Dockerfile.obs`、video/HLS 相关功能。
+7. 验证新代码包含下载按钮修复（`downloadWithFallback` / `test_download_fast_host.py`）。
+8. 提交并推送 `obs` 分支到远程。
+
+
