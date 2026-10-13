@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import List, Optional, Dict
 from urllib.parse import quote, unquote
 from concurrent.futures import ThreadPoolExecutor
+from html import escape as html_escape
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse, StreamingResponse
@@ -1641,12 +1642,19 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
     else:
         for f in files_list:
             file_url = f"{url_head}/{f}"
+            safe_f = html_escape(f)
+            # 可预览的扩展名：点击文件名先进预览页（右上角有明显下载按钮）
+            if is_previewable(f):
+                name_link = (f'<a href="/preview/{quote(f, safe="")}" data-preview="{safe_f}" '
+                             f'title="点击预览">{safe_f}</a>')
+            else:
+                name_link = f'<a href="{file_url}" target="_blank" data-name="{safe_f}">{safe_f}</a>'
             html += f'''
             <li>
-                <a href="{file_url}" target="_blank" data-name="{f}">{f}</a>
+                {name_link}
                 <span class="actions">
-                    <a href="{file_url}" download data-name="{f}">下载</a>
-                    <button class="btn-delete" onclick="deleteFile('{f}')" title="删除">🗑️</button>
+                    <a href="{file_url}" download data-name="{safe_f}">下载</a>
+                    <button class="btn-delete" onclick="deleteFile('{safe_f}')" title="删除">🗑️</button>
                 </span>
             </li>
             '''
@@ -2152,6 +2160,264 @@ async def run_compress_async(filename: str):
                 os.remove(tmp_out)
             except:
                 pass
+
+# ============================================================================
+# 文件预览路由（/{filename} 之前声明，避免被后面 catch-all 抢先匹配）
+# 需求：点击 csv/xls/xlsx/doc/docx/pdf/html/jpeg/png/mp3 等文件先进入预览页，
+#       页面右上角有明显的「下载」按钮（下载走 /{filename}，服务端强制 attachment）。
+# ============================================================================
+
+PREVIEW_IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "avif", "jfif"}
+PREVIEW_AUDIO_EXTS = {"mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus"}
+PREVIEW_VIDEO_EXTS = {"mp4", "webm", "mov", "m4v", "ogv", "mkv"}
+PREVIEW_PDF_EXTS = {"pdf"}
+PREVIEW_HTML_EXTS = {"html", "htm"}
+PREVIEW_TEXT_EXTS = {"txt", "csv", "tsv", "json", "md", "log", "xml", "yml", "yaml",
+                     "ini", "conf", "cfg", "toml", "env", "py", "js", "mjs", "cjs",
+                     "ts", "tsx", "jsx", "css", "sh", "bash", "sql", "c", "h", "cpp",
+                     "hpp", "cc", "java", "go", "rs", "rb", "php", "vue", "bat", "ps1",
+                     "lua", "kt", "swift", "scala", "pl", "dart", "r"}
+PREVIEW_OFFICE_EXTS = {"doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf"}
+
+PREVIEW_EXTS = (PREVIEW_IMAGE_EXTS | PREVIEW_AUDIO_EXTS | PREVIEW_VIDEO_EXTS |
+                PREVIEW_PDF_EXTS | PREVIEW_HTML_EXTS | PREVIEW_TEXT_EXTS | PREVIEW_OFFICE_EXTS)
+
+
+def file_ext(name: str) -> str:
+    """取文件名扩展名（小写，不含点）。无扩展名返回空串。"""
+    base = os.path.basename(name)
+    if "." not in base:
+        return ""
+    return base.rsplit(".", 1)[1].strip().lower()
+
+
+def is_previewable(name: str) -> bool:
+    return file_ext(name) in PREVIEW_EXTS
+
+
+def preview_kind(name: str) -> str:
+    e = file_ext(name)
+    if e in PREVIEW_IMAGE_EXTS:
+        return "image"
+    if e in PREVIEW_AUDIO_EXTS:
+        return "audio"
+    if e in PREVIEW_VIDEO_EXTS:
+        return "video"
+    if e in PREVIEW_PDF_EXTS:
+        return "pdf"
+    if e in PREVIEW_HTML_EXTS:
+        return "html"
+    if e in PREVIEW_TEXT_EXTS:
+        return "text"
+    if e in PREVIEW_OFFICE_EXTS:
+        return "office"
+    return "other"
+
+
+def safe_upload_path(upload_dir: str, filename: str) -> str:
+    """把 filename 解析为 upload_dir 下的绝对路径；越界（../ 等）或非法返回空串。"""
+    base = os.path.realpath(upload_dir)
+    target = os.path.realpath(os.path.join(base, filename))
+    if target == base or target.startswith(base + os.sep):
+        return target
+    return ""
+
+
+def human_size(n: int) -> str:
+    f = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024 or unit == "TB":
+            return f"{int(f)} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+        f /= 1024
+    return f"{f:.1f} TB"
+
+
+_PREVIEW_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body { background: #0f1115; color: #e6e6e6; height: 100vh; display: flex; flex-direction: column;
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .topbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+              background: #171a21; border-bottom: 1px solid #262b36; }
+    .btn-back { flex: 0 0 auto; color: #9aa2b1; text-decoration: none; font-size: 14px; padding: 6px 10px; border-radius: 6px; }
+    .btn-back:hover { background: #222732; color: #e6e6e6; }
+    .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            font-size: 14px; color: #cfd3dc; }
+    .name .meta { color: #7d8494; font-size: 12px; margin-left: 10px; }
+    .btn-download { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; background: #2f6feb;
+                    color: #fff; text-decoration: none; padding: 9px 18px; border-radius: 8px; font-size: 14px;
+                    font-weight: 600; box-shadow: 0 2px 10px rgba(47,111,235,.35); }
+    .btn-download:hover { background: #3b7cf7; }
+    .stage { flex: 1 1 auto; min-height: 0; position: relative; overflow: auto; padding: 16px;
+             display: flex; align-items: center; justify-content: center; }
+    .stage img { max-width: 100%; max-height: 100%; object-fit: contain; background: #000;
+                 box-shadow: 0 4px 24px rgba(0,0,0,.45); }
+    .stage video { max-width: 100%; max-height: 100%; background: #000; }
+    .stage audio { width: min(720px, 100%); }
+    iframe.frame { width: 100%; height: 100%; border: 0; background: #fff; border-radius: 8px; }
+    .csv-wrap, .text-wrap { width: 100%; height: 100%; overflow: auto; border: 1px solid #262b36; border-radius: 10px; background: #12151b; }
+    pre.text { margin: 0; padding: 18px 22px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+               font-size: 13px; line-height: 1.6; white-space: pre; tab-size: 4; }
+    table.csv { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.csv th, table.csv td { border: 1px solid #2a3040; padding: 6px 10px; text-align: left; white-space: nowrap; }
+    table.csv th { background: #1c2230; position: sticky; top: 0; }
+    table.csv tr:nth-child(even) td { background: #161a22; }
+    .fallback { max-width: 560px; text-align: center; padding: 40px 28px; background: #171a21;
+                border: 1px solid #262b36; border-radius: 14px; }
+    .fallback .icon { font-size: 56px; line-height: 1; margin-bottom: 14px; }
+    .fallback h2 { margin: 0 0 8px; font-size: 18px; word-break: break-all; }
+    .fallback p { margin: 0 0 22px; color: #9aa2b1; font-size: 14px; }
+    .fallback .btn-download { padding: 12px 26px; font-size: 15px; }
+    .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+<div class="topbar">
+    <a class="btn-back" href="/">← 返回</a>
+    <div class="name" title="{{NAME}}">{{NAME}}<span class="meta">{{META}}</span></div>
+    <a class="btn-download" id="dlBtn" href="{{DOWNLOAD_URL}}" download>⬇ 下载</a>
+</div>
+<div class="stage">
+{{BODY}}
+</div>
+<script>
+(function () {
+    var inlineUrl = {{INLINE_JSON}};
+    var kind = {{KIND_JSON}};
+    var delim = {{DELIM_JSON}};
+    function decodeResp(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function parseCsv(text, d) {
+        var rows = [], row = [], cur = "", inQ = false, i, code, ch, n = text.length;
+        for (i = 0; i < n; i++) {
+            ch = text[i];
+            code = text.charCodeAt(i);
+            if (inQ) {
+                if (ch === '"') {
+                    if (text[i + 1] === '"') { cur += '"'; i++; continue; }
+                    inQ = false; continue;
+                }
+                cur += ch; continue;
+            }
+            if (ch === '"') { inQ = true; continue; }
+            if (ch === d) { row.push(cur); cur = ""; continue; }
+            if (code === 10) { row.push(cur); rows.push(row); row = []; cur = ""; continue; }
+            if (code === 13) { continue; }
+            cur += ch;
+        }
+        row.push(cur);
+        if (!(row.length === 1 && row[0] === "")) { rows.push(row); }
+        return rows;
+    }
+    function renderCsv(text) {
+        var wrap = document.getElementById("csvWrap");
+        if (!wrap) { return; }
+        var rows = parseCsv(text, delim);
+        if (!rows.length) { wrap.innerHTML = '<pre class="text">（空文件）</pre>'; return; }
+        var maxCols = 0, r, c, val, tag, html = '<table class="csv">';
+        for (r = 0; r < rows.length; r++) { if (rows[r].length > maxCols) { maxCols = rows[r].length; } }
+        for (r = 0; r < rows.length; r++) {
+            html += '<tr>';
+            for (c = 0; c < maxCols; c++) {
+                val = rows[r][c] === undefined ? '' : rows[r][c];
+                tag = (r === 0) ? 'th' : 'td';
+                html += '<' + tag + '>' + escapeHtml(val) + '</' + tag + '>';
+            }
+            html += '</tr>';
+        }
+        html += '</table>';
+        wrap.innerHTML = html;
+    }
+    if (kind === "text") {
+        fetch(inlineUrl, { cache: "no-store" }).then(decodeResp).then(function (t) {
+            var pre = document.getElementById("previewText");
+            if (pre) { pre.textContent = t; }
+        }).catch(function (e) {
+            var pre = document.getElementById("previewText");
+            if (pre) { pre.textContent = "加载失败：" + e.message; pre.className = "text err"; }
+        });
+    } else if (kind === "csv") {
+        fetch(inlineUrl, { cache: "no-store" }).then(decodeResp).then(renderCsv).catch(function (e) {
+            var w = document.getElementById("csvWrap");
+            if (w) { w.innerHTML = '<pre class="text err">加载失败：' + escapeHtml(e.message) + '</pre>'; }
+        });
+    }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def render_preview_page(filename: str, size: int, kind: str) -> str:
+    name = os.path.basename(filename) or filename
+    ext = file_ext(filename)
+    inline_url = "/obs/" + quote(filename, safe="/")
+    download_url = "/" + quote(filename, safe="")   # safe='' → 斜杠编码成 %2F，确保命中 /{filename}
+    kind_token = "none"
+    delim = ","
+
+    if kind == "image":
+        body = '<img src="' + inline_url + '" alt="' + html_escape(name) + '">'
+    elif kind == "audio":
+        body = '<audio controls autoplay src="' + inline_url + '"></audio>'
+    elif kind == "video":
+        body = '<video controls autoplay playsinline src="' + inline_url + '"></video>'
+    elif kind == "pdf":
+        body = '<iframe class="frame" src="' + inline_url + '" title="PDF 预览"></iframe>'
+    elif kind == "html":
+        body = '<iframe class="frame" sandbox="allow-scripts allow-popups" src="' + inline_url + '" title="HTML 预览"></iframe>'
+    elif kind == "text" and ext in ("csv", "tsv"):
+        kind_token = "csv"
+        delim = "," if ext == "csv" else "\t"
+        body = '<div class="csv-wrap" id="csvWrap"><pre class="text">加载中…</pre></div>'
+    elif kind == "text":
+        kind_token = "text"
+        body = '<div class="text-wrap"><pre class="text" id="previewText">加载中…</pre></div>'
+    else:
+        icon = "📄" if kind == "office" else "📦"
+        desc = ("此格式无法在线预览，请点击右上角「下载」按钮下载后查看。"
+                if kind == "office" else "该文件类型暂不支持在线预览，请下载后查看。")
+        body = ('<div class="fallback"><div class="icon">' + icon + '</div>'
+                '<h2>' + html_escape(name) + '</h2>'
+                '<p>' + desc + '</p>'
+                '<a class="btn-download" href="' + download_url + '" download>⬇ 下载文件</a></div>')
+
+    meta = human_size(size) + (" · " + ext.upper() if ext else "")
+    html = _PREVIEW_TEMPLATE
+    html = html.replace("{{TITLE}}", html_escape(name) + " - 预览")
+    html = html.replace("{{NAME}}", html_escape(name))
+    html = html.replace("{{META}}", html_escape(meta))
+    html = html.replace("{{DOWNLOAD_URL}}", html_escape(download_url))
+    html = html.replace("{{BODY}}", body)
+    html = html.replace("{{INLINE_JSON}}", json.dumps(inline_url))
+    html = html.replace("{{KIND_JSON}}", json.dumps(kind_token))
+    html = html.replace("{{DELIM_JSON}}", json.dumps(delim))
+    return html
+
+
+@app.get("/preview/{filename:path}")
+async def preview_file(filename: str, request: Request):
+    """文件预览页：图片/PDF/HTML/音视频/文本(CSV)/Office 等先在页面内预览，右上角提供下载按钮。"""
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    filename = unquote(filename)
+    file_path = safe_upload_path(upload_dir, filename)
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        size = 0
+    return HTMLResponse(content=render_preview_page(filename, size, preview_kind(filename)))
+
 
 # ============================================================================
 # 文件下载和删除路由（/{filename}）
