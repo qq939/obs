@@ -2232,6 +2232,139 @@ def human_size(n: int) -> str:
     return f"{f:.1f} TB"
 
 
+# ---- Office 文档在线预览 ----
+# 不依赖 LibreOffice 等 Office 套件，改用纯 Python 库把文档转成 HTML 片段，
+# 再由预览页用 iframe 内嵌显示（思路参考 qq939/interview-jobfinder：服务端转 HTML + iframe 渲染）。
+#   docx → mammoth；xlsx/xlsm → openpyxl；xls → xlrd；pptx → python-pptx；
+#   其余（doc/ppt/odt/ods/odp/rtf）无纯 Python 解析器，退化为下载占位页。
+OFFICE_CONVERTIBLE_EXTS = {"docx", "xlsx", "xlsm", "xls", "pptx"}
+OFFICE_MAX_BYTES = 25 * 1024 * 1024      # 超过则不转换，退化为下载占位
+OFFICE_MAX_ROWS = 3000                   # 表格最多渲染行数
+_OFFICE_HTML_CACHE = {}
+_OFFICE_HTML_CACHE_LOCK = threading.Lock()
+_OFFICE_HTML_CACHE_MAX = 24
+
+
+def _cell_text(val) -> str:
+    """单元格取值转文本：None→空串；整数值的浮点去掉多余的 .0（xlrd 会把数字读成 float）。"""
+    if val is None:
+        return ""
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    return str(val)
+
+
+def _rows_to_table(rows) -> str:
+    """把二维行/列数据渲染成 HTML 表格；首行作表头，最多 OFFICE_MAX_ROWS 行。"""
+    out, truncated = [], False
+    for i, row in enumerate(rows):
+        if i >= OFFICE_MAX_ROWS:
+            truncated = True
+            break
+        cells = []
+        for val in row:
+            tag = "th" if i == 0 else "td"
+            cells.append("<" + tag + ">" + html_escape(_cell_text(val)) + "</" + tag + ">")
+        out.append("<tr>" + "".join(cells) + "</tr>")
+    table = "<table>" + "".join(out) + "</table>"
+    if truncated:
+        table += '<p class="muted">（内容过多，仅显示前 %d 行）</p>' % OFFICE_MAX_ROWS
+    return table
+
+
+def office_to_html(file_path: str) -> str:
+    """用纯 Python 库把受支持的 Office 文件转成 HTML 片段；不支持/失败返回空串。"""
+    ext = file_ext(file_path)
+    try:
+        if ext == "docx":
+            import mammoth
+            with open(file_path, "rb") as f:
+                return mammoth.convert_to_html(f).value
+        if ext in ("xlsx", "xlsm"):
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+            try:
+                parts = []
+                for ws in wb.worksheets:
+                    parts.append("<h3>" + html_escape(ws.title) + "</h3>")
+                    parts.append(_rows_to_table(ws.iter_rows(values_only=True)))
+                return "".join(parts)
+            finally:
+                wb.close()
+        if ext == "xls":
+            import xlrd
+            bk = xlrd.open_workbook(file_path)
+            parts = []
+            for sh in bk.sheets():
+                parts.append("<h3>" + html_escape(sh.name) + "</h3>")
+                parts.append(_rows_to_table(
+                    [sh.cell_value(r, c) for c in range(sh.ncols)] for r in range(sh.nrows)))
+            return "".join(parts)
+        if ext == "pptx":
+            from pptx import Presentation
+            parts = []
+            for i, slide in enumerate(Presentation(file_path).slides, 1):
+                parts.append("<h3>第 %d 页</h3>" % i)
+                buf = []
+                for shape in slide.shapes:
+                    if getattr(shape, "has_text_frame", False):
+                        txt = (shape.text_frame.text or "").strip()
+                        if txt:
+                            buf.append("<p>" + "<br>".join(html_escape(txt).split("\n")) + "</p>")
+                parts.append("".join(buf) or '<p class="muted">（本页无文本）</p>')
+            return "".join(parts)
+    except Exception as e:
+        log_line(f"office 预览转换失败: {file_path} {e}")
+        return ""
+    return ""
+
+
+def office_html_cached(file_path: str) -> str:
+    """按 mtime+size 失效的内存缓存；失败结果（空串）也缓存，避免反复触发转换。"""
+    try:
+        st = os.stat(file_path)
+    except OSError:
+        return ""
+    key = (file_path, st.st_mtime_ns, st.st_size)
+    with _OFFICE_HTML_CACHE_LOCK:
+        if key in _OFFICE_HTML_CACHE:
+            return _OFFICE_HTML_CACHE[key]
+    result = office_to_html(file_path)
+    with _OFFICE_HTML_CACHE_LOCK:
+        if len(_OFFICE_HTML_CACHE) >= _OFFICE_HTML_CACHE_MAX:
+            _OFFICE_HTML_CACHE.clear()
+        _OFFICE_HTML_CACHE[key] = result
+    return result
+
+
+_OFFICE_DOC_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+    body { margin: 0; padding: 20px 26px 48px; background: #fff; color: #222; line-height: 1.65;
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+           font-size: 15px; word-wrap: break-word; }
+    h1, h2, h3 { margin: 1.1em 0 .5em; }
+    h3 { font-size: 16px; color: #1f4fa3; border-bottom: 1px solid #e6e6e6; padding-bottom: 4px; }
+    p { margin: .6em 0; }
+    img { max-width: 100%; height: auto; }
+    table { border-collapse: collapse; width: 100%; margin: .6em 0; font-size: 13.5px; }
+    th, td { border: 1px solid #d9d9d9; padding: 6px 10px; text-align: left; vertical-align: top; }
+    th { background: #f2f5fa; }
+    tr:nth-child(even) td { background: #fafbfd; }
+    .muted { color: #999; font-size: 13px; }
+</style>
+</head>
+<body>
+{{BODY}}
+</body>
+</html>
+"""
+
+
 _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2357,7 +2490,7 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def render_preview_page(filename: str, size: int, kind: str) -> str:
+def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = False) -> str:
     name = os.path.basename(filename) or filename
     ext = file_ext(filename)
     inline_url = "/obs/" + quote(filename, safe="/")
@@ -2365,7 +2498,10 @@ def render_preview_page(filename: str, size: int, kind: str) -> str:
     kind_token = "none"
     delim = ","
 
-    if kind == "image":
+    if kind == "office" and office_ok:
+        content_url = "/preview-content/" + quote(filename, safe="/")
+        body = '<iframe class="frame" src="' + content_url + '" title="Office 预览"></iframe>'
+    elif kind == "image":
         body = '<img src="' + inline_url + '" alt="' + html_escape(name) + '">'
     elif kind == "audio":
         body = '<audio controls autoplay src="' + inline_url + '"></audio>'
@@ -2384,7 +2520,7 @@ def render_preview_page(filename: str, size: int, kind: str) -> str:
         body = '<div class="text-wrap"><pre class="text" id="previewText">加载中…</pre></div>'
     else:
         icon = "📄" if kind == "office" else "📦"
-        desc = ("此格式无法在线预览，请点击右上角「下载」按钮下载后查看。"
+        desc = ("此格式暂不支持在线预览（支持 docx/xlsx/xls/pptx），请点击右上角「下载」按钮下载后查看。"
                 if kind == "office" else "该文件类型暂不支持在线预览，请下载后查看。")
         body = ('<div class="fallback"><div class="icon">' + icon + '</div>'
                 '<h2>' + html_escape(name) + '</h2>'
@@ -2416,7 +2552,31 @@ async def preview_file(filename: str, request: Request):
         size = os.path.getsize(file_path)
     except OSError:
         size = 0
-    return HTMLResponse(content=render_preview_page(filename, size, preview_kind(filename)))
+    kind = preview_kind(filename)
+    office_ok = False
+    if (kind == "office" and file_ext(filename) in OFFICE_CONVERTIBLE_EXTS
+            and size <= OFFICE_MAX_BYTES):
+        # 先转换一次（结果进内存缓存）：成功则内嵌 iframe，失败则退化为下载占位页
+        office_ok = bool(await asyncio.to_thread(office_html_cached, file_path))
+    return HTMLResponse(content=render_preview_page(filename, size, kind, office_ok))
+
+
+@app.get("/preview-content/{filename:path}")
+async def preview_content(filename: str, request: Request):
+    """把 Office 文档转成的 HTML 片段包成独立文档，供预览页 iframe 内嵌（纯 Python 库，无需 Office 套件）。"""
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    filename = unquote(filename)
+    file_path = safe_upload_path(upload_dir, filename)
+    if (not file_path or not os.path.isfile(file_path)
+            or file_ext(filename) not in OFFICE_CONVERTIBLE_EXTS):
+        raise HTTPException(status_code=404, detail="该文件不支持内容预览")
+    body = await asyncio.to_thread(office_html_cached, file_path)
+    if not body:
+        raise HTTPException(status_code=415, detail="该文件无法转换预览")
+    page = (_OFFICE_DOC_TEMPLATE
+            .replace("{{TITLE}}", html_escape(os.path.basename(filename)))
+            .replace("{{BODY}}", body))
+    return HTMLResponse(content=page)
 
 
 # ============================================================================

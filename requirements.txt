@@ -6,3 +6,8 @@ fastapi
 uvicorn[standard]
 python-multipart
 aiofiles
+# Office 在线预览（纯 Python 转 HTML，不依赖 LibreOffice/Office 套件）
+mammoth
+openpyxl
+xlrd
+python-pptx

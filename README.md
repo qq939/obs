@@ -10,7 +10,7 @@
 - **启动脚本**：`user_start.sh`（由 `start.sh` 在容器启动时调用）
 - **启动日志**：`logs/start.log`；问答日志：`logs/agent_tui.log`；应用日志：`logs/server.log`
 - **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`http://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
-- **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮（见 §3.2）
+- **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件（见 §3.2）
 
 ---
 
@@ -94,6 +94,7 @@ project/
 | POST | `/upload/complete/{upload_id}` | 合并分片完成上传 |
 | GET | `/obs/{filename:path}` | 直接访问 obs 目录文件（内联展示；预览页内嵌用） |
 | GET | `/preview/{filename:path}` | **文件预览页**（图片/PDF/HTML/音视频/文本/CSV/Office…），右上角固定「⬇ 下载」按钮（见 §3.2） |
+| GET | `/preview-content/{filename:path}` | Office（docx/xlsx/xls/pptx）转换后的 **HTML**（`text/html`），供预览页 iframe 内嵌 |
 | GET | `/videos` | 视频列表（含时长） |
 | GET | `/video` `/video/style.css` `/video/app.js` `/video/vendor/hls.min.js` | 视频流页面与静态资源 |
 | POST | `/hls/generate-all` | 批量生成 HLS（后台串行，可 `?dry_run=true`） |
@@ -134,20 +135,26 @@ project/
 | PDF | `pdf` | `<iframe>` 内嵌 |
 | HTML | `html htm` | `<iframe sandbox="allow-scripts allow-popups">`（无 `allow-same-origin`，隔离同源） |
 | 文本/表格 | `txt csv tsv json md log xml yml yaml ini py js ts css sh sql …` | 前端 `fetch` 后渲染：CSV/TSV → 表格（支持引号与转义），其余 → `<pre>` 等宽 |
-| Office/其他 | `doc docx xls xlsx ppt pptx odt ods odp rtf` 及所有其它后缀 | 占位卡片 + 大号下载按钮（提示「无法在线预览，请下载」） |
+| Office（可转换） | `docx xlsx xlsm xls pptx` | **服务端用纯 Python 库转成 HTML**，预览页 `<iframe src="/preview-content/...">` 内嵌：`docx`→mammoth，`xlsx/xlsm`→openpyxl，`xls`→xlrd，`pptx`→python-pptx |
+| Office（其余）/其他 | `doc ppt odt ods odp rtf` 及所有其它后缀 | 占位卡片 + 大号下载按钮（提示「暂不支持在线预览，请下载」） |
 
 实现要点（`src/obs/server.py`）：
 
 - 扩展名集合 `PREVIEW_*_EXTS` 与 `PREVIEW_EXTS`；`is_previewable()` / `preview_kind()` 判定类型。
 - 页面内容统一走 **内联地址 `/obs/{filename}`**（同源相对路径，不涉及主机回退）；**下载按钮 href 指向 `/{filename}`**（服务端强制 `attachment`）。
 - **路径穿越防护**：`safe_upload_path()` 用 `os.path.realpath` 校验目标必须落在 `obs/` 内，越界（`../`）返回 404。
-- 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**。
+- 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**；`/preview-content/{filename:path}` 紧随其后。
+- **Office → HTML（不依赖 LibreOffice / Office 套件）**：`office_to_html()` 按后缀分发到纯 Python 解析器，产出 HTML 片段（表格首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行、整数浮点去掉 `.0`）；`office_html_cached()` 按 `mtime+size` 做内存缓存（失败结果也缓存，避免反复触发），转换经 `asyncio.to_thread` 下放线程池。仅 `OFFICE_CONVERTIBLE_EXTS` 且 ≤ `OFFICE_MAX_BYTES=25MB` 才转换，否则退化为占位卡片。**思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe 渲染，PDF 走浏览器原生查看器）**。
 
 ```bash
 # 预览页（返回 HTML，右上角带下载按钮）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/preview/report.csv   # 200
 # 页面内下载按钮目标（attachment）
 curl -sI http://127.0.0.1:8082/report.csv | grep -i content-disposition            # attachment; filename*=UTF-8''report.csv
+# Office 预览：转换后的 HTML 片段页（iframe 内嵌用）
+curl -s http://127.0.0.1:8082/preview-content/report.xlsx | head                 # text/html，含 <table>…
+# 依赖（纯 Python，无需 Office 套件）
+pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 ```
 
 ### 调用示例
@@ -194,6 +201,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-01 16:50 | R10 | **rebase + 上传失败排查**：rebase 至 `38ebafa`（未 push）；定位 `/video` 上传器协议不符（camelCase/缺 `X-Chunk-SHA256`/无 complete body/`currentAbort` 空值/2MB≠10MB），重写修复（`614e537`）；首页分片循环补网络异常重试（`0196f0f`） |
 | 2026-10-02 07:35 | R11 | **下载点击无反应排查**：`downloadWithFallback` 先 `preventDefault` 再异步 `a.click()`，丢了用户手势被弹窗拦截；改为加载期改写 `a[data-name]` href（`applyDownloadHosts`，`adc4192`） |
 | 2026-10-13 02:11 | R12 | **文件预览页 + 推送分支 `ocs`**：可预览后缀点击先进 `/preview/...`（右上角醒目下载按钮），图片/音视频/PDF/HTML/文本(CSV 表格)/Office 占位；`git push` 到新分支 `ocs` |
+| 2026-10-13 05:06 | R13 | **Office 在线预览（纯 Python 方案）**：先按要求**回退**掉 LibreOffice 转 PDF 方案（卸载 LibreOffice），改为参考 `qq939/interview-jobfinder` 的思路——服务端用纯 Python 库把 `docx/xlsx/xls/pptx` 转成 HTML（mammoth/openpyxl/xlrd/python-pptx），预览页 iframe 内嵌 `/preview-content/...` |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -208,17 +216,17 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R10 / R11 / R12）：**
+**最后 3 轮对话总结（R11 / R12 / R13）：**
 
-- **R10（rebase + 上传失败排查，2026-10-01）**：rebase 到上游 `38ebafa`（未 push）。用户问「为啥频繁上传失败、有日志吗」——
-  结论：**有日志**（`logs/start.log` 是 uvicorn access log，`logs/server.log` 是业务事件），但**客户端/网络侧失败根本到不了服务器**，故 access log 看不到；
-  真正原因是 `/video` 上传器 `app.js:uploadOneFile` 与服务端协议**完全对不上**（camelCase 参数→400、缺 `X-Chunk-SHA256`→422、complete 无 body→400、`currentAbort` 为 `null` 却取 `.signal`→TypeError、分片 2MB 与服务端 10MB 不一致）。
-  修复：重写上传器（snake_case + 逐片哈希 + 纯 JS SHA-256 + 合并带 body + 重试 + 空值保护，`614e537`）；首页分片循环补 `try/catch` 网络异常重试（`0196f0f`）。
 - **R11（下载点击无反应排查，2026-10-02）**：链接正确但点击无反应、必须复制粘贴到地址栏。根因：`downloadWithFallback()` 先 `ev.preventDefault()`
   再异步 HEAD 探测，最后在 `.then()` 里 `a.click()`——**程序化点击发生在用户手势之外被浏览器当弹窗拦截**；粘贴到地址栏属直接导航故能下。
   修复（`adc4192`）：不再在点击里做任何事，改为页面加载后用 `obsBase()` 结果**一次性改写**所有 `a[data-name]` 的 `href`（`applyDownloadHosts()`），点击走**原生跳转**即直接下载。
 - **R12（文件预览页 + 推送 `ocs` 分支，2026-10-13）**：要求点击 `csv/xls/xlsx/doc/docx/pdf/html/jpeg/png/mp3` 等后缀先进入**预览页**，右上角有醒目下载按钮；并把成果 `git push` 到新分支 `ocs`。
   落地：新增 `/preview/{filename:path}` + 各类型渲染（图片/音视频/PDF/HTML/文本/CSV 表格/Office 占位）、`safe_upload_path()` 路径穿越防护、首页可预览项改链 `/preview/...`（`data-preview` 属性，避免被下载回退逻辑改写）。
+- **R13（Office 在线预览改为纯 Python 方案，2026-10-13）**：先按上一轮把 `doc/xls/docx/xlsx/pptx` 等 Office 预览做成了 **LibreOffice 转 PDF 内嵌**（`d327ec7`，附测试 53 项全过）。
+  用户随后要求「**回退，不要用 office 套件**，参考 `qq939/interview-jobfinder` 的预览实现」。遂 `git revert d327ec7`（`58e6fe1`）并**卸载 LibreOffice + fonts-noto-cjk**，
+  改依参考仓库思路：**服务端把文档转成 HTML 片段、前端 iframe 内嵌渲染**——`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，产出 HTML 经 `/preview-content/{filename:path}`（`text/html`）供预览页 `<iframe>` 加载；
+  `mtime+size` 内存缓存 + `asyncio.to_thread` 下放线程；仅 `docx/xlsx/xlsm/xls/pptx` 且 ≤25MB 才转换，其余（含 `doc/ppt/odt/ods/odp/rtf`）退化为下载占位。自测：Office 15 项 + 通用预览 52 项全过。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，
@@ -249,6 +257,8 @@ R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.
 | 健康检查失败 | 依赖缺失或语法错误 | `python3 -m py_compile src/obs/server.py`；确认已装 fastapi/uvicorn |
 | `ModuleNotFoundError: No module named 'fastapi'` | 容器内 Python 依赖缺失（PEP 668 externally-managed） | `pip3 install --break-system-packages fastapi "uvicorn[standard]" aiofiles python-dotenv python-multipart`（见 §1） |
 | 预览页 404 / 下载按钮无反应 | 文件不在 `obs/`、或下载链接指向了跨域主机 | 预览页内联内容用同源 `/obs/...`、下载按钮用同源 `/{filename}`（不涉及主机回退）；越界路径由 `safe_upload_path()` 拦为 404 |
+| Office 预览显示「暂不支持在线预览」占位 | 后缀不在可转换集（仅 `docx xlsx xlsm xls pptx`），或文件 > 25MB，或转换库抛错 | 属预期降级；确认后缀/体积。注意 `doc/ppt/odt/ods/odp/rtf` **无纯 Python 解析器**，一律退化为下载占位（不再依赖 LibreOffice） |
+| Office 预览报错 / `/preview-content` 404·415 | 缺少转换库，或转换结果为空 | 装依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`；`415` 表示该文件解析不出内容（如损坏文档） |
 | 无法运行 `test_*.py` | 容器未安装 pytest（且无外网） | 有网环境 `pip install -r requirements.txt` 后 `pytest -q` |
 
 ---
