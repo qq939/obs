@@ -26,7 +26,8 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `http://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
-| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/Office 占位；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
+| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/Office；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
+| Office 预览 | `doc/docx/xls/xlsx/ppt/pptx/odt/ods/odp/rtf` 由 **LibreOffice headless** 转 PDF 内嵌（`/preview-pdf/{filename:path}`，`application/pdf` inline）；缓存 `obs/.preview_cache/`（按 `mtime+size` 失效，失败写 `FAIL:` 标记）；`_office_convert_lock` 串行 + `asyncio.to_thread`。依赖：`sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-core fonts-noto-cjk`（缺 `soffice` 时退化为占位卡片） |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
 | 启动脚本 | `user_start.sh`（被 `start.sh` 调用） |
 | 启动日志 | `logs/start.log`；运行日志 `logs/server.log`；问答日志 `logs/agent_tui.log` |
@@ -72,6 +73,7 @@ POST /                                    表单上传
 PUT  /{filename}                          简单上传（流式）
 GET  /obs/{filename}                      访问/播放 obs 下文件（内联；预览页内嵌用）
 GET  /preview/{filename:path}             文件预览页（图片/PDF/HTML/音视频/文本(CSV)/Office），右上角下载按钮
+GET  /preview-pdf/{filename:path}         Office 转换后的 PDF（application/pdf, inline；预览页 iframe 用）
 GET  /{filename}                          下载（Range 206；Content-Disposition: attachment）
 DELETE /{filename}                        删除
 GET/POST /notice, POST /save_notice       公告板读写/存文件
@@ -105,7 +107,8 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 1. 改 `src/obs/server.py` / `src/obs/video_static/*` → `python3 -m py_compile src/obs/server.py`。
 2. `kill "$(pgrep -f '[s]rc/obs/server.py')"; ./user_start.sh`，看 `logs/start.log` 是否就绪。
 3. 功能自测：`/health` → `/`（文件页）→ `/video` → `/videos` → `PUT /x` → `GET /obs/x` → `DELETE /x`；
-   预览：`GET /preview/<可预览文件>` 返回 200 且含 `class="btn-download"`，`GET /preview/..%2F..%2Fetc%2Fpasswd` 返回 404。
+   预览：`GET /preview/<可预览文件>` 返回 200 且含 `class="btn-download"`，`GET /preview/..%2F..%2Fetc%2Fpasswd` 返回 404；
+   Office：`GET /preview-pdf/<office 文件>` 返回 `200 application/pdf`（PDF 以 `%PDF-` 开头），缓存落在 `obs/.preview_cache/`。
 4. 跑回归：`python3 -m pytest test_server.py test_resumable.py src/obs/test_*.py -q`（需 ffmpeg 的用例可能跳过）。
 5. 更新 `README.md` / `SKILL.md`；`git add -A && git commit`，记录 `logs/commit.txt`。
 
@@ -124,6 +127,10 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 - **文件预览**：可预览后缀集合 `PREVIEW_*_EXTS`（`src/obs/server.py`），`is_previewable()`/`preview_kind()` 分类；
   预览页内联内容用**同源** `/obs/{filename}`，下载按钮用**同源** `/{filename}`（不涉及主机回退）；
   新增路由 `/preview/{filename:path}` 必须放在泛匹配 `/{filename}` **之前**；对外文件名一律经 `safe_upload_path()` 校验在 `obs/` 内。
+- **Office 预览（转 PDF）**：`office_pdf_path(upload_dir, filename)` 调 `soffice --headless --convert-to pdf`
+  （`subprocess.run(timeout=180)`、独立 `-env:UserInstallation` profile、`HOME` 指临时目录），结果缓存 `obs/.preview_cache/<sha1(name)[:20]>.pdf`，
+  同目录 `.meta` 记 `mtime_ns:size` 做失效；失败写 `FAIL:<stamp>` 避免反复重试。转换是阻塞调用，须经 `asyncio.to_thread` 下放线程池，并用 `_office_convert_lock` 串行化。
+  预览页 Office 分支内嵌 `<iframe src="/preview-pdf/{filename}">`；`_find_soffice()` 找不到 `soffice` 即退化为占位卡片（不报错）。**依赖**：见上「Office 预览」行的 apt 安装命令（含 `fonts-noto-cjk` 否则中文变方块）。
 - **ffmpeg**：`bin/ffmpeg`、`bin/ffprobe` 由 `scripts/install_ffmpeg.sh` 获取；`user_start.sh` 自动加入 PATH。
 - **端口**：默认 8082（`PORT` 环境变量可覆盖）。
 - **Hub 注册**：按 `systemreadme.md` §三 POST 到 `http://host.docker.internal:19081/api/tools`，
@@ -139,6 +146,9 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | 下载走错地址 | 跨网访问时直连 `http://localhost:19082` 不可达 | 页面 `applyDownloadHosts()` 加载时已把 href 改写为可达主机（不可达回退 `http://ocs.dimond.top`），无需手工改链接 |
 | 点击下载「没反应」 | 在点击回调里 `preventDefault` 后异步探测再 `a.click()`，丢失用户手势被弹窗拦截 | 不要这么做；改为页面加载期改写 href（`applyDownloadHosts()`），点击走原生跳转 |
 | 预览页 404 | 文件不在 `obs/`，或名含 `../` 被 `safe_upload_path()` 拦截 | 确认文件已上传到 `obs/`；跨目录名会被判越界（这是有意的防护） |
+| Office 预览显示「无法在线转换预览」占位 | 未装 `soffice`（LibreOffice），或该版本转换失败（已写 `FAIL:` 标记） | 装 LibreOffice（见「Office 预览」行 apt 命令）；删 `obs/.preview_cache/` 下对应 `*.meta` 可重试；`logs/server.log` 有失败明细 |
+| Office 预览中文变方块 | 缺 CJK 字体 | 装 `fonts-noto-cjk`，清 `obs/.preview_cache/` 后重转 |
+| 首页出现 `.preview_cache` 噪音 | —— | 已用点开头目录，首页过滤 `not f.startswith('.')`，不会显示 |
 | `ModuleNotFoundError: No module named 'fastapi'` | 容器内缺少 Python 依赖 | `pip3 install --break-system-packages fastapi "uvicorn[standard]" aiofiles python-dotenv python-multipart` |
 | 8082 不通 | 进程退出/端口占用 | 看 `logs/start.log`；`kill "$(pgrep -f '[s]rc/obs/server.py')"` 后 `./user_start.sh` |
 | `/video` 404 | 缺 `src/obs/video_static/` | 补齐 `index.html/app.js/style.css/vendor/hls.min.js` |

@@ -10,7 +10,7 @@
 - **启动脚本**：`user_start.sh`（由 `start.sh` 在容器启动时调用）
 - **启动日志**：`logs/start.log`；问答日志：`logs/agent_tui.log`；应用日志：`logs/server.log`
 - **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`http://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
-- **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮（见 §3.2）
+- **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（doc/docx/xls/xlsx/ppt/pptx/odt…）服务端转 PDF 内嵌预览**（见 §3.2）
 
 ---
 
@@ -94,6 +94,7 @@ project/
 | POST | `/upload/complete/{upload_id}` | 合并分片完成上传 |
 | GET | `/obs/{filename:path}` | 直接访问 obs 目录文件（内联展示；预览页内嵌用） |
 | GET | `/preview/{filename:path}` | **文件预览页**（图片/PDF/HTML/音视频/文本/CSV/Office…），右上角固定「⬇ 下载」按钮（见 §3.2） |
+| GET | `/preview-pdf/{filename:path}` | Office 文件转换后的 **PDF**（`application/pdf`，`inline`），供预览页内嵌 iframe |
 | GET | `/videos` | 视频列表（含时长） |
 | GET | `/video` `/video/style.css` `/video/app.js` `/video/vendor/hls.min.js` | 视频流页面与静态资源 |
 | POST | `/hls/generate-all` | 批量生成 HLS（后台串行，可 `?dry_run=true`） |
@@ -134,20 +135,26 @@ project/
 | PDF | `pdf` | `<iframe>` 内嵌 |
 | HTML | `html htm` | `<iframe sandbox="allow-scripts allow-popups">`（无 `allow-same-origin`，隔离同源） |
 | 文本/表格 | `txt csv tsv json md log xml yml yaml ini py js ts css sh sql …` | 前端 `fetch` 后渲染：CSV/TSV → 表格（支持引号与转义），其余 → `<pre>` 等宽 |
-| Office/其他 | `doc docx xls xlsx ppt pptx odt ods odp rtf` 及所有其它后缀 | 占位卡片 + 大号下载按钮（提示「无法在线预览，请下载」） |
+| Office | `doc docx xls xlsx ppt pptx odt ods odp rtf` | 服务端用 **LibreOffice headless** 转 PDF（`.preview_cache/` 缓存），预览页内嵌 `<iframe src="/preview-pdf/...">`；未装 `soffice` 或转换失败时退化为占位卡片 + 大号下载按钮 |
+| 其他 | 所有其它后缀（如 `zip bin`） | 占位卡片 + 大号下载按钮（提示「无法在线预览，请下载」） |
 
 实现要点（`src/obs/server.py`）：
 
 - 扩展名集合 `PREVIEW_*_EXTS` 与 `PREVIEW_EXTS`；`is_previewable()` / `preview_kind()` 判定类型。
 - 页面内容统一走 **内联地址 `/obs/{filename}`**（同源相对路径，不涉及主机回退）；**下载按钮 href 指向 `/{filename}`**（服务端强制 `attachment`）。
 - **路径穿越防护**：`safe_upload_path()` 用 `os.path.realpath` 校验目标必须落在 `obs/` 内，越界（`../`）返回 404。
-- 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**。
+- 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**；`/preview-pdf/{filename:path}` 紧随其后。
+- **Office → PDF**：`office_pdf_path()` 调 `soffice --headless --convert-to pdf`（`subprocess.run`，`timeout=180`，独立 `UserInstallation` profile，`HOME` 指向临时目录），结果按 `sha1(filename)[:20].pdf` 缓存到 **`obs/.preview_cache/`**（点开头，首页列表自动隐藏），并用 `.meta` 记录 `mtime_ns:size` 做失效判断；失败写 `FAIL:` 标记避免对坏文件反复重试。并发用 `_office_convert_lock` 串行化，阻塞调用经 `asyncio.to_thread` 下放线程池，避免卡住事件循环。**依赖**：系统需装 `libreoffice`（含 `soffice`）+ 中文字体，否则自动退化为占位卡片。
 
 ```bash
 # 预览页（返回 HTML，右上角带下载按钮）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/preview/report.csv   # 200
 # 页面内下载按钮目标（attachment）
 curl -sI http://127.0.0.1:8082/report.csv | grep -i content-disposition            # attachment; filename*=UTF-8''report.csv
+# Office 预览：转换后的 PDF（inline）
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://127.0.0.1:8082/preview-pdf/report.docx  # 200 application/pdf
+# 依赖安装（Debian/Ubuntu，headless + 中文字体）
+sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-core fonts-liberation fonts-dejavu-core fonts-noto-cjk
 ```
 
 ### 调用示例
@@ -194,6 +201,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-01 16:50 | R10 | **rebase + 上传失败排查**：rebase 至 `38ebafa`（未 push）；定位 `/video` 上传器协议不符（camelCase/缺 `X-Chunk-SHA256`/无 complete body/`currentAbort` 空值/2MB≠10MB），重写修复（`614e537`）；首页分片循环补网络异常重试（`0196f0f`） |
 | 2026-10-02 07:35 | R11 | **下载点击无反应排查**：`downloadWithFallback` 先 `preventDefault` 再异步 `a.click()`，丢了用户手势被弹窗拦截；改为加载期改写 `a[data-name]` href（`applyDownloadHosts`，`adc4192`） |
 | 2026-10-13 02:11 | R12 | **文件预览页 + 推送分支 `ocs`**：可预览后缀点击先进 `/preview/...`（右上角醒目下载按钮），图片/音视频/PDF/HTML/文本(CSV 表格)/Office 占位；`git push` 到新分支 `ocs` |
+| 2026-10-13 03:03 | R13 | **Office 文档在线预览**：装 LibreOffice headless + 中文字体；`doc/docx/xls/xlsx/ppt/pptx/odt/ods/rtf` 服务端转 PDF 缓存（`obs/.preview_cache/`）后内嵌 iframe 预览，新增 `/preview-pdf/...`；未装 soffice/转换失败自动退化为占位卡片 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -208,17 +216,17 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R10 / R11 / R12）：**
+**最后 3 轮对话总结（R11 / R12 / R13）：**
 
-- **R10（rebase + 上传失败排查，2026-10-01）**：rebase 到上游 `38ebafa`（未 push）。用户问「为啥频繁上传失败、有日志吗」——
-  结论：**有日志**（`logs/start.log` 是 uvicorn access log，`logs/server.log` 是业务事件），但**客户端/网络侧失败根本到不了服务器**，故 access log 看不到；
-  真正原因是 `/video` 上传器 `app.js:uploadOneFile` 与服务端协议**完全对不上**（camelCase 参数→400、缺 `X-Chunk-SHA256`→422、complete 无 body→400、`currentAbort` 为 `null` 却取 `.signal`→TypeError、分片 2MB 与服务端 10MB 不一致）。
-  修复：重写上传器（snake_case + 逐片哈希 + 纯 JS SHA-256 + 合并带 body + 重试 + 空值保护，`614e537`）；首页分片循环补 `try/catch` 网络异常重试（`0196f0f`）。
 - **R11（下载点击无反应排查，2026-10-02）**：链接正确但点击无反应、必须复制粘贴到地址栏。根因：`downloadWithFallback()` 先 `ev.preventDefault()`
   再异步 HEAD 探测，最后在 `.then()` 里 `a.click()`——**程序化点击发生在用户手势之外被浏览器当弹窗拦截**；粘贴到地址栏属直接导航故能下。
   修复（`adc4192`）：不再在点击里做任何事，改为页面加载后用 `obsBase()` 结果**一次性改写**所有 `a[data-name]` 的 `href`（`applyDownloadHosts()`），点击走**原生跳转**即直接下载。
 - **R12（文件预览页 + 推送 `ocs` 分支，2026-10-13）**：要求点击 `csv/xls/xlsx/doc/docx/pdf/html/jpeg/png/mp3` 等后缀先进入**预览页**，右上角有醒目下载按钮；并把成果 `git push` 到新分支 `ocs`。
   落地：新增 `/preview/{filename:path}` + 各类型渲染（图片/音视频/PDF/HTML/文本/CSV 表格/Office 占位）、`safe_upload_path()` 路径穿越防护、首页可预览项改链 `/preview/...`（`data-preview` 属性，避免被下载回退逻辑改写）。
+- **R13（Office 文档在线预览，2026-10-13）**：要求「支持 doc xls 等 office 文档预览」。落地：容器内装 **LibreOffice headless（7.4.7.2）+ Noto CJK 字体**；
+  新增 `office_pdf_path()`（`soffice --convert-to pdf`，`timeout=180`，独立 profile）+ `_office_convert_lock` 串行化 + `.preview_cache/`（按 `mtime+size` 失效、失败写 `FAIL:` 标记）；
+  新增 `/preview-pdf/{filename:path}`（`application/pdf`，`inline`）；预览页 Office 分支内嵌 iframe，未装 `soffice`/失败退化为占位卡片。
+  自测：`doc/docx/odt/rtf/xls/xlsx/ods/ppt/pptx` 全部转换成功（PDF 以 `%PDF-` 开头），预览页 53 项断言全绿；缓存命中 ~9ms。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，
@@ -249,6 +257,9 @@ R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.
 | 健康检查失败 | 依赖缺失或语法错误 | `python3 -m py_compile src/obs/server.py`；确认已装 fastapi/uvicorn |
 | `ModuleNotFoundError: No module named 'fastapi'` | 容器内 Python 依赖缺失（PEP 668 externally-managed） | `pip3 install --break-system-packages fastapi "uvicorn[standard]" aiofiles python-dotenv python-multipart`（见 §1） |
 | 预览页 404 / 下载按钮无反应 | 文件不在 `obs/`、或下载链接指向了跨域主机 | 预览页内联内容用同源 `/obs/...`、下载按钮用同源 `/{filename}`（不涉及主机回退）；越界路径由 `safe_upload_path()` 拦为 404 |
+| Office 预览显示「无法在线转换预览」占位 | 系统未装 `soffice`（LibreOffice）或转换失败（该版本已写 `FAIL:` 标记） | 安装 LibreOffice（见 §3.2 命令）；删除 `obs/.preview_cache/` 下对应 `*.meta` 后可重试；`logs/server.log` 有 `office 预览转换失败` 明细 |
+| Office 预览中文显示为方块/乱码 | 缺少 CJK 字体 | 安装 `fonts-noto-cjk`（见 §3.2 命令），删除 `obs/.preview_cache/` 后重转 |
+| Office 首次预览较慢 | 首次需 headless 转换 | 结果缓存于 `obs/.preview_cache/`，同文件再次访问 ~10ms；源文件改动（`mtime`/`size` 变化）会自动重转 |
 | 无法运行 `test_*.py` | 容器未安装 pytest（且无外网） | 有网环境 `pip install -r requirements.txt` 后 `pytest -q` |
 
 ---
