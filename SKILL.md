@@ -127,7 +127,8 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 - **文件预览**：可预览后缀集合 `PREVIEW_*_EXTS`（`src/obs/server.py`），`is_previewable()`/`preview_kind()` 分类；
   预览页内联内容用**同源** `/obs/{filename}`，下载按钮用**同源** `/{filename}`（不涉及主机回退）；
   新增路由 `/preview/{filename:path}` 必须放在泛匹配 `/{filename}` **之前**；对外文件名一律经 `safe_upload_path()` 校验在 `obs/` 内。
-- **Office → HTML（纯 Python，勿引入 Office 套件）**：`office_to_html()` 按后缀分发到解析器产出 HTML 片段（表首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行、整数浮点去 `.0`），
+- **Office → HTML（纯 Python，勿引入 Office 套件）**：`office_to_html()` 按后缀分发到解析器产出 HTML 片段（表首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行/表、整数浮点去 `.0`）；
+  **Excel（`xlsx/xlsm/xls`）逐 sheet 渲染**：`_sheet_sections()` 给每张表生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条（单表不加），保证每个 sheet 页都能单独查看；
   `office_html_cached()` 按 `mtime+size` 内存缓存（失败也缓存），转换经 `asyncio.to_thread` 下放；仅 `OFFICE_CONVERTIBLE_EXTS`（`docx xlsx xlsm xls pptx`）且 ≤`OFFICE_MAX_BYTES=25MB` 才转换。
   `GET /preview-content/{filename:path}` 把片段包成独立 HTML 文档（`text/html`）供 `<iframe>` 内嵌；无解析器的 `doc/ppt/odt/ods/odp/rtf` 一律退化为下载占位。
   依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`（**不要**再装 LibreOffice）。思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe）。

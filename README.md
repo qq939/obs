@@ -135,7 +135,7 @@ project/
 | PDF | `pdf` | `<iframe>` 内嵌 |
 | HTML | `html htm` | `<iframe sandbox="allow-scripts allow-popups">`（无 `allow-same-origin`，隔离同源） |
 | 文本/表格 | `txt csv tsv json md log xml yml yaml ini py js ts css sh sql …` | 前端 `fetch` 后渲染：CSV/TSV → 表格（支持引号与转义），其余 → `<pre>` 等宽 |
-| Office（可转换） | `docx xlsx xlsm xls pptx` | **服务端用纯 Python 库转成 HTML**，预览页 `<iframe src="/preview-content/...">` 内嵌：`docx`→mammoth，`xlsx/xlsm`→openpyxl，`xls`→xlrd，`pptx`→python-pptx |
+| Office（可转换） | `docx xlsx xlsm xls pptx` | **服务端用纯 Python 库转成 HTML**，预览页 `<iframe src="/preview-content/...">` 内嵌：`docx`→mammoth，`xlsx/xlsm`→openpyxl，`xls`→xlrd，`pptx`→python-pptx；**Excel 逐 sheet 渲染**（多表带顶部 `sheet-nav` 切换条） |
 | Office（其余）/其他 | `doc ppt odt ods odp rtf` 及所有其它后缀 | 占位卡片 + 大号下载按钮（提示「暂不支持在线预览，请下载」） |
 
 实现要点（`src/obs/server.py`）：
@@ -144,7 +144,7 @@ project/
 - 页面内容统一走 **内联地址 `/obs/{filename}`**（同源相对路径，不涉及主机回退）；**下载按钮 href 指向 `/{filename}`**（服务端强制 `attachment`）。
 - **路径穿越防护**：`safe_upload_path()` 用 `os.path.realpath` 校验目标必须落在 `obs/` 内，越界（`../`）返回 404。
 - 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**；`/preview-content/{filename:path}` 紧随其后。
-- **Office → HTML（不依赖 LibreOffice / Office 套件）**：`office_to_html()` 按后缀分发到纯 Python 解析器，产出 HTML 片段（表格首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行、整数浮点去掉 `.0`）；`office_html_cached()` 按 `mtime+size` 做内存缓存（失败结果也缓存，避免反复触发），转换经 `asyncio.to_thread` 下放线程池。仅 `OFFICE_CONVERTIBLE_EXTS` 且 ≤ `OFFICE_MAX_BYTES=25MB` 才转换，否则退化为占位卡片。**思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe 渲染，PDF 走浏览器原生查看器）**。
+- **Office → HTML（不依赖 LibreOffice / Office 套件）**：`office_to_html()` 按后缀分发到纯 Python 解析器，产出 HTML 片段（表格首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行/表、整数浮点去掉 `.0`）；**Excel（`xlsx/xlsm/xls`）逐 sheet 渲染**——`_sheet_sections()` 给每张表生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条，确保每个 sheet 页都能单独查看；`office_html_cached()` 按 `mtime+size` 做内存缓存（失败结果也缓存，避免反复触发），转换经 `asyncio.to_thread` 下放线程池。仅 `OFFICE_CONVERTIBLE_EXTS` 且 ≤ `OFFICE_MAX_BYTES=25MB` 才转换，否则退化为占位卡片。**思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe 渲染，PDF 走浏览器原生查看器）**。
 
 ```bash
 # 预览页（返回 HTML，右上角带下载按钮）

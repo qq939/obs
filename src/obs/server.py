@@ -2272,6 +2272,22 @@ def _rows_to_table(rows) -> str:
     return table
 
 
+def _sheet_sections(sections) -> str:
+    """渲染多 sheet 工作簿：顶部 sheet 切换条 + 每张表独立锚点区块（逐个都可预览）。
+    sections 为 (标题, 行数据) 的可迭代对象。"""
+    nav, body, count = [], [], 0
+    for title, rows in sections:
+        count += 1
+        sid = "sheet-%d" % count
+        nav.append('<a href="#%s">%s</a>' % (sid, html_escape(title)))
+        body.append('<h3 id="%s">%s</h3>' % (sid, html_escape(title)))
+        body.append(_rows_to_table(rows))
+    if count <= 1:
+        # 单 sheet 无需切换条
+        return "".join(body)
+    return ('<nav class="sheet-nav">' + "".join(nav) + "</nav>" + "".join(body))
+
+
 def office_to_html(file_path: str) -> str:
     """用纯 Python 库把受支持的 Office 文件转成 HTML 片段；不支持/失败返回空串。"""
     ext = file_ext(file_path)
@@ -2284,22 +2300,18 @@ def office_to_html(file_path: str) -> str:
             import openpyxl
             wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
             try:
-                parts = []
-                for ws in wb.worksheets:
-                    parts.append("<h3>" + html_escape(ws.title) + "</h3>")
-                    parts.append(_rows_to_table(ws.iter_rows(values_only=True)))
-                return "".join(parts)
+                # 每张 sheet 都渲染（顶部切换条 + 各自锚点区块）
+                return _sheet_sections(
+                    (ws.title, ws.iter_rows(values_only=True)) for ws in wb.worksheets)
             finally:
                 wb.close()
         if ext == "xls":
             import xlrd
             bk = xlrd.open_workbook(file_path)
-            parts = []
-            for sh in bk.sheets():
-                parts.append("<h3>" + html_escape(sh.name) + "</h3>")
-                parts.append(_rows_to_table(
-                    [sh.cell_value(r, c) for c in range(sh.ncols)] for r in range(sh.nrows)))
-            return "".join(parts)
+            return _sheet_sections(
+                (sh.name,
+                 ([sh.cell_value(r, c) for c in range(sh.ncols)] for r in range(sh.nrows)))
+                for sh in bk.sheets())
         if ext == "pptx":
             from pptx import Presentation
             parts = []
@@ -2356,6 +2368,11 @@ _OFFICE_DOC_TEMPLATE = """<!DOCTYPE html>
     th { background: #f2f5fa; }
     tr:nth-child(even) td { background: #fafbfd; }
     .muted { color: #999; font-size: 13px; }
+    .sheet-nav { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px;
+                 margin: -4px 0 14px; padding: 8px 0; background: #fff; border-bottom: 1px solid #e6e6e6; }
+    .sheet-nav a { padding: 4px 12px; border: 1px solid #cdd8ea; border-radius: 14px;
+                   background: #f2f5fa; color: #1f4fa3; text-decoration: none; font-size: 13px; }
+    .sheet-nav a:hover { background: #e4ebf7; }
 </style>
 </head>
 <body>
