@@ -2232,101 +2232,6 @@ def human_size(n: int) -> str:
     return f"{f:.1f} TB"
 
 
-# --- Office 文档 → PDF（LibreOffice headless）---------------------------------
-# doc/docx/xls/xlsx/ppt/pptx/odt/ods/odp/rtf 无法原生在浏览器预览，
-# 用 `soffice --headless --convert-to pdf` 转成 PDF 后再走内嵌 iframe 预览。
-# 结果缓存到 obs/.preview_cache/（点开头，不会出现在首页列表里），按源文件
-# mtime+size 失效；转换失败写失败标记，避免对坏文件反复触发昂贵的转换。
-_office_convert_lock = threading.Lock()
-_OFFICE_SOFFICE = ("soffice", "libreoffice", "soffice.bin")
-
-
-def _find_soffice() -> str:
-    for name in _OFFICE_SOFFICE:
-        p = shutil.which(name)
-        if p:
-            return p
-    return ""
-
-
-def office_pdf_path(upload_dir: str, filename: str) -> str:
-    """确保 office 文件已转换为 PDF，返回缓存 PDF 的绝对路径；不可用返回空串。"""
-    src = safe_upload_path(upload_dir, filename)
-    if not src or not os.path.isfile(src):
-        return ""
-    try:
-        st = os.stat(src)
-    except OSError:
-        return ""
-    cache_dir = os.path.join(upload_dir, ".preview_cache")
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-    except OSError:
-        return ""
-    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:20]
-    out = os.path.join(cache_dir, key + ".pdf")
-    meta = os.path.join(cache_dir, key + ".meta")
-    stamp = f"{int(st.st_mtime_ns)}:{st.st_size}"
-
-    def _fresh() -> bool:
-        if not os.path.isfile(out):
-            return False
-        try:
-            with open(meta, encoding="utf-8") as f:
-                return f.read().strip() == stamp
-        except OSError:
-            return False
-
-    if _fresh():
-        return out
-    # 失败标记：同一版本不再重试（避免每次请求卡在转换上）
-    try:
-        if os.path.isfile(meta):
-            with open(meta, encoding="utf-8") as f:
-                if f.read().strip() == "FAIL:" + stamp:
-                    return ""
-    except OSError:
-        pass
-
-    soffice = _find_soffice()
-    if not soffice:
-        return ""
-
-    import tempfile
-    with _office_convert_lock:
-        if _fresh():   # 等锁期间别人已转好
-            return out
-        with tempfile.TemporaryDirectory() as td:
-            profile = os.path.join(td, "lo-profile")
-            args = [soffice, "--headless", "--norestore", "--nolockcheck", "--nodefault",
-                    "-env:UserInstallation=file://" + profile,
-                    "--convert-to", "pdf", "--outdir", td, src]
-            try:
-                proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      timeout=180, env={**os.environ, "HOME": td})
-            except Exception as e:
-                log_line(f"office 预览转换异常: {filename} {e}")
-                return ""
-            produced = os.path.join(td, os.path.splitext(os.path.basename(src))[0] + ".pdf")
-            if proc.returncode != 0 or not os.path.isfile(produced):
-                tail = (proc.stdout or b"")[-300:].decode("utf-8", "replace")
-                log_line(f"office 预览转换失败: {filename} rc={proc.returncode} {tail!r}")
-                try:
-                    with open(meta, "w", encoding="utf-8") as f:
-                        f.write("FAIL:" + stamp)
-                except OSError:
-                    pass
-                return ""
-            try:
-                shutil.move(produced, out)
-                with open(meta, "w", encoding="utf-8") as f:
-                    f.write(stamp)
-            except OSError as e:
-                log_line(f"office 预览缓存写入失败: {filename} {e}")
-                return ""
-    return out
-
-
 _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2452,7 +2357,7 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def render_preview_page(filename: str, size: int, kind: str, office_pdf: bool = False) -> str:
+def render_preview_page(filename: str, size: int, kind: str) -> str:
     name = os.path.basename(filename) or filename
     ext = file_ext(filename)
     inline_url = "/obs/" + quote(filename, safe="/")
@@ -2460,16 +2365,7 @@ def render_preview_page(filename: str, size: int, kind: str, office_pdf: bool = 
     kind_token = "none"
     delim = ","
 
-    if kind == "office" and office_pdf:
-        # 已由 LibreOffice 转成 PDF：复用 PDF 内嵌预览
-        pdf_url = "/preview-pdf/" + quote(filename, safe="/")
-        body = '<iframe class="frame" src="' + pdf_url + '" title="Office 预览"></iframe>'
-    elif kind == "office":
-        body = ('<div class="fallback"><div class="icon">📄</div>'
-                '<h2>' + html_escape(name) + '</h2>'
-                '<p>此格式暂时无法在线转换预览，请点击右上角「下载」按钮下载后查看。</p>'
-                '<a class="btn-download" href="' + download_url + '" download>⬇ 下载文件</a></div>')
-    elif kind == "image":
+    if kind == "image":
         body = '<img src="' + inline_url + '" alt="' + html_escape(name) + '">'
     elif kind == "audio":
         body = '<audio controls autoplay src="' + inline_url + '"></audio>'
@@ -2520,24 +2416,7 @@ async def preview_file(filename: str, request: Request):
         size = os.path.getsize(file_path)
     except OSError:
         size = 0
-    kind = preview_kind(filename)
-    office_pdf = False
-    if kind == "office":
-        # 转成 PDF 再内嵌预览（首次较慢，结果缓存在 obs/.preview_cache/）
-        office_pdf = bool(await asyncio.to_thread(office_pdf_path, upload_dir, filename))
-    return HTMLResponse(content=render_preview_page(filename, size, kind, office_pdf))
-
-
-@app.get("/preview-pdf/{filename:path}")
-async def preview_pdf(filename: str, request: Request):
-    """Office 文档经 LibreOffice 转换后的 PDF（供预览页 iframe 内嵌）。"""
-    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
-    filename = unquote(filename)
-    pdf = await asyncio.to_thread(office_pdf_path, upload_dir, filename)
-    if not pdf:
-        raise HTTPException(status_code=404, detail="无法转换为 PDF")
-    return FileResponse(pdf, media_type="application/pdf",
-                        headers={"Content-Disposition": "inline"})
+    return HTMLResponse(content=render_preview_page(filename, size, preview_kind(filename)))
 
 
 # ============================================================================
