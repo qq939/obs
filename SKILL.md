@@ -23,7 +23,7 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 域名 | **`http://ocs.dimond.top`**（= `http://dimond.top:19082` = 宿主机 `http://localhost:19082` = 容器内 `http://localhost:8082`） |
 | 端口 | `8082`（容器内部） |
 | 主程序 | `src/obs/server.py`（FastAPI） |
-| 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板） |
+| 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `http://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
 | 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |

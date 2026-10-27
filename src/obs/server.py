@@ -1601,10 +1601,9 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             </div>
         </div>
 
-        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
-        
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
-            <p style="margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
+            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
+            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>

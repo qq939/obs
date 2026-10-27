@@ -202,6 +202,8 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-02 07:35 | R11 | **下载点击无反应排查**：`downloadWithFallback` 先 `preventDefault` 再异步 `a.click()`，丢了用户手势被弹窗拦截；改为加载期改写 `a[data-name]` href（`applyDownloadHosts`，`adc4192`） |
 | 2026-10-13 02:11 | R12 | **文件预览页 + 推送分支 `ocs`**：可预览后缀点击先进 `/preview/...`（右上角醒目下载按钮），图片/音视频/PDF/HTML/文本(CSV 表格)/Office 占位；`git push` 到新分支 `ocs` |
 | 2026-10-13 05:06 | R13 | **Office 在线预览（纯 Python 方案）**：先按要求**回退**掉 LibreOffice 转 PDF 方案（卸载 LibreOffice），改为参考 `qq939/interview-jobfinder` 的思路——服务端用纯 Python 库把 `docx/xlsx/xls/pptx` 转成 HTML（mammoth/openpyxl/xlrd/python-pptx），预览页 iframe 内嵌 `/preview-content/...` |
+| 2026-10-13 07:28 | R14 | **Excel 逐 sheet 预览**：`_sheet_sections()` 为每张 sheet 生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条；xlsx/xlsm(openpyxl) 与 xls(xlrd) 均支持（`8eb6363`） |
+| 2026-10-27 11:40 | R15 | **首页上传区文案顺序 + 统一字号**：把「文件托管上传：`curl --upload-file ...`」提示移到「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**下方**，两者同置于上传框 `#uploadZone` 内，且**字号统一为 `0.8em`（小号）** |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -216,17 +218,16 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R11 / R12 / R13）：**
+**最后 3 轮对话总结（R13 / R14 / R15）：**
 
-- **R11（下载点击无反应排查，2026-10-02）**：链接正确但点击无反应、必须复制粘贴到地址栏。根因：`downloadWithFallback()` 先 `ev.preventDefault()`
-  再异步 HEAD 探测，最后在 `.then()` 里 `a.click()`——**程序化点击发生在用户手势之外被浏览器当弹窗拦截**；粘贴到地址栏属直接导航故能下。
-  修复（`adc4192`）：不再在点击里做任何事，改为页面加载后用 `obsBase()` 结果**一次性改写**所有 `a[data-name]` 的 `href`（`applyDownloadHosts()`），点击走**原生跳转**即直接下载。
-- **R12（文件预览页 + 推送 `ocs` 分支，2026-10-13）**：要求点击 `csv/xls/xlsx/doc/docx/pdf/html/jpeg/png/mp3` 等后缀先进入**预览页**，右上角有醒目下载按钮；并把成果 `git push` 到新分支 `ocs`。
-  落地：新增 `/preview/{filename:path}` + 各类型渲染（图片/音视频/PDF/HTML/文本/CSV 表格/Office 占位）、`safe_upload_path()` 路径穿越防护、首页可预览项改链 `/preview/...`（`data-preview` 属性，避免被下载回退逻辑改写）。
 - **R13（Office 在线预览改为纯 Python 方案，2026-10-13）**：先按上一轮把 `doc/xls/docx/xlsx/pptx` 等 Office 预览做成了 **LibreOffice 转 PDF 内嵌**（`d327ec7`，附测试 53 项全过）。
   用户随后要求「**回退，不要用 office 套件**，参考 `qq939/interview-jobfinder` 的预览实现」。遂 `git revert d327ec7`（`58e6fe1`）并**卸载 LibreOffice + fonts-noto-cjk**，
   改依参考仓库思路：**服务端把文档转成 HTML 片段、前端 iframe 内嵌渲染**——`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，产出 HTML 经 `/preview-content/{filename:path}`（`text/html`）供预览页 `<iframe>` 加载；
   `mtime+size` 内存缓存 + `asyncio.to_thread` 下放线程；仅 `docx/xlsx/xlsm/xls/pptx` 且 ≤25MB 才转换，其余（含 `doc/ppt/odt/ods/odp/rtf`）退化为下载占位。自测：Office 15 项 + 通用预览 52 项全过。
+- **R14（Excel 逐 sheet 预览，2026-10-13）**：用户要求 Excel 需对**每个 sheet 页**都预览。新增 `_sheet_sections()`——每张 sheet 各自 `<h3 id="sheet-N">` 锚点区块，
+  多表时顶部加 sticky `sheet-nav` 切换条（单表不加）；`xlsx/xlsm`(openpyxl) 与 `xls`(xlrd) 两分支均改用它。多表样例（3 表 xlsx / 2 表 xls）逐表渲染 + nav 均验证通过（`8eb6363`）。
+- **R15（首页上传区文案顺序 + 统一字号，2026-10-27）**：把「文件托管上传：`curl --upload-file file.txt {url_head}/file.txt`」从上传框**上方**移到
+  「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**正下方**，两者同置于 `#uploadZone` 内；并按用户要求**统一为小号字 `font-size: 0.8em`**（两行 style 完全一致）。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，
