@@ -60,7 +60,8 @@ project/
 ├── docker-compose.yml       # 容器编排
 ├── requirements.txt         # 根依赖清单
 ├── obs/                     # 文件/视频存储（运行时，已 gitignore，保留 .gitkeep）
-│   └── .chunks/             # 分片上传临时目录（断点续传会话）
+│   ├── .chunks/             # 分片上传临时目录（断点续传会话）
+│   └── .folder-staging/     # ★ 文件夹上传暂存区（<folder_id>/data + manifest.json；打包成功即删）
 ├── obs_shards/              # HLS 产物 m3u8 + ts（运行时，已 gitignore）
 ├── logs/                    # 日志（已 gitignore）：start.log / server.log / agent_tui.log
 ├── systemreadme.md          # 容器内规范
@@ -92,6 +93,11 @@ project/
 | PUT | `/upload/chunk/{upload_id}/{index}` | 上传分片 |
 | POST | `/upload/status/{upload_id}` | 查询分片上传进度 |
 | POST | `/upload/complete/{upload_id}` | 合并分片完成上传 |
+| POST | `/api/folder/init` | **文件夹上传会话**：`{folder_name,total_files,total_bytes,empty_dirs[],resume_folder_id?}` → `{folder_id}` |
+| GET | `/api/folder/{folder_id}/manifest` | 查询文件夹上传进度（已完成/未完成文件、字节数、空目录） |
+| PUT | `/api/folder/{folder_id}/file/{relpath:path}` | 文件夹内**单文件直传**（≤10MB；可选 `X-File-SHA256` 整段校验） |
+| POST | `/api/folder/{folder_id}/zip` | 后台把暂存文件夹打包成 **一个 zip**（`{zip_name?}`） |
+| GET | `/api/folder/{folder_id}/zip/status` | 查询打包进度（`queued/running/done/failed` + zip 名称/大小） |
 | GET | `/obs/{filename:path}` | 直接访问 obs 目录文件（内联展示；预览页内嵌用） |
 | GET | `/preview/{filename:path}` | **文件预览页**（图片/PDF/HTML/音视频/文本/CSV/Office…），右上角固定「⬇ 下载」按钮（见 §3.2） |
 | GET | `/preview-content/{filename:path}` | Office（docx/xlsx/xls/pptx）转换后的 **HTML**（`text/html`），供预览页 iframe 内嵌 |
@@ -157,6 +163,47 @@ curl -s http://127.0.0.1:8082/preview-content/report.xlsx | head                
 pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 ```
 
+### 3.3 文件夹上传（暂存 → 打包成一个 zip）
+
+首页上传区新增「**上传文件夹**」按钮，并支持**拖拽文件夹**与页面内 **Ctrl+V / Cmd+V 粘贴文件夹**。整个文件夹会先逐文件上传到服务端暂存区，
+全部完成后由后台打包成**一个 zip**，成功后删除暂存源目录——首页最终**只出现该 zip**，不残留一堆散文件。
+
+**前端（`src/obs/server.py` 内联 JS）**
+
+- **选择目录**：隐藏的 `<input type="file" webkitdirectory directory multiple>`；选中后用 `webkitRelativePath` 作为每个文件的上传相对路径。
+- **拖拽目录**：`drop` 事件用 `dataTransfer.items[i].webkitGetAsEntry()` 拿到目录 Entry，递归 `readEntries()`（每次只返回一批，需循环读到空）遍历所有层级；
+  拿不到 Entry API 时回退为扁平 `dataTransfer.files`。
+- **粘贴目录**：`paste` 事件同样优先用 `clipboardData.items[i].webkitGetAsEntry()` 还原目录结构；浏览器只给文件列表、结构丢失时，
+  确认弹窗会**如实提示**「粘贴只拿到 X 个文件、目录结构已丢失，是否继续扁平上传？」。纯文本粘贴保持浏览器默认行为。
+- **上传**：复用现有单文件直传（≤10MB，`PUT ...` + `X-File-SHA256`）与分片上传（>10MB，`/upload/init` + `/upload/chunk` + `/upload/complete`，带 `folder_id` + `relpath`）；
+  进度与失败信息均显示 **relpath**（相对路径），便于看清层级。
+- **确认弹窗**：上传前展示文件夹名、文件数、总大小、空文件夹数量（复用粘贴弹窗样式）；扁平回退时额外显示结构丢失警告。
+- **续传**：`localStorage` 以 `ocs-folder:{文件夹名}:{文件数}:{总字节}` 记住 `folder_id`，刷新/断网后重新选同一文件夹会命中服务端会话继续传。
+
+**后端（暂存区 `obs/.folder-staging/{folder_id}/`）**
+
+| 环节 | 说明 |
+|------|------|
+| 建会话 | `POST /api/folder/init` 生成 `folder_id`（uuid hex），写 `obs/.folder-staging/<id>/manifest.json`（`files{relpath,size,sha256,status}`、`empty_dirs`） |
+| 小文件 | `PUT /api/folder/{id}/file/{relpath:path}`：流式写暂存 `data/<relpath>`；声明了 `X-File-SHA256` 则整段校验，不一致删除并 400 |
+| 大文件 | 复用 `/upload/init`、`/upload/chunk`、`/upload/complete`，请求体带 `folder_id` + `relpath`；init 秒传按**暂存路径**判定，complete 把合并结果移入暂存并标记 manifest `done` |
+| 路径安全 | `_safe_relpath()` 拒绝绝对路径、盘符、`../`、NUL 字节；`_resolve_staging_target()` 用 `realpath` 保证落在该会话 `data/` 内 |
+| 打包 | `POST /api/folder/{id}/zip` 后台任务：`zipfile` + `ZIP_DEFLATED` 写 `.packing.zip.tmp` → 校验（可打开、条目数与 manifest 完成数一致、`testzip()` 无损坏、大小 > 0）→ 原子 `os.replace` 到 `obs/`；**空目录写成显式目录条目**；同名 zip 自动加时间戳后缀，不静默覆盖 |
+| 成功/失败 | 成功 `shutil.rmtree` 暂存目录，首页只剩 zip；失败保留暂存与源文件，可直接重试 |
+| 配额 | 暂存默认上限 **200GB**（`FOLDER_STAGING_LIMIT` 可覆盖）；超限按「**最久未活动优先**」清理旧会话，最近 `FOLDER_ACTIVE_GRACE_SECONDS=600s` 内活跃或正在打包的会话**绝不删除**；仅剩活跃会话仍不足时对新会话返回 **507** |
+| 进度 | `GET /api/folder/{id}/manifest` 返回 `total_files/done_files/partial_files/uploaded_bytes`；`GET /api/folder/{id}/zip/status` 返回打包任务状态 |
+
+```bash
+# 1) 建会话
+curl -s -X POST http://127.0.0.1:8082/api/folder/init -H 'Content-Type: application/json' \
+  -d '{"folder_name":"demo","total_files":2,"total_bytes":6,"empty_dirs":["empty"]}'
+# 2) 小文件直传（relpath 保留目录层级）
+curl -X PUT --data-binary 'hello' http://127.0.0.1:8082/api/folder/<folder_id>/file/sub/a.txt
+# 3) 打包 + 轮询
+curl -s -X POST http://127.0.0.1:8082/api/folder/<folder_id>/zip -H 'Content-Type: application/json' -d '{"zip_name":"demo.zip"}'
+curl -s http://127.0.0.1:8082/api/folder/<folder_id>/zip/status
+```
+
 ### 调用示例
 
 ```bash
@@ -174,7 +221,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 
 ## 4. 运行与数据
 
-- **存储**：上传文件 → `obs/`；分片临时数据 → `obs/.chunks/`；HLS 产物 → `obs_shards/`。
+- **存储**：上传文件 → `obs/`；分片临时数据 → `obs/.chunks/`；文件夹上传暂存 → `obs/.folder-staging/<folder_id>/`（成功打包后自动删除）；HLS 产物 → `obs_shards/`。
 - **日志**：
   - `logs/start.log`：`user_start.sh` 启动过程（目录准备 / PID / 健康检查）。
   - `logs/server.log`：应用 `log_line()` 输出的业务日志（同时打到 stdout）。
@@ -204,6 +251,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-13 05:06 | R13 | **Office 在线预览（纯 Python 方案）**：先按要求**回退**掉 LibreOffice 转 PDF 方案（卸载 LibreOffice），改为参考 `qq939/interview-jobfinder` 的思路——服务端用纯 Python 库把 `docx/xlsx/xls/pptx` 转成 HTML（mammoth/openpyxl/xlrd/python-pptx），预览页 iframe 内嵌 `/preview-content/...` |
 | 2026-10-13 07:28 | R14 | **Excel 逐 sheet 预览**：`_sheet_sections()` 为每张 sheet 生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条；xlsx/xlsm(openpyxl) 与 xls(xlrd) 均支持（`8eb6363`） |
 | 2026-10-27 11:40 | R15 | **首页上传区文案顺序 + 统一字号**：把「文件托管上传：`curl --upload-file ...`」提示移到「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**下方**，两者同置于上传框 `#uploadZone` 内，且**字号统一为 `0.8em`（小号）** |
+| 2026-10-27 19:00 | R16 | **文件夹上传（网盘式）**：选择/拖拽/粘贴文件夹递归上传，服务端暂存 + manifest + 断点续传，完成后后台打包成**一个 zip**、删除源目录，首页只留 zip；200GB 暂存配额按最久未活动优先清理；新增 `/api/folder/*` 端点（见 §3.3） |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -218,16 +266,16 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R13 / R14 / R15）：**
+**最后 3 轮对话总结（R14 / R15 / R16）：**
 
-- **R13（Office 在线预览改为纯 Python 方案，2026-10-13）**：先按上一轮把 `doc/xls/docx/xlsx/pptx` 等 Office 预览做成了 **LibreOffice 转 PDF 内嵌**（`d327ec7`，附测试 53 项全过）。
-  用户随后要求「**回退，不要用 office 套件**，参考 `qq939/interview-jobfinder` 的预览实现」。遂 `git revert d327ec7`（`58e6fe1`）并**卸载 LibreOffice + fonts-noto-cjk**，
-  改依参考仓库思路：**服务端把文档转成 HTML 片段、前端 iframe 内嵌渲染**——`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，产出 HTML 经 `/preview-content/{filename:path}`（`text/html`）供预览页 `<iframe>` 加载；
-  `mtime+size` 内存缓存 + `asyncio.to_thread` 下放线程；仅 `docx/xlsx/xlsm/xls/pptx` 且 ≤25MB 才转换，其余（含 `doc/ppt/odt/ods/odp/rtf`）退化为下载占位。自测：Office 15 项 + 通用预览 52 项全过。
 - **R14（Excel 逐 sheet 预览，2026-10-13）**：用户要求 Excel 需对**每个 sheet 页**都预览。新增 `_sheet_sections()`——每张 sheet 各自 `<h3 id="sheet-N">` 锚点区块，
   多表时顶部加 sticky `sheet-nav` 切换条（单表不加）；`xlsx/xlsm`(openpyxl) 与 `xls`(xlrd) 两分支均改用它。多表样例（3 表 xlsx / 2 表 xls）逐表渲染 + nav 均验证通过（`8eb6363`）。
 - **R15（首页上传区文案顺序 + 统一字号，2026-10-27）**：把「文件托管上传：`curl --upload-file file.txt {url_head}/file.txt`」从上传框**上方**移到
   「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**正下方**，两者同置于 `#uploadZone` 内；并按用户要求**统一为小号字 `font-size: 0.8em`**（两行 style 完全一致）。
+- **R16（文件夹上传 → 单个 zip，2026-10-27）**：新增网盘式文件夹上传——目录选择 `webkitdirectory`、拖拽/粘贴经 `webkitGetAsEntry()` 递归还原层级；
+  服务端 `obs/.folder-staging/<folder_id>/` 暂存 + `manifest.json` 记录进度（复用现有直传/分片上传，仅额外带 `folder_id`+`relpath`），全部完成后后台
+  `zipfile` 打包成一个 zip 并校验、原子落盘 `obs/`，成功即删除暂存源目录，首页只留 zip；支持刷新/断网续传与 200GB 暂存配额清理（活跃会话不删）。
+  自测：后端端到端 40 项 + 配额/打包失败单测 13 项全过（含 3 级嵌套、中文路径、空目录、12MB 分片、md5 抽查、续传与秒传、路径穿越拒绝）。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，
@@ -260,6 +308,11 @@ R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.
 | 预览页 404 / 下载按钮无反应 | 文件不在 `obs/`、或下载链接指向了跨域主机 | 预览页内联内容用同源 `/obs/...`、下载按钮用同源 `/{filename}`（不涉及主机回退）；越界路径由 `safe_upload_path()` 拦为 404 |
 | Office 预览显示「暂不支持在线预览」占位 | 后缀不在可转换集（仅 `docx xlsx xlsm xls pptx`），或文件 > 25MB，或转换库抛错 | 属预期降级；确认后缀/体积。注意 `doc/ppt/odt/ods/odp/rtf` **无纯 Python 解析器**，一律退化为下载占位（不再依赖 LibreOffice） |
 | Office 预览报错 / `/preview-content` 404·415 | 缺少转换库，或转换结果为空 | 装依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`；`415` 表示该文件解析不出内容（如损坏文档） |
+| 文件夹上传返回 **507** | 暂存区超过 `FOLDER_STAGING_LIMIT`（默认 200GB），且剩余会话都处于活跃/打包中（受保护不删） | 等待当前上传/打包完成后重试；或调大 `FOLDER_STAGING_LIMIT`；`obs/.folder-staging/` 下确认遗留会话 |
+| 文件夹打包返回 **409** | `done_files < total_files`，仍有文件未传完 | 查 `GET /api/folder/{id}/manifest`，让前端重传缺失文件（直传/分片均可续） |
+| `/api/folder/{id}/file/...` 返回 **400** | relpath 含 `..`、绝对路径、盘符或 NUL 字节 | 属路径穿越防护；前端应传相对路径（`webkitRelativePath`/`getAsEntry()` 递归结果） |
+| 打包失败（`status=failed`） | zip 校验不通过（条目数与 manifest 不符、损坏、空产物）或磁盘空间不足 | 暂存与源文件均保留，修复缺失文件后重新 `POST /api/folder/{id}/zip` 重试 |
+| 刷新后文件夹上传从头开始 | localStorage 的 `ocs-folder:*` 键或服务端会话已丢失/被配额清理 | 重新选择同一文件夹会命中 `resume_folder_id`；若会话已清理则只能重传 |
 | 无法运行 `test_*.py` | 容器未安装 pytest（且无外网） | 有网环境 `pip install -r requirements.txt` 后 `pytest -q` |
 
 ---

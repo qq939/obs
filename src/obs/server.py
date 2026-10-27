@@ -9,6 +9,8 @@ import os
 import time
 import shutil
 import json
+import uuid
+import zipfile
 import asyncio
 import threading
 import subprocess
@@ -69,6 +71,22 @@ MAX_UPLOAD_SIZE = None
 # UPLOAD_CHUNK_SIZE: 表单上传读取分片大小（10MB）
 # 使用位置：upload_file_form 读取循环
 UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024
+# ---------------------------------------------------------------------------
+# 文件夹上传（暂存 → 打包 zip → 清理源目录）
+# ---------------------------------------------------------------------------
+# FOLDER_STAGING_ROOT: 暂存根目录（位于 UPLOAD_DIR 下；点开头，首页列表不展示）
+#   使用位置：_staging_root / _staging_dir / _enforce_staging_quota
+FOLDER_STAGING_ROOT = ".folder-staging"
+# FOLDER_STAGING_LIMIT: 暂存区总容量上限，默认 200GB（可用环境变量覆盖）
+#   使用位置：_enforce_staging_quota
+FOLDER_STAGING_LIMIT = int(os.environ.get("FOLDER_STAGING_LIMIT", 200 * 1024 ** 3))
+# FOLDER_ACTIVE_GRACE_SECONDS: 最近 N 秒内仍有更新的会话视为「活跃」，配额清理时绝不删除
+#   使用位置：_cleanup_candidates
+FOLDER_ACTIVE_GRACE_SECONDS = int(os.environ.get("FOLDER_ACTIVE_GRACE_SECONDS", 600))
+# 打包任务状态表 folder_id -> {status, zip_name, ...}
+#   使用位置：/api/folder/{id}/zip、/api/folder/{id}/zip/status、_run_pack_job
+_folder_jobs: Dict[str, dict] = {}
+_folder_jobs_lock = threading.Lock()
 # RANGE_DOWNLOAD_CHUNK_SIZE: Range 分片下载时的单次读取分片大小（10MB）
 # 使用位置：download_file -> iterfile(chunk_size=...)
 RANGE_DOWNLOAD_CHUNK_SIZE = 10 * 1024 * 1024
@@ -762,7 +780,7 @@ async def save_notice_file(request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to save notice: {str(e)}")
 
 @app.get("/")
-async def homepage(request: Request, sort: str = Query("time", enum=["time", "ext"])):
+async def homepage(request: Request, sort: str = Query("time")):
     # 获取文件列表
     files_list = []
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
@@ -824,9 +842,14 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 box-sizing: border-box; /* ensure padding doesn't overflow */
             }
             .notice-copy-btn {
-                display: block;
+                /* 高度 ×3（原来约 24px） */
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 72px;
+                box-sizing: border-box;
                 margin-top: 0;
-                padding: 4px 12px;
+                padding: 0 12px;
                 border: 1px solid #ccc;
                 border-top: none;
                 background: #81D8D0;
@@ -838,8 +861,13 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 background: #73cbc3;
             }
             .notice-save-btn {
-                display: block;
-                padding: 4px 12px;
+                /* 高度 ×3（原来约 24px） */
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 72px;
+                box-sizing: border-box;
+                padding: 0 12px;
                 border: 1px solid #ccc;
                 border-top: none;
                 background: #fff;
@@ -959,6 +987,15 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
             const UPLOAD_CONCURRENCY = 3;                // 分片并发上传路数
+            // 文件夹内相对路径编码：逐段 encodeURIComponent，保留 / 作为目录分隔符
+            // 使用位置：uploadOneFileDirect（PUT /api/folder/{id}/file/{relpath}）
+            function encodeRelPath(p) {
+                return String(p || "").split("/").map(encodeURIComponent).join("/");
+            }
+            // 单文件在界面上的显示名/上传路径：文件夹上传优先用遍历得到的相对路径
+            function fileRelPath(file) {
+                return (file && (file._relPath || file.webkitRelativePath)) || (file && file.name) || "";
+            }
             // crypto.subtle 只在安全上下文（https / localhost）可用；
             // 通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
             // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
@@ -1063,8 +1100,10 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
 
             // 单文件直传（≤10MB）：整段上传 + 整段校验（X-File-SHA256，服务端校验后才落账）
             // 且先试 http://localhost:19082，不可达再回退 http://ocs.dimond.top
-            async function uploadOneFileDirect(file, onProgress) {
+            // folderId 非空时走文件夹暂存接口，URL 使用相对路径（保留目录层级）
+            async function uploadOneFileDirect(file, onProgress, folderId) {
                 const base = await obsBase();
+                const rel = fileRelPath(file);
                 return new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
                     xhr.upload.onprogress = (e) => {
@@ -1085,7 +1124,10 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         } catch (e) {
                             digest = '';
                         }
-                        xhr.open('PUT', `${base}/${encodeURIComponent(file.name)}`);
+                        const url = folderId
+                            ? `${base}/api/folder/${folderId}/file/${encodeRelPath(rel)}`
+                            : `${base}/${encodeURIComponent(file.name)}`;
+                        xhr.open('PUT', url);
                         if (digest) xhr.setRequestHeader('X-File-SHA256', digest);
                         xhr.send(file);
                     };
@@ -1096,11 +1138,12 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
             // 大文件分片上传（>10MB）：/upload/init + /upload/chunk + /upload/complete，支持秒传/断点续传
             //  - 分片哈希只算一次并缓存复用（重试/重传不再重算、不再重读文件）
             //  - 分片 UPLOAD_CONCURRENCY 路并发上传
-            async function uploadOneFileResumable(file, onProgress) {
+            async function uploadOneFileResumable(file, onProgress, folderId) {
                 const chunkSize = CHUNK_SIZE_BROWSER;
                 const size = file.size;
                 const totalChunks = Math.ceil(size / chunkSize) || 1;
                 const hashAlgo = "sha256";
+                const rel = fileRelPath(file);
 
                 // 1) 单遍顺序读取：拿到每片哈希（内存 O(分片)），并合并成整文件指纹
                 const chunkHashes = await computeChunkHashes(file, chunkSize, totalChunks,
@@ -1111,7 +1154,8 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const initResp = await obsFetch('/upload/init', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: file.name, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
+                    body: JSON.stringify({ filename: file.name, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks,
+                                           folder_id: folderId || null, relpath: folderId ? rel : null })
                 });
                 if (!initResp.ok) throw new Error('初始化失败: ' + await initResp.text());
                 const info = await initResp.json();
@@ -1160,15 +1204,20 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 const c = await obsFetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, chunk_size: chunkSize, hash_algo: hashAlgo, hash })
+                    body: JSON.stringify({ filename: file.name, size, total_chunks: totalChunks, chunk_size: chunkSize, hash_algo: hashAlgo, hash,
+                                           folder_id: folderId || null, relpath: folderId ? rel : null })
                 });
                 if (!c.ok) throw new Error('合并失败: ' + await c.text());
                 return await c.text();
             }
 
             // 拖拽/选择文件的统一入口（小文件直传，大文件走分片+秒传）
-            async function uploadFiles(files) {
-                if (!files || files.length === 0) return;
+            // opts.folderId：非空时每个文件落到该文件夹暂存区，路径用 file._relPath
+            // opts.noReload：文件夹流程要等打包完成再刷新，这里不自动 reload
+            async function uploadFiles(files, opts) {
+                if (!files || files.length === 0) return { success: 0, fail: 0, failedNames: [], totalFiles: 0 };
+                opts = opts || {};
+                const folderId = opts.folderId || null;
                 const statusEl = document.getElementById('formUploadStatus');
                 const totalFiles = files.length;
                 let success = 0, fail = 0;
@@ -1178,7 +1227,8 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 for (let i = 0; i < totalFiles; i++) totalBytes += files[i].size;
                 for (let i = 0; i < totalFiles; i++) {
                     const file = files[i];
-                    statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${file.name} 0%`;
+                    const displayName = fileRelPath(file);   // 文件夹上传时显示相对路径，便于看清层级
+                    statusEl.textContent = `上传中... (${i + 1}/${totalFiles}) ${displayName} 0%`;
                     // 每个文件一个速度计：滑窗 3s 内算实时速度，全程算平均速度
                     const meter = createSpeedMeter(3000);
                     const report = (pct, loaded, stage) => {
@@ -1189,7 +1239,7 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                         if (sp.speed > 0) lastSpeedByFile[i] = sp.speed;
                         const overallPct = totalBytes > 0 ? Math.round((overallBytes + bytes) / totalBytes * 100) : 0;
                         statusEl.textContent = reportUploadStatus({
-                            stage: stage, index: i + 1, totalFiles: totalFiles, filename: file.name,
+                            stage: stage, index: i + 1, totalFiles: totalFiles, filename: displayName,
                             pct: pct, overallPct: overallPct,
                             speedText: fmtSpeed(shownSpeed)
                         });
@@ -1197,24 +1247,25 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                     try {
                         // ≤10MB：整段校验 + 整段上传；>10MB：分段校验 + 分段上传（断点续传）
                         if (file.size <= CHUNK_SIZE_BROWSER) {
-                            await uploadOneFileDirect(file, report);
+                            await uploadOneFileDirect(file, report, folderId);
                         } else {
-                            await uploadOneFileResumable(file, report);
+                            await uploadOneFileResumable(file, report, folderId);
                         }
                         overallBytes += file.size;
                         success++;
                     } catch (err) {
                         fail++;
-                        failedNames.push(file.name + ' (' + err.message + ')');
+                        failedNames.push(displayName + ' (' + err.message + ')');
                     }
                 }
                 if (fail === 0) {
                     statusEl.textContent = `全部上传成功！(${success}个文件)`;
-                    window.location.reload();
+                    if (!opts.noReload) window.location.reload();
                 } else {
                     statusEl.textContent = `上传完成：成功${success}个，失败${fail}个 → ${failedNames.join('; ')}`;
-                    if (success > 0) setTimeout(() => window.location.reload(), 1500);
+                    if (success > 0 && !opts.noReload) setTimeout(() => window.location.reload(), 1500);
                 }
+                return { success, fail, failedNames, totalFiles };
             }
 
             function handleDragUpload(fileList) {
@@ -1351,13 +1402,254 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 if (files && files.length) uploadFiles(files);
             }
 
-            // 页面任意位置粘贴：有文件才拦截并弹窗确认，纯文本粘贴保持默认行为
-            document.addEventListener('paste', (e) => {
+            // ==================================================================
+            // 文件夹上传：目录遍历（拖拽/粘贴/选择框）→ 确认弹窗 → 逐个上传 → 打包 zip
+            // ==================================================================
+            function entryFile(entry) {
+                return new Promise((resolve) => {
+                    try { entry.file(resolve, () => resolve(null)); }
+                    catch (e) { resolve(null); }
+                });
+            }
+            // readEntries 每次只返回一批，必须循环读到空数组为止
+            function readAllEntries(reader) {
+                return new Promise((resolve, reject) => {
+                    const out = [];
+                    const step = () => {
+                        try {
+                            reader.readEntries((batch) => {
+                                if (!batch || batch.length === 0) { resolve(out); return; }
+                                for (let i = 0; i < batch.length; i++) out.push(batch[i]);
+                                step();
+                            }, reject);
+                        } catch (e) { reject(e); }
+                    };
+                    step();
+                });
+            }
+            async function walkEntry(entry, prefix, files, emptyDirs) {
+                if (!entry) return;
+                if (entry.isFile) {
+                    const f = await entryFile(entry);
+                    if (f) {
+                        try { f._relPath = (prefix ? prefix + '/' : '') + entry.name; } catch (e) {}
+                        files.push(f);
+                    }
+                    return;
+                }
+                if (entry.isDirectory) {
+                    const dirPath = (prefix ? prefix + '/' : '') + entry.name;
+                    let children = [];
+                    try { children = await readAllEntries(entry.createReader()); } catch (e) { children = []; }
+                    if (children.length === 0) { emptyDirs.push(dirPath); return; }
+                    for (let i = 0; i < children.length; i++) await walkEntry(children[i], dirPath, files, emptyDirs);
+                }
+            }
+            // 把若干顶层 Entry 递归收集为文件列表（保留相对路径）与空目录列表
+            async function collectEntriesFromRoots(roots) {
+                const files = [], emptyDirs = [];
+                let hasDirs = false, folderName = '文件夹';
+                for (let i = 0; i < roots.length; i++) {
+                    const root = roots[i];
+                    if (root && root.isDirectory) {
+                        hasDirs = true;
+                        if (folderName === '文件夹') folderName = root.name;
+                        let children = [];
+                        try { children = await readAllEntries(root.createReader()); } catch (e) { children = []; }
+                        if (children.length === 0) emptyDirs.push(root.name);
+                        for (let j = 0; j < children.length; j++) await walkEntry(children[j], root.name, files, emptyDirs);
+                    } else if (root && root.isFile) {
+                        await walkEntry(root, '', files, emptyDirs);
+                    }
+                }
+                return { files, emptyDirs, hasDirs, folderName };
+            }
+            async function entriesFromDataTransfer(dt) {
+                if (!dt || !dt.items || !dt.items.length) return null;
+                const roots = [];
+                for (let i = 0; i < dt.items.length; i++) {
+                    const it = dt.items[i];
+                    if (!it || it.kind !== 'file' || typeof it.webkitGetAsEntry !== 'function') continue;
+                    const ent = it.webkitGetAsEntry();
+                    if (ent) roots.push(ent);
+                }
+                if (!roots.length) return null;
+                return await collectEntriesFromRoots(roots);
+            }
+            async function entriesFromClipboard(cb) {
+                if (!cb || !cb.items || !cb.items.length) return null;
+                const roots = [];
+                for (let i = 0; i < cb.items.length; i++) {
+                    const it = cb.items[i];
+                    if (!it || it.kind !== 'file' || typeof it.webkitGetAsEntry !== 'function') continue;
+                    const ent = it.webkitGetAsEntry();
+                    if (ent) roots.push(ent);
+                }
+                if (!roots.length) return null;
+                return await collectEntriesFromRoots(roots);
+            }
+
+            // 文件夹确认弹窗（复用粘贴弹窗样式）
+            let folderPending = null;
+            function showFolderConfirm(files, emptyDirs, folderName, structureLost) {
+                folderPending = { files: files, emptyDirs: emptyDirs || [],
+                                  folderName: folderName || '文件夹', structureLost: !!structureLost };
+                const modalEl = document.getElementById('folderConfirmModal');
+                if (!modalEl) return;
+                let total = 0;
+                for (let i = 0; i < files.length; i++) total += files[i].size || 0;
+                document.getElementById('folderConfirmName').textContent = folderPending.folderName;
+                document.getElementById('folderConfirmCount').textContent = files.length;
+                document.getElementById('folderConfirmSize').textContent = fmtSize(total);
+                document.getElementById('folderConfirmEmpty').textContent =
+                    folderPending.emptyDirs.length ? ('，含 ' + folderPending.emptyDirs.length + ' 个空文件夹') : '';
+                document.getElementById('folderConfirmWarn').style.display =
+                    folderPending.structureLost ? 'block' : 'none';
+                const listEl = document.getElementById('folderFileList');
+                listEl.innerHTML = '';
+                const limit = Math.min(files.length, 50);
+                for (let i = 0; i < limit; i++) {
+                    const li = document.createElement('li');
+                    li.textContent = fileRelPath(files[i]) + ' (' + fmtSize(files[i].size) + ')';
+                    listEl.appendChild(li);
+                }
+                if (files.length > limit) {
+                    const li = document.createElement('li');
+                    li.textContent = '… 等共 ' + files.length + ' 个文件';
+                    listEl.appendChild(li);
+                }
+                modalEl.style.display = 'flex';
+            }
+            function cancelFolderUpload() {
+                folderPending = null;
+                const el = document.getElementById('folderConfirmModal');
+                if (el) el.style.display = 'none';
+            }
+            function confirmFolderUpload() {
+                const pending = folderPending;
+                cancelFolderUpload();
+                if (pending && pending.files.length > 0) uploadFolder(pending);
+            }
+            // 目录选择框（webkitdirectory）：webkitRelativePath 已含顶层文件夹名
+            function uploadFolderFromInput(fileList) {
+                if (!fileList || !fileList.length) return;
+                const files = [];
+                let rootName = '';
+                for (let i = 0; i < fileList.length; i++) {
+                    const f = fileList[i];
+                    const rel = f.webkitRelativePath || f.name;
+                    try { f._relPath = rel; } catch (e) {}
+                    if (!rootName) rootName = rel.split('/')[0];
+                    files.push(f);
+                }
+                showFolderConfirm(files, [], rootName || '文件夹', false);
+            }
+
+            // 同一文件夹（名称/文件数/总大小一致）的会话 key：刷新后重新选择可续传
+            function folderResumeKey(folderName, files, totalBytes) {
+                return 'ocs-folder:' + folderName + ':' + files.length + ':' + totalBytes;
+            }
+            // 文件夹上传主流程：init → 逐文件上传 → /zip → 轮询打包状态 → 刷新首页
+            async function uploadFolder(pending) {
+                const files = pending.files;
+                const statusEl = document.getElementById('formUploadStatus');
+                const folderName = pending.folderName || '文件夹';
+                let totalBytes = 0;
+                for (let i = 0; i < files.length; i++) totalBytes += files[i].size || 0;
+                const resumeKey = folderResumeKey(folderName, files, totalBytes);
+                let resumeId = null;
+                try { resumeId = localStorage.getItem(resumeKey); } catch (e) { resumeId = null; }
+                statusEl.textContent = '创建文件夹上传会话...';
+                let info;
+                try {
+                    const initResp = await obsFetch('/api/folder/init', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            folder_name: folderName,
+                            total_files: files.length,
+                            total_bytes: totalBytes,
+                            empty_dirs: pending.emptyDirs || [],
+                            resume_folder_id: resumeId || null
+                        })
+                    });
+                    if (!initResp.ok) { statusEl.textContent = '创建会话失败: ' + await initResp.text(); return; }
+                    info = await initResp.json();
+                } catch (e) {
+                    statusEl.textContent = '创建会话失败: ' + e;
+                    return;
+                }
+                const folderId = info.folder_id;
+                try { localStorage.setItem(resumeKey, folderId); } catch (e) {}
+                const res = await uploadFiles(files, { folderId: folderId, noReload: true });
+                if (res.fail > 0) {
+                    statusEl.textContent = `文件夹上传未完成：成功${res.success}个，失败${res.fail}个 → ${res.failedNames.join('; ')}（暂存已保留，重新选择该文件夹可续传）`;
+                    return;
+                }
+                statusEl.textContent = '文件上传完成，正在打包 zip...';
+                try {
+                    const zipResp = await obsFetch('/api/folder/' + folderId + '/zip', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ zip_name: folderName + '.zip' })
+                    });
+                    if (!zipResp.ok) { statusEl.textContent = '打包失败: ' + await zipResp.text(); return; }
+                    await pollFolderZip(folderId, resumeKey);
+                } catch (e) {
+                    statusEl.textContent = '打包失败: ' + e;
+                }
+            }
+            async function pollFolderZip(folderId, resumeKey) {
+                const statusEl = document.getElementById('formUploadStatus');
+                for (let i = 0; i < 600; i++) {
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                    try {
+                        const r = await obsFetch('/api/folder/' + folderId + '/zip/status', { cache: 'no-store' });
+                        if (!r.ok) { statusEl.textContent = '查询打包状态失败: ' + await r.text(); return; }
+                        const st = await r.json();
+                        if (st.status === 'done') {
+                            try { localStorage.removeItem(resumeKey); } catch (e) {}
+                            statusEl.textContent = `打包完成：${st.zip_name} (${fmtSize(st.zip_size || 0)})，正在刷新...`;
+                            setTimeout(() => window.location.reload(), 800);
+                            return;
+                        }
+                        if (st.status === 'failed') {
+                            statusEl.textContent = '打包失败: ' + (st.error || '未知错误') + '（暂存已保留，可重试）';
+                            return;
+                        }
+                        statusEl.textContent = '正在打包 zip...';
+                    } catch (e) {
+                        // 网络抖动：继续轮询
+                    }
+                }
+                statusEl.textContent = '打包超时，请稍后刷新页面查看结果';
+            }
+
+            // 页面任意位置粘贴：优先用 Entry API 还原文件夹结构；纯文本粘贴保持默认行为
+            document.addEventListener('paste', async (e) => {
                 const cb = (e && e.clipboardData) || window.clipboardData;
+                if (!cb) return;
+                let entRes = null;
+                try { entRes = await entriesFromClipboard(cb); } catch (err) { entRes = null; }
+                if (entRes && entRes.files.length > 0) {
+                    e.preventDefault();
+                    if (entRes.hasDirs) {
+                        showFolderConfirm(entRes.files, entRes.emptyDirs, entRes.folderName, false);
+                    } else {
+                        showPasteConfirm(entRes.files.map((f, i) => withPasteName(f, i)));
+                    }
+                    return;
+                }
                 const raw = collectPasteFiles(cb);
                 if (raw.length === 0) return;
                 e.preventDefault();
-                showPasteConfirm(raw.map((f, i) => withPasteName(f, i)));
+                const named = raw.map((f, i) => withPasteName(f, i));
+                // 单个文件保持原有粘贴弹窗；多个文件但拿不到目录结构时如实提示
+                if (named.length === 1) {
+                    showPasteConfirm(named);
+                } else {
+                    showFolderConfirm(named, [], '粘贴文件', true);
+                }
             });
 
             document.addEventListener('DOMContentLoaded', () => {
@@ -1372,7 +1664,18 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 ['dragleave', 'drop'].forEach(evt => {
                     zone.addEventListener(evt, () => { zone.style.borderColor = '#ccc'; zone.style.background = '#f9f9f9'; });
                 });
-                zone.addEventListener('drop', (e) => {
+                zone.addEventListener('drop', async (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    let entRes = null;
+                    try { entRes = await entriesFromDataTransfer(e.dataTransfer); } catch (err) { entRes = null; }
+                    if (entRes && entRes.files.length > 0) {
+                        if (entRes.hasDirs) {
+                            showFolderConfirm(entRes.files, entRes.emptyDirs, entRes.folderName, false);
+                        } else {
+                            handleDragUpload(entRes.files);
+                        }
+                        return;
+                    }
                     const files = e.dataTransfer.files;
                     if (files.length > 0) handleDragUpload(files);
                 });
@@ -1602,10 +1905,13 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
         </div>
 
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
-            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
+            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
             <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
+            <!-- 文件夹上传：webkitdirectory 让选择框可整目录选择，uploadFolderFromInput 负责遍历 -->
+            <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files)" style="display:none;">
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
+            <button type="button" onclick="document.getElementById('folderInput').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
 
@@ -1621,7 +1927,22 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 </div>
             </div>
         </div>
-        
+
+        <!-- 文件夹上传确认对话框（默认隐藏；使用位置：showFolderConfirm / cancelFolderUpload / confirmFolderUpload） -->
+        <div id="folderConfirmModal" class="paste-modal-mask" style="display:none;">
+            <div class="paste-modal">
+                <h3>检测到文件夹</h3>
+                <p>文件夹：<b id="folderConfirmName"></b></p>
+                <p>共 <b id="folderConfirmCount">0</b> 个文件，合计 <b id="folderConfirmSize">0 B</b><span id="folderConfirmEmpty"></span></p>
+                <p id="folderConfirmWarn" style="display:none; color:#c00;">粘贴只拿到文件列表、目录结构已丢失，是否继续扁平上传？</p>
+                <ul id="folderFileList" class="paste-file-list"></ul>
+                <div class="paste-modal-actions">
+                    <button type="button" class="paste-btn-cancel" onclick="cancelFolderUpload()">取消</button>
+                    <button type="button" class="paste-btn-ok" onclick="confirmFolderUpload()">上传并打包</button>
+                </div>
+            </div>
+        </div>
+
         <div class="sort-controls">
             排序方式: 
             <a href="?sort=time" class="{time_active}">按时间 (最新)</a>
@@ -1710,6 +2031,346 @@ def _scan_uploaded_parts(up_dir: str):
         uploaded = []
     return uploaded, chunk_hashes
 
+# ============================================================================
+# 文件夹上传：暂存区 / manifest / 配额 / 打包
+# 流程：/api/folder/init 建会话 → 逐文件上传到 obs/.folder-staging/<id>/data/
+#       → /api/folder/<id>/zip 后台打包 → 成功后删暂存，首页只留一个 zip
+# ============================================================================
+
+_FOLDER_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_MANIFEST_LOCK = threading.Lock()
+# 文件夹最近活动时间（folder_id -> epoch 秒）：配额清理时绝不删除活跃会话
+#   使用位置：_touch_folder / _cleanup_candidates
+_folder_activity: Dict[str, float] = {}
+_folder_activity_lock = threading.Lock()
+
+
+def _touch_folder(folder_id: str) -> None:
+    with _folder_activity_lock:
+        _folder_activity[folder_id] = time.time()
+
+
+def _folder_last_active(folder_id: str) -> float:
+    with _folder_activity_lock:
+        return _folder_activity.get(folder_id, 0.0)
+
+
+def _staging_root() -> str:
+    return os.path.join(get_upload_dir(), FOLDER_STAGING_ROOT)
+
+
+def _check_folder_id(folder_id: str) -> str:
+    """校验 folder_id 形态（uuid4().hex），避免借 folder_id 做目录穿越。"""
+    if not folder_id or not _FOLDER_ID_RE.match(folder_id):
+        raise HTTPException(status_code=400, detail="folder_id 非法")
+    return folder_id
+
+
+def _staging_dir(folder_id: str) -> str:
+    return os.path.join(_staging_root(), _check_folder_id(folder_id))
+
+
+def _staging_data_dir(folder_id: str) -> str:
+    return os.path.join(_staging_dir(folder_id), "data")
+
+
+def _manifest_path(folder_id: str) -> str:
+    return os.path.join(_staging_dir(folder_id), "manifest.json")
+
+
+def _safe_relpath(relpath: str) -> str:
+    """把浏览器给的相对路径规范化，拒绝绝对路径 / 目录穿越 / NUL 字节。
+    返回 posix 风格（/ 分隔）的相对路径。"""
+    if relpath is None:
+        raise HTTPException(status_code=400, detail="缺少 relpath")
+    if "\x00" in str(relpath):
+        raise HTTPException(status_code=400, detail="relpath 含非法字符")
+    p = str(relpath).replace("\\", "/").strip()
+    if not p:
+        raise HTTPException(status_code=400, detail="relpath 不能为空")
+    if p.startswith("/") or re.match(r"^[A-Za-z]:", p):
+        raise HTTPException(status_code=400, detail="relpath 不能是绝对路径")
+    parts = []
+    for seg in p.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            raise HTTPException(status_code=400, detail="relpath 不能包含 ..")
+        parts.append(seg)
+    if not parts:
+        raise HTTPException(status_code=400, detail="relpath 不能为空")
+    return "/".join(parts)
+
+
+def _resolve_staging_target(folder_id: str, relpath: str) -> str:
+    """规范化 relpath 并解析为暂存 data 目录下的绝对路径，确保不越界。"""
+    safe = _safe_relpath(relpath)
+    base = os.path.realpath(_staging_data_dir(folder_id))
+    target = os.path.realpath(os.path.join(base, *safe.split("/")))
+    if target == base or not target.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail="relpath 越界")
+    return target
+
+
+def _read_manifest(folder_id: str) -> Optional[dict]:
+    try:
+        with open(_manifest_path(folder_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_manifest(folder_id: str, manifest: dict) -> None:
+    """原子写 manifest（先写临时文件再 replace），避免读到半截 JSON。"""
+    path = _manifest_path(folder_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _manifest_update(folder_id: str, mutate) -> Optional[dict]:
+    """在全局锁内读-改-写 manifest；mutate(manifest) 原地修改。"""
+    with _MANIFEST_LOCK:
+        manifest = _read_manifest(folder_id)
+        if manifest is None:
+            return None
+        mutate(manifest)
+        manifest["updated_at"] = time.time()
+        _write_manifest(folder_id, manifest)
+        return manifest
+
+
+def _manifest_mark_file(folder_id: str, relpath: str, size: int, sha256: str,
+                        status: str = "done") -> None:
+    def _mut(m):
+        files = m.setdefault("files", {})
+        files[relpath] = {
+            "relpath": relpath,
+            "size": int(size or 0),
+            "sha256": sha256 or "",
+            "status": status,
+            "updated_at": time.time(),
+        }
+    _manifest_update(folder_id, _mut)
+
+
+def _manifest_stats(manifest: dict) -> dict:
+    files = manifest.get("files") or {}
+    done = sum(1 for v in files.values() if v.get("status") == "done")
+    partial = sum(1 for v in files.values() if v.get("status") != "done")
+    return {
+        "total_files": int(manifest.get("total_files") or 0),
+        "done_files": done,
+        "partial_files": partial,
+        "total_bytes": int(manifest.get("total_bytes") or 0),
+        "uploaded_bytes": sum(int(v.get("size") or 0) for v in files.values()
+                              if v.get("status") == "done"),
+    }
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _staging_total_bytes() -> int:
+    root = _staging_root()
+    if not os.path.isdir(root):
+        return 0
+    total = 0
+    for name in os.listdir(root):
+        d = os.path.join(root, name)
+        if os.path.isdir(d):
+            total += _dir_size(d)
+    return total
+
+
+def _cleanup_candidates(protect: Optional[str]) -> List[tuple]:
+    """列出可清理的暂存会话 [(last_active, folder_id, size)]，按「最久未活动」升序。
+    保护当前会话（protect）、最近仍在活跃的会话（FOLDER_ACTIVE_GRACE_SECONDS 内）以及正在打包的会话。"""
+    root = _staging_root()
+    if not os.path.isdir(root):
+        return []
+    now = time.time()
+    out = []
+    for name in os.listdir(root):
+        if name == protect:
+            continue
+        d = os.path.join(root, name)
+        if not os.path.isdir(d) or not _FOLDER_ID_RE.match(name):
+            continue
+        try:
+            mtime = os.path.getmtime(os.path.join(d, "manifest.json"))
+        except OSError:
+            try:
+                mtime = os.path.getmtime(d)
+            except OSError:
+                continue
+        last_active = max(mtime, _folder_last_active(name))
+        if now - last_active < FOLDER_ACTIVE_GRACE_SECONDS:
+            continue   # 最近仍在活动：不删
+        with _folder_jobs_lock:
+            job = _folder_jobs.get(name) or {}
+        if job.get("status") in ("queued", "running"):
+            continue   # 正在打包：不删
+        out.append((last_active, name, _dir_size(d)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _enforce_staging_quota(extra_bytes: int, protect: Optional[str] = None) -> None:
+    """确保新增 extra_bytes 后不超过 FOLDER_STAGING_LIMIT。
+    空间不足时按「最久未活动优先」清理旧会话；清理后仍不足则拒绝新会话（活跃会话绝不删除）。"""
+    if FOLDER_STAGING_LIMIT <= 0:
+        return
+    extra = max(0, int(extra_bytes or 0))
+    total = _staging_total_bytes()
+    if total + extra <= FOLDER_STAGING_LIMIT:
+        return
+    for _last_active, folder_id, size in _cleanup_candidates(protect):
+        if total + extra <= FOLDER_STAGING_LIMIT:
+            break
+        shutil.rmtree(_staging_dir(folder_id), ignore_errors=True)
+        total -= size
+        with _folder_jobs_lock:
+            _folder_jobs.pop(folder_id, None)
+        with _folder_activity_lock:
+            _folder_activity.pop(folder_id, None)
+        log_line(f"文件夹暂存配额清理：删除会话 {folder_id}（{size} 字节，最久未活动）")
+    if total + extra > FOLDER_STAGING_LIMIT:
+        raise HTTPException(
+            status_code=507,
+            detail="暂存区空间不足（上限 %d 字节），请等待当前上传/打包完成或稍后重试" % FOLDER_STAGING_LIMIT,
+        )
+
+
+def _sanitize_zip_name(zip_name: Optional[str], folder_name: str) -> str:
+    """生成安全的 zip 文件名：去掉路径分隔符与控制字符，补齐 .zip 后缀。"""
+    raw = (zip_name or "").strip() or (folder_name or "").strip() or "folder"
+    raw = raw.replace("\\", "/").split("/")[-1]
+    raw = re.sub(r"[\x00-\x1f\x7f]", "", raw).strip().strip(".")
+    if not raw:
+        raw = "folder"
+    if not raw.lower().endswith(".zip"):
+        raw += ".zip"
+    return raw
+
+
+def _unique_zip_path(upload_dir: str, zip_name: str) -> str:
+    """同名 zip 已存在时追加时间戳后缀，避免静默覆盖已有文件。"""
+    candidate = os.path.join(upload_dir, zip_name)
+    if not os.path.exists(candidate):
+        return candidate
+    stem, ext = os.path.splitext(zip_name)
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    candidate = os.path.join(upload_dir, f"{stem}-{stamp}{ext}")
+    n = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(upload_dir, f"{stem}-{stamp}-{n}{ext}")
+        n += 1
+    return candidate
+
+
+def _free_disk_bytes() -> int:
+    try:
+        return shutil.disk_usage(get_upload_dir()).free
+    except OSError:
+        return 0
+
+
+def _pack_folder_sync(folder_id: str, zip_name: str) -> dict:
+    """把暂存 data 目录打包成 zip（阻塞，调用方 offload 到线程）。
+    校验：zip 可打开、文件条目数与 manifest 完成数一致、大小 > 0；成功后删除暂存目录。"""
+    manifest = _read_manifest(folder_id)
+    if manifest is None:
+        raise RuntimeError("manifest 不存在")
+    data_dir = _staging_data_dir(folder_id)
+    if not os.path.isdir(data_dir):
+        raise RuntimeError("暂存数据目录不存在")
+    expected = int(manifest.get("total_files") or 0)
+    done = sum(1 for v in (manifest.get("files") or {}).values() if v.get("status") == "done")
+    if expected and done < expected:
+        raise RuntimeError(f"仍有文件未上传完成（{done}/{expected}），暂不打包")
+    empty_dirs = [d for d in (manifest.get("empty_dirs") or []) if isinstance(d, str)]
+
+    upload_dir = get_upload_dir()
+    os.makedirs(upload_dir, exist_ok=True)
+    final_path = _unique_zip_path(upload_dir, zip_name)
+    tmp_path = os.path.join(_staging_dir(folder_id), ".packing.zip.tmp")
+
+    file_count = 0
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED,
+                             allowZip64=True) as zf:
+            for root, _dirs, files in os.walk(data_dir):
+                for name in files:
+                    src = os.path.join(root, name)
+                    arc = os.path.relpath(src, data_dir).replace(os.sep, "/")
+                    zf.write(src, arcname=arc)
+                    file_count += 1
+            # 空目录写成显式目录条目，解压后目录结构才完整
+            for d in empty_dirs:
+                safe = _safe_relpath(d)
+                zf.writestr(safe.rstrip("/") + "/", b"")
+        size = os.path.getsize(tmp_path)
+        if size <= 0:
+            raise RuntimeError("打包产物为空")
+        # 校验：可打开、无损坏条目、文件条目数与 manifest 完成数一致
+        with zipfile.ZipFile(tmp_path, "r") as zf:
+            names = zf.namelist()
+            actual_files = sum(1 for n in names if not n.endswith("/"))
+            if zf.testzip() is not None:
+                raise RuntimeError("zip 校验失败（存在损坏条目）")
+        if expected and actual_files != expected:
+            raise RuntimeError(f"zip 文件数 {actual_files} 与 manifest 完成数 {expected} 不一致")
+        os.replace(tmp_path, final_path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    # 打包成功：清理暂存（源文件夹不再保留）
+    shutil.rmtree(_staging_dir(folder_id), ignore_errors=True)
+    with _folder_activity_lock:
+        _folder_activity.pop(folder_id, None)
+    log_line(f"文件夹打包完成 folder={manifest.get('folder_name')} zip={os.path.basename(final_path)} "
+             f"files={file_count} size={size}")
+    return {"zip_name": os.path.basename(final_path), "zip_path": final_path, "zip_size": size,
+            "file_count": file_count, "folder_name": manifest.get("folder_name")}
+
+
+async def _run_pack_job(folder_id: str, zip_name: str) -> None:
+    with _folder_jobs_lock:
+        _folder_jobs[folder_id] = {"status": "running", "zip_name": zip_name,
+                                   "started_at": time.time()}
+    try:
+        result = await asyncio.to_thread(_pack_folder_sync, folder_id, zip_name)
+        with _folder_jobs_lock:
+            _folder_jobs[folder_id] = {"status": "done", "zip_name": result["zip_name"],
+                                       "zip_size": result["zip_size"],
+                                       "file_count": result["file_count"],
+                                       "url": "/" + quote(result["zip_name"]),
+                                       "finished_at": time.time()}
+        log_line(f"文件夹打包任务成功 folder_id={folder_id} zip={result['zip_name']}")
+    except Exception as e:
+        with _folder_jobs_lock:
+            _folder_jobs[folder_id] = {"status": "failed", "zip_name": zip_name,
+                                       "error": str(e), "finished_at": time.time()}
+        log_line(f"文件夹打包任务失败 folder_id={folder_id} error={e}")
+
 @app.post("/upload/init")
 async def upload_init(request: Request):
     data = await request.json()
@@ -1725,16 +2386,36 @@ async def upload_init(request: Request):
     chunk_dir = getattr(request.app.state, "chunk_dir", get_chunk_dir())
     os.makedirs(upload_dir, exist_ok=True)
     os.makedirs(chunk_dir, exist_ok=True)
-    final_path = os.path.join(upload_dir, filename)
+    # 文件夹上传：目标路径改为暂存区 data/<relpath>（否则仍走首页根目录）
+    folder_id = (data.get("folder_id") or "").strip() or None
+    relpath = data.get("relpath") or filename
+    if folder_id:
+        _check_folder_id(folder_id)
+        if _read_manifest(folder_id) is None:
+            raise HTTPException(status_code=404, detail="文件夹会话不存在")
+        relpath = _safe_relpath(relpath)
+        _touch_folder(folder_id)
+        final_path = _resolve_staging_target(folder_id, relpath)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        target_name = f"{folder_id}/{relpath}"
+    else:
+        final_path = os.path.join(upload_dir, filename)
+        target_name = filename
     if os.path.exists(final_path) and os.path.getsize(final_path) == size:
         # 进行秒传校验（按同一分片大小重算指纹，流式读取不占内存）
         if hash_algo == "sha256":
             existing_hash = await asyncio.to_thread(chunk_fingerprint, final_path, chunk_size)
             if existing_hash == file_hash:
-                url = f"{url_head}/{filename}"
-                log_line(f"秒传命中 file={filename} size={size} chunks={total_chunks}")
-                return JSONResponse({"skip": True, "url": url})
-    upload_id = make_upload_id(filename, size, hash_algo, file_hash)
+                if folder_id:
+                    _manifest_mark_file(folder_id, relpath, size, file_hash, status="done")
+                    url = f"/api/folder/{folder_id}/file/{quote(relpath, safe='/')}"
+                    log_line(f"文件夹秒传命中 folder={folder_id} file={relpath} size={size} chunks={total_chunks}")
+                else:
+                    url = f"{url_head}/{filename}"
+                    log_line(f"秒传命中 file={filename} size={size} chunks={total_chunks}")
+                return JSONResponse({"skip": True, "url": url,
+                                     "folder_id": folder_id, "relpath": relpath if folder_id else None})
+    upload_id = make_upload_id(target_name, size, hash_algo, file_hash)
     up_dir = os.path.join(chunk_dir, upload_id)
     os.makedirs(up_dir, exist_ok=True)
 
@@ -1749,14 +2430,21 @@ async def upload_init(request: Request):
             "overall_hash_computed": False,
             "file_hash_obj": hashlib.sha256() if hash_algo == "sha256" else None,
             "total_chunks": total_chunks,
-            "uploaded_chunks": set(uploaded)
+            "uploaded_chunks": set(uploaded),
+            "folder_id": folder_id,
+            "relpath": relpath if folder_id else None,
         }
-    
+
+    if folder_id:
+        _manifest_mark_file(folder_id, relpath, size, file_hash or "", status="partial")
+
     return JSONResponse({
         "uploadId": upload_id,
         "uploaded": sorted(uploaded),
         "totalChunks": total_chunks,
         "chunkSize": chunk_size,
+        "folder_id": folder_id,
+        "relpath": relpath if folder_id else None,
     })
 
 @app.put("/upload/chunk/{upload_id}/{index}")
@@ -1774,6 +2462,8 @@ async def upload_chunk(upload_id: str, index: int, request: Request):
         session = upload_sessions.get(upload_id)
     if session and session["total_chunks"] and index >= session["total_chunks"]:
         raise HTTPException(status_code=400, detail=f"分片序号 {index} 超出总数 {session['total_chunks']}")
+    if session and session.get("folder_id"):
+        _touch_folder(session["folder_id"])
 
     try:
         # 写入文件
@@ -1858,6 +2548,20 @@ async def upload_complete(upload_id: str, request: Request):
             status_code=409,
             detail=f"上传会话不匹配：会话分片数 {session['total_chunks']}，本次声明 {total_chunks}"
         )
+    # 文件夹上传：最终落点改为暂存区 data/<relpath>（会话里记录的优先，防止客户端漏传）
+    folder_id = (data.get("folder_id") or "").strip() or None
+    relpath = data.get("relpath") or filename
+    if session:
+        if not folder_id and session.get("folder_id"):
+            folder_id = session["folder_id"]
+        if session.get("relpath"):
+            relpath = session["relpath"]
+    if folder_id:
+        _check_folder_id(folder_id)
+        if _read_manifest(folder_id) is None:
+            raise HTTPException(status_code=404, detail="文件夹会话不存在")
+        relpath = _safe_relpath(relpath)
+        _touch_folder(folder_id)
     # 校验分片完整
     for i in range(total_chunks):
         if not os.path.exists(os.path.join(up_dir, f"{i}.part")):
@@ -1888,10 +2592,14 @@ async def upload_complete(upload_id: str, request: Request):
             if actual_hash != file_hash:
                 raise HTTPException(status_code=422, detail="文件指纹校验失败")
         
-        # 移动到最终位置
-        final_path = os.path.join(upload_dir, filename)
+        # 移动到最终位置（文件夹上传 → 暂存区 data/<relpath>）
+        if folder_id:
+            final_path = _resolve_staging_target(folder_id, relpath)
+            os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        else:
+            final_path = os.path.join(upload_dir, filename)
         os.replace(tmp_path, final_path)
-        
+
         # 清理分片和会话
         try:
             for i in range(total_chunks):
@@ -1900,12 +2608,18 @@ async def upload_complete(upload_id: str, request: Request):
             os.rmdir(up_dir)
         except Exception:
             pass
-        
+
         # 清理会话
         with SESSION_LOCK:
             if upload_id in upload_sessions:
                 del upload_sessions[upload_id]
-        
+
+        if folder_id:
+            _manifest_mark_file(folder_id, relpath, size, file_hash or "", status="done")
+            url = f"/api/folder/{folder_id}/file/{quote(relpath, safe='/')}"
+            log_line(f"上传完成(文件夹分片) folder={folder_id} file={relpath} size={size} chunks={total_chunks}")
+            return JSONResponse({"ok": True, "url": url, "filename": filename,
+                                 "folder_id": folder_id, "relpath": relpath})
         url = f"/obs/{quote(filename)}"
         log_line(f"上传完成(分片) file={filename} size={size} chunks={total_chunks} -> {final_path}")
         return JSONResponse({"ok": True, "url": url, "filename": filename})
@@ -1915,6 +2629,180 @@ async def upload_complete(upload_id: str, request: Request):
     except Exception as e:
         log_line(f"上传失败(分片合并) file={filename} error={e}")
         raise HTTPException(status_code=500, detail=f"合并失败: {str(e)}")
+
+# ============================================================================
+# 文件夹上传 API：init / manifest / 文件直传 / 打包 / 打包状态
+# 注意：这些路由都带 /api/folder 前缀且为多段路径，不会与 /{filename} 冲突
+# ============================================================================
+
+@app.post("/api/folder/init")
+async def folder_init(request: Request):
+    """创建（或复用）文件夹上传会话，返回 folder_id。
+    前端把 folder_id 传入后续的单文件/分片上传接口，文件落到暂存区。"""
+    data = await request.json()
+    folder_name = (data.get("folder_name") or "").strip() or "folder"
+    total_files = int(data.get("total_files", 0))
+    total_bytes = int(data.get("total_bytes", 0))
+    empty_dirs_raw = data.get("empty_dirs") or []
+    if total_files <= 0 and not empty_dirs_raw:
+        raise HTTPException(status_code=400, detail="文件夹为空")
+    if total_files < 0 or total_bytes < 0:
+        raise HTTPException(status_code=400, detail="参数非法")
+    empty_dirs = []
+    for d in empty_dirs_raw:
+        try:
+            empty_dirs.append(_safe_relpath(d))
+        except HTTPException:
+            continue
+
+    # 断点续传：前端把上次的 folder_id 存在 localStorage，重新选同一文件夹时带上
+    resume_id = (data.get("resume_folder_id") or "").strip() or None
+    if resume_id and _FOLDER_ID_RE.match(resume_id):
+        manifest = _read_manifest(resume_id)
+        if (manifest is not None
+                and int(manifest.get("total_files") or 0) == total_files
+                and int(manifest.get("total_bytes") or 0) == total_bytes
+                and manifest.get("status") == "uploading"):
+            _touch_folder(resume_id)
+            await asyncio.to_thread(_enforce_staging_quota, 0, resume_id)
+            stats = _manifest_stats(manifest)
+            log_line(f"文件夹上传会话复用 folder={folder_name} id={resume_id} "
+                     f"done={stats['done_files']}/{stats['total_files']}")
+            return JSONResponse({"folder_id": resume_id, "folder_name": manifest.get("folder_name"),
+                                 "total_files": total_files, "total_bytes": total_bytes,
+                                 "empty_dirs": manifest.get("empty_dirs") or [],
+                                 "resume": True, **stats})
+
+    # 配额：按预计总大小检查，必要时按「最久未活动优先」清理旧会话
+    await asyncio.to_thread(_enforce_staging_quota, total_bytes, None)
+
+    folder_id = uuid.uuid4().hex
+    os.makedirs(_staging_data_dir(folder_id), exist_ok=True)
+    manifest = {
+        "folder_id": folder_id,
+        "folder_name": folder_name,
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "empty_dirs": sorted(set(empty_dirs)),
+        "files": {},
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "uploading",
+    }
+    _write_manifest(folder_id, manifest)
+    _touch_folder(folder_id)
+    log_line(f"文件夹上传会话创建 folder={folder_name} id={folder_id} "
+             f"files={total_files} bytes={total_bytes} empty_dirs={len(empty_dirs)}")
+    return JSONResponse({"folder_id": folder_id, "folder_name": folder_name,
+                         "total_files": total_files, "total_bytes": total_bytes,
+                         "empty_dirs": manifest["empty_dirs"], "resume": False,
+                         **_manifest_stats(manifest)})
+
+
+@app.get("/api/folder/{folder_id}/manifest")
+async def folder_manifest(folder_id: str):
+    """查询文件夹上传进度（已完成/未完成文件、字节数、空目录）。"""
+    _check_folder_id(folder_id)
+    manifest = _read_manifest(folder_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="文件夹会话不存在")
+    stats = _manifest_stats(manifest)
+    return JSONResponse({**manifest, **stats})
+
+
+@app.put("/api/folder/{folder_id}/file/{relpath:path}")
+async def folder_file_put(folder_id: str, relpath: str, request: Request):
+    """文件夹内单文件直传（≤10MB 走此路径）：写入暂存区，可选 X-File-SHA256 整段校验。"""
+    _check_folder_id(folder_id)
+    if _read_manifest(folder_id) is None:
+        raise HTTPException(status_code=404, detail="文件夹会话不存在")
+    safe = _safe_relpath(relpath)
+    save_path = _resolve_staging_target(folder_id, safe)
+    expected_hash = (request.headers.get("x-file-sha256") or "").strip().lower()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    try:
+        async with aiofiles.open(save_path, "wb") as out_file:
+            total_written = 0
+            async for chunk in request.stream():
+                await out_file.write(chunk)
+                total_written += len(chunk)
+                if MAX_UPLOAD_SIZE is not None and total_written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件过大")
+        if expected_hash:
+            actual_hash = await asyncio.to_thread(file_sha256, save_path)
+            if actual_hash != expected_hash:
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
+                log_line(f"上传失败(文件夹PUT-校验) folder={folder_id} file={safe} 整段 SHA-256 不一致")
+                raise HTTPException(status_code=400, detail="整段 SHA-256 校验失败")
+        recorded = expected_hash or await asyncio.to_thread(file_sha256, save_path)
+        _manifest_mark_file(folder_id, safe, total_written, recorded, status="done")
+        _touch_folder(folder_id)
+        log_line(f"上传完成(文件夹PUT) folder={folder_id} file={safe} bytes={total_written}")
+        return Response(content=f"/api/folder/{folder_id}/file/{quote(safe, safe='/')}",
+                        media_type="text/plain", status_code=201)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_line(f"上传失败(文件夹PUT) folder={folder_id} file={safe} error={e}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@app.post("/api/folder/{folder_id}/zip")
+async def folder_zip(folder_id: str, request: Request):
+    """后台把暂存文件夹打包成单个 zip；成功后删除暂存目录，首页只留下一份 zip。"""
+    _check_folder_id(folder_id)
+    manifest = _read_manifest(folder_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="文件夹会话不存在")
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    zip_name = _sanitize_zip_name(data.get("zip_name"), manifest.get("folder_name") or "folder")
+    stats = _manifest_stats(manifest)
+    if stats["total_files"] and stats["done_files"] < stats["total_files"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"仍有文件未上传完成（{stats['done_files']}/{stats['total_files']}），暂不打包",
+        )
+    # 打包前检查磁盘余量（源 + zip 保守 ×2）
+    source_size = await asyncio.to_thread(_dir_size, _staging_data_dir(folder_id))
+    need = source_size * 2 + 16 * 1024 * 1024
+    free = await asyncio.to_thread(_free_disk_bytes)
+    if free and free < need:
+        raise HTTPException(status_code=507, detail=f"磁盘空间不足（需要约 {need} 字节，剩余 {free} 字节）")
+    with _folder_jobs_lock:
+        existing = _folder_jobs.get(folder_id)
+        if existing and existing.get("status") in ("queued", "running"):
+            return JSONResponse({"status": existing["status"], "folder_id": folder_id,
+                                 "zip_name": existing.get("zip_name")})
+        _folder_jobs[folder_id] = {"status": "queued", "zip_name": zip_name,
+                                   "queued_at": time.time()}
+    _manifest_update(folder_id, lambda m: m.__setitem__("status", "packing"))
+    _touch_folder(folder_id)
+    asyncio.create_task(_run_pack_job(folder_id, zip_name))
+    log_line(f"文件夹打包任务已排队 folder={manifest.get('folder_name')} id={folder_id} zip={zip_name}")
+    return JSONResponse({"status": "started", "folder_id": folder_id, "zip_name": zip_name})
+
+
+@app.get("/api/folder/{folder_id}/zip/status")
+async def folder_zip_status(folder_id: str):
+    """查询打包进度；完成后返回 zip 名称/大小/下载地址。"""
+    _check_folder_id(folder_id)
+    with _folder_jobs_lock:
+        job = dict(_folder_jobs.get(folder_id) or {})
+    if not job:
+        manifest = _read_manifest(folder_id)
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="文件夹会话不存在")
+        stats = _manifest_stats(manifest)
+        return JSONResponse({"status": "idle", "folder_id": folder_id, **stats})
+    return JSONResponse({"folder_id": folder_id, **job})
 
 @app.post("/")
 async def upload_file_form(request: Request):

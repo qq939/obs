@@ -23,15 +23,16 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 域名 | **`http://ocs.dimond.top`**（= `http://dimond.top:19082` = 宿主机 `http://localhost:19082` = 容器内 `http://localhost:8082`） |
 | 端口 | `8082`（容器内部） |
 | 主程序 | `src/obs/server.py`（FastAPI） |
-| 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
+| 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」「上传文件夹」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `http://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
 | 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
 | Office 预览 | **不依赖 LibreOffice/Office 套件**：`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，转 HTML 经 `/preview-content/{filename:path}` 供 `<iframe>` 内嵌；仅这 5 种后缀且 ≤25MB 可转，其余退化占位（思路参考 `qq939/interview-jobfinder`） |
+| 文件夹上传 | **网盘式**：选择（`webkitdirectory`）/拖拽/粘贴（`webkitGetAsEntry()` 递归）→ 暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包成**一个 zip** → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理 |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
 | 启动脚本 | `user_start.sh`（被 `start.sh` 调用） |
 | 启动日志 | `logs/start.log`；运行日志 `logs/server.log`；问答日志 `logs/agent_tui.log` |
-| 存储目录 | `obs/`（文件 + `.chunks/` 分片）、`obs_shards/`（HLS 产物） |
+| 存储目录 | `obs/`（文件 + `.chunks/` 分片 + `.folder-staging/` 文件夹暂存）、`obs_shards/`（HLS 产物） |
 | Claude 入口 | `run_claude.js`（**禁止直接调 claude CLI**） |
 | 上游源仓库 | `https://github.com/qq939/obs.git`（obs）；`tools/obs-video/`（视频应用） |
 
@@ -68,7 +69,12 @@ GET  /hls/{name}/seg-NNNNN.ts             HLS 分片
 POST /upload/init                         分片上传初始化（sha256+size 断点续传/秒传）
 PUT  /upload/chunk/{id}/{index}           上传分片
 POST /upload/status/{id}                  查询上传进度
-POST /upload/complete/{id}                合并完成
+POST /upload/complete/{id}                合并完成（文件夹上传时 body 带 folder_id+relpath）
+POST /api/folder/init                     文件夹会话 -> {folder_id}（可带 resume_folder_id 续传）
+GET  /api/folder/{id}/manifest            文件夹上传进度（done/partial/bytes/empty_dirs）
+PUT  /api/folder/{id}/file/{relpath:path} 文件夹内单文件直传（≤10MB，可选 X-File-SHA256）
+POST /api/folder/{id}/zip                 后台打包成一个 zip（{zip_name?}）
+GET  /api/folder/{id}/zip/status          打包状态（queued/running/done/failed）
 POST /                                    表单上传
 PUT  /{filename}                          简单上传（流式）
 GET  /obs/{filename}                      访问/播放 obs 下文件（内联；预览页内嵌用）
@@ -109,6 +115,8 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 3. 功能自测：`/health` → `/`（文件页）→ `/video` → `/videos` → `PUT /x` → `GET /obs/x` → `DELETE /x`；
    预览：`GET /preview/<可预览文件>` 返回 200 且含 `class="btn-download"`，`GET /preview/..%2F..%2Fetc%2Fpasswd` 返回 404；
    Office：`GET /preview-content/<docx|xlsx|xls|pptx>` 返回 `text/html`（含 `<table>`/正文），不支持的 office 后缀返回 404。
+   文件夹：`POST /api/folder/init` → `PUT /api/folder/{id}/file/...`（小文件）/`/upload/*`（>10MB 带 `folder_id`+`relpath`）→ `GET /manifest` 计数一致 →
+   `POST /zip` → 轮询 `/zip/status` 到 `done` → 解压核对层级/文件数/空目录/md5，并确认 `obs/.folder-staging/{id}` 已删除、首页只剩 zip。
 4. 跑回归：`python3 -m pytest test_server.py test_resumable.py src/obs/test_*.py -q`（需 ffmpeg 的用例可能跳过）。
 5. 更新 `README.md` / `SKILL.md`；`git add -A && git commit`，记录 `logs/commit.txt`。
 
@@ -132,6 +140,10 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   `office_html_cached()` 按 `mtime+size` 内存缓存（失败也缓存），转换经 `asyncio.to_thread` 下放；仅 `OFFICE_CONVERTIBLE_EXTS`（`docx xlsx xlsm xls pptx`）且 ≤`OFFICE_MAX_BYTES=25MB` 才转换。
   `GET /preview-content/{filename:path}` 把片段包成独立 HTML 文档（`text/html`）供 `<iframe>` 内嵌；无解析器的 `doc/ppt/odt/ods/odp/rtf` 一律退化为下载占位。
   依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`（**不要**再装 LibreOffice）。思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe）。
+- **文件夹上传**：前端 `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，文件名取 `file._relPath || file.webkitRelativePath || file.name`；
+  目录遍历用 `entryFile`/`readAllEntries`/`walkEntry`（`readEntries()` 必须循环读到空数组）；后端暂存 `_staging_*` 系列函数 + `manifest.json`，`_safe_relpath()` 防穿越，
+  `_pack_folder_sync()` 用 `zipfile` 写 `.packing.zip.tmp` 并校验后 `os.replace`，**成功才** `rmtree` 暂存；`_enforce_staging_quota()` 按最久未活动清理且保护活跃/打包中会话；
+  新路由 `/api/folder/...` 为多段路径，仍须放在泛匹配 `/{filename}` 之前声明。
 - **ffmpeg**：`bin/ffmpeg`、`bin/ffprobe` 由 `scripts/install_ffmpeg.sh` 获取；`user_start.sh` 自动加入 PATH。
 - **端口**：默认 8082（`PORT` 环境变量可覆盖）。
 - **Hub 注册**：按 `systemreadme.md` §三 POST 到 `http://host.docker.internal:19081/api/tools`，
@@ -155,6 +167,11 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | `/video` 404 | 缺 `src/obs/video_static/` | 补齐 `index.html/app.js/style.css/vendor/hls.min.js` |
 | `/ask/claude` 500 | claude CLI / 环境未就绪 | 查 `logs/agent_tui.log`；确认 `ANTHROPIC_*` 与 `run_claude.js` |
 | 页面错乱 | 路由顺序被 `/{filename}` 抢占 | 具体路由必须定义在泛匹配 `/{filename}` 之前 |
+| 文件夹上传 507 | 暂存超 `FOLDER_STAGING_LIMIT`（默认 200GB），剩余会话均活跃/打包中 | 等上传/打包完成再试或调大上限；查 `obs/.folder-staging/` 遗留会话 |
+| 文件夹打包 409 | `done_files < total_files` | 查 `/api/folder/{id}/manifest`，先补齐缺失文件再 `POST /zip` |
+| 文件夹 relpath 400 | 含 `..`/绝对路径/盘符/NUL | 前端传 `webkitRelativePath` 或 `getAsEntry()` 递归得到的相对路径 |
+| 文件夹打包 `failed` | zip 校验失败（条目数不符/损坏/空）或磁盘不足 | 暂存保留，修复后重新 `POST /zip`；日志见 `logs/server.log` |
+| 文件夹刷新后重传 | `ocs-folder:*` localStorage 或服务端会话丢失/被清理 | 重新选同一文件夹走 `resume_folder_id`；会话被配额清理则只能重传 |
 
 ## 参考
 
