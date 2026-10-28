@@ -6,10 +6,10 @@
 
 - **技术栈**：Python 3 + FastAPI + uvicorn（`src/obs/server.py`），前端原生 JS + hls.js
 - **项目根目录**：`/home/agent/.claude/workspace/project`
-- **域名 / 端口**：对外访问 **`http://ocs.dimond.top`**（= 宿主机 `http://localhost:19082` = `http://dimond.top:19082`；容器内 `http://localhost:8082`）
+- **域名 / 端口**：对外访问 **`https://ocs.dimond.top`**（反代终止 TLS；http 访问会 301 跳转 https）= 宿主机 `http://localhost:19082` = 容器内 `http://localhost:8082`
 - **启动脚本**：`user_start.sh`（由 `start.sh` 在容器启动时调用）
 - **启动日志**：`logs/start.log`；问答日志：`logs/agent_tui.log`；应用日志：`logs/server.log`
-- **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`http://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
+- **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`https://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
 - **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件（见 §3.2）
 
 ---
@@ -29,7 +29,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/        # 200（�
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/video   # 200（视频流页面）
 ```
 
-浏览器：**`http://ocs.dimond.top/`**（文件托管，默认页） / **`http://ocs.dimond.top/video`**（视频流）。
+浏览器：**`https://ocs.dimond.top/`**（文件托管，默认页） / **`https://ocs.dimond.top/video`**（视频流）。
 容器内自测可用 `http://127.0.0.1:8082/`。
 
 依赖清单见 `requirements.txt`（fastapi / uvicorn[standard] / aiofiles / python-dotenv / python-multipart 等）。
@@ -112,11 +112,12 @@ project/
 
 ### 3.1 上传 / 下载地址回退（直连加速 vs 域名）
 
-页面所有**上传与下载**请求都遵循同一策略：**先试直连 `http://localhost:19082`（可能更快），不可达再回退域名 `http://ocs.dimond.top`**。
-两者指向同一服务，仅为加速；**页面文字只展示域名 `http://ocs.dimond.top`**，直连地址不出现在网页上。
+页面所有**上传与下载**请求都遵循同一策略：**先试直连 `http://localhost:19082`（可能更快），不可达再回退域名 `https://ocs.dimond.top`**。
+两者指向同一服务，仅为加速；**页面文字只展示域名 `https://ocs.dimond.top`**，直连地址不出现在网页上。
+回退必须用 **https**：页面本身是 https，向 http 域名发 `fetch`/XHR 会被浏览器按混合内容拦截。
 
 - **下载 / 打开**：页面加载后用已缓存的 `obsBase()` 结果**一次性改写**所有 `a[data-name]` 的 `href`
-  （`applyDownloadHosts()`）：可达 `http://localhost:19082` → 用 localhost；不可达 → 回退 `http://ocs.dimond.top`；都不可达 → 相对当前 origin。
+  （`applyDownloadHosts()`）：可达 `http://localhost:19082` → 用 localhost；不可达 → 回退 `https://ocs.dimond.top`；都不可达 → 相对当前 origin。
   **不在点击回调里做异步探测**——程序化 `a.click()` 发生在用户手势之外会被浏览器当弹窗拦截（曾导致「点击没反应、必须复制链接粘贴」）；
   改写 href 后点击走**原生跳转**，服务端响应带 `Content-Disposition: attachment`，原生跳转即直接下载。
 - **上传 / 接口**：首页与 `/video` 页内 `obsBase()` 在页面加载时预热探测，缓存首个可达 host（`localhost:19082` 优先，回退 `ocs.dimond.top`，都不可达则用当前页 origin）；
@@ -124,9 +125,9 @@ project/
 - **跨域**：页面 origin 与请求 host 可能不同（如从 `ocs.dimond.top` 载入却请求 `localhost:19082`），
   故服务端启用了 `CORSMiddleware`（`allow_origins=["*"]`），否则分片上传的预检（`PUT` + `X-Chunk-SHA256`）会被浏览器拦截。
 
-> `ocs.dimond.top` = `dimond.top:19082` = 宿主机 `localhost:19082` = 容器内 `localhost:8082`，四者指向同一服务。
-> 页面文字（首页标题/说明、`/video` 设置页）统一展示域名 `http://ocs.dimond.top`。
-> 服务端生成的链接/示例前缀 `url_head = "http://ocs.dimond.top"`。
+> `ocs.dimond.top`（https，反代终止 TLS）= 宿主机 `localhost:19082` = 容器内 `localhost:8082`，指向同一服务。
+> 页面文字（首页标题/说明、`/video` 设置页）统一展示域名 `https://ocs.dimond.top`。
+> 服务端生成的链接/示例前缀 `url_head = "https://ocs.dimond.top"`。
 
 ### 3.2 文件预览页（`/preview/{filename:path}`）
 
@@ -170,10 +171,13 @@ pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 
 **前端（`src/obs/server.py` 内联 JS）**
 
-- **多选目录**：安全上下文（`localhost`/HTTPS）优先用 `showDirectoryPicker({multiple:true})` 一次选多个文件夹；
-  非安全上下文（如 `http://ocs.dimond.top`）回退 `<input type="file" webkitdirectory directory multiple>`（浏览器只允许一次选一个目录），
-  选完在弹窗点醒目的「**＋ 继续添加文件夹（已选 N 个）**」可反复追加，达到同样的多选效果；弹窗顶部会明确提示当前页面为何不能一次多选，
-  并给出改用 `http://localhost:19082`（安全上下文）直接多选的建议。拖拽多个文件夹天然支持。
+- **多选目录**：站点 `https://ocs.dimond.top` 属安全上下文，可用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**
+  （`showDirectoryPicker` 没有 `multiple` 选项，一次只返回一个目录，`<input webkitdirectory multiple>` 同样只选一个目录）。因此提供三种多选方式：
+  1. **选父文件夹 → 勾选多个子文件夹**：弹窗自动列出该文件夹下的直接子文件夹（名称/文件数/大小/空目录），勾选后**每个子文件夹分别打包一个 zip**；
+     根目录下的散文件在拆分时直接上传；不勾选则整个文件夹打包成一个 zip；
+  2. 点醒目的「**＋ 继续添加文件夹（已选 N 个）**」从其他位置逐个追加；
+  3. 直接把**多个文件夹一次拖到页面**（`DataTransfer` 可同时携带多个目录），粘贴同理。
+  非安全上下文（如 `http://<局域网IP>`）回退隐藏 input；弹窗顶部会按当前环境给出对应提示。
 - **选择目录回退**：隐藏 input 选中后用 `webkitRelativePath` 作为相对路径，按首段自动分组；`FileSystemDirectoryHandle` 遍历同样按顶层目录分组。
 - **拖拽目录**：`drop` 事件用 `dataTransfer.items[i].webkitGetAsEntry()` 拿到多个目录 Entry，递归 `readEntries()`（每次只返回一批，需循环读到空）遍历所有层级；
   拿不到 Entry API 时回退为扁平 `dataTransfer.files`。
@@ -181,8 +185,9 @@ pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
   确认弹窗会**如实提示**「粘贴只拿到 X 个文件、目录结构已丢失，是否继续扁平上传？」。纯文本粘贴保持浏览器默认行为。
 - **上传**：按顶层文件夹分组，逐个创建会话并复用现有单文件直传（≤10MB，`PUT ...` + `X-File-SHA256`）与分片上传（>10MB，`/upload/init` + `/upload/chunk` + `/upload/complete`，带 `folder_id` + `relpath`）；
   进度与失败信息显示 `[i/N] 文件夹名` 与 **relpath**。顶层散文件直接上传，不参与打包。
-- **确认弹窗**：展示已选文件夹**逐项列表**（名称、文件数、大小、空目录数，可点 `×` 单独移除）、文件总数、总大小；「继续添加文件夹」高亮并显示已选数量，
-  确认按钮在多选时显示「上传并打包（N 个文件夹）」；重复选择同一文件夹自动去重；扁平回退时额外显示结构丢失警告。
+- **确认弹窗**：展示已选文件夹**逐项列表**（名称、文件数、大小、空目录数，可点 `×` 单独移除）与**子文件夹勾选列表**（勾选项分别打包），
+  以及文件总数/总大小（拆分模式下按勾选项统计）；「继续添加文件夹」高亮并显示已选数量，确认按钮显示「上传并打包（N 个文件夹 / N 个 zip）」；
+  重复选择同一文件夹自动去重；扁平回退时额外显示结构丢失警告。
 - **续传**：`localStorage` 以 `ocs-folder:{文件夹名}:{文件数}:{总字节}:{首个文件相对路径}` 记住每个文件夹的 `folder_id`，刷新/断网后重新选择同一文件夹会命中服务端会话继续传。
 
 **后端（暂存区 `obs/.folder-staging/{folder_id}/`）**
@@ -246,7 +251,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-09-27 08:07:33 | R3 | **「8082 端口部署：`https://github.com/qq939/obs.git` 的 main 分支」** |
 | 2026-09-27 08:13:40 | R4 | **纠正默认页**：「默认页面是文件存储页面，`/video` 才是视频流页面」 |
 | 2026-09-27 08:14:22 | R5 | `hi`（探活） |
-| 2026-09-27 09:08:11 | R6 | **域名与下载策略**：域名 `http://ocs.dimond.top`；网页文字改用域名；下载先试 `http://localhost:19082`、失败回退 `http://ocs.dimond.top` |
+| 2026-09-27 09:08:11 | R6 | **域名与下载策略**：域名 `https://ocs.dimond.top`；网页文字改用域名；下载先试 `http://localhost:19082`、失败回退 `https://ocs.dimond.top` |
 | 2026-09-27 09:13~09:51 | R7 | 迭代细化域名/回退（上传下载统一先 `localhost:19082` 再域名；`obsBase()/obsFetch()`；新增 `CORSMiddleware`）；最后删除首页两行冗余说明文字 |
 | 2026-09-27 10:06 | R8 | **rebase 到新远端**（未 push）：并入上游粘贴上传/实时速度/HLS 04:00 定时/`/video` 删除按钮 |
 | 2026-09-27 19:29 | R9 | **再次 rebase**（未 push）：解决 `tools/`（宿主机只读 9p 挂载）被跟踪导致的卡壳——`reset --soft` 压提交、`git rm --cached tools`、写入 `.gitignore` 的 `/tools/` |
@@ -257,7 +262,8 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-13 07:28 | R14 | **Excel 逐 sheet 预览**：`_sheet_sections()` 为每张 sheet 生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条；xlsx/xlsm(openpyxl) 与 xls(xlrd) 均支持（`8eb6363`） |
 | 2026-10-27 11:40 | R15 | **首页上传区文案顺序 + 统一字号**：把「文件托管上传：`curl --upload-file ...`」提示移到「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**下方**，两者同置于上传框 `#uploadZone` 内，且**字号统一为 `0.8em`（小号）** |
 | 2026-10-27 19:00 | R16 | **文件夹上传（网盘式）**：选择/拖拽/粘贴文件夹递归上传，服务端暂存 + manifest + 断点续传，完成后后台打包成**一个 zip**、删除源目录，首页只留 zip；200GB 暂存配额按最久未活动优先清理；新增 `/api/folder/*` 端点（见 §3.3） |
-| 2026-10-28 15:15 | R17 | **文件夹多选上传**：安全上下文用 `showDirectoryPicker({multiple:true})` 一次多选；非安全上下文（域名 http）回退 webkitdirectory + 弹窗「＋ 继续添加文件夹」累积；弹窗逐项列出已选文件夹（可 `×` 移除）、提示当前页面为何不能一次多选并建议用 localhost:19082；拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
+| 2026-10-28 15:15 | R17 | **文件夹多选上传**：站点 `https://ocs.dimond.top`（安全上下文）用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 仅属于文件选择器），弹窗「＋ 继续添加文件夹（已选 N 个）」累积、逐项列出已选文件夹（可 `×` 移除），拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；局域网 http 回退 webkitdirectory；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
+| 2026-10-28 18:00 | R18 | **域名更正为 HTTPS + 子文件夹拆分多选**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`），`url_head`/回退地址/文案/测试统一为 https（https 页面请求 http 域名会被混合内容拦截）；新增「选父目录 → 勾选多个子文件夹 → 分别打包」多选方式（`subfolderGroups/toggleSplitFolder/applyFolderSplit` + `FILE_REL_OVERRIDES`），未勾选子目录不上传、根目录散文件直传；前端 Node vm 用例 44 项全过 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -272,20 +278,21 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R15 / R16 / R17）：**
+**最后 3 轮对话总结（R16 / R17 / R18）：**
 
-- **R15（首页上传区文案顺序 + 统一字号，2026-10-27）**：把「文件托管上传：`curl --upload-file file.txt {url_head}/file.txt`」从上传框**上方**移到
-  「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**正下方**，两者同置于 `#uploadZone` 内；并按用户要求**统一为小号字 `font-size: 0.8em`**（两行 style 完全一致）。
 - **R16（文件夹上传 → 单个 zip，2026-10-27）**：新增网盘式文件夹上传——目录选择 `webkitdirectory`、拖拽/粘贴经 `webkitGetAsEntry()` 递归还原层级；
   服务端 `obs/.folder-staging/<folder_id>/` 暂存 + `manifest.json` 记录进度（复用现有直传/分片上传，仅额外带 `folder_id`+`relpath`），全部完成后后台
   `zipfile` 打包成一个 zip 并校验、原子落盘 `obs/`，成功即删除暂存源目录，首页只留 zip；支持刷新/断网续传与 200GB 暂存配额清理（活跃会话不删）。
   自测：后端端到端 40 项 + 配额/打包失败单测 13 项全过（含 3 级嵌套、中文路径、空目录、12MB 分片、md5 抽查、续传与秒传、路径穿越拒绝）。
-- **R17（文件夹多选上传，2026-10-28）**：每个顶层文件夹独立会话、**分别打包一个 zip**。安全上下文用 `showDirectoryPicker({mode:'read', multiple:true})`
-  一次选多个目录（`FileSystemDirectoryHandle.values()` 递归，空目录记录）；`http://ocs.dimond.top` 为非安全上下文，回退 `webkitdirectory` 单目录 +
-  弹窗「继续添加文件夹」累积；拖拽/粘贴多个目录按顶层分组，扁平回退如实提示结构丢失。弹窗汇总数量/文件数/总大小/空目录，重复选择按
+- **R17（文件夹多选上传，2026-10-28）**：每个顶层文件夹独立会话、**分别打包一个 zip**。站点域名为 `https://ocs.dimond.top`（安全上下文），
+  用 `showDirectoryPicker({mode:'read'})` 读取目录（`FileSystemDirectoryHandle.values()` 递归，空目录记录）；因 **Web 标准不支持目录多选**，
+  弹窗内逐项列出已选文件夹（可 `×` 移除）并提供醒目的「＋ 继续添加文件夹（已选 N 个）」累积；真正的多选可一次拖入多个文件夹或粘贴；
+  非安全上下文（局域网 http）回退 `webkitdirectory`。拖拽/粘贴多个目录按顶层分组，扁平回退如实提示结构丢失；重复选择按
   `folderName|文件数|总字节|首个 relpath` 去重；逐个 group 独立走 `init → 上传 → zip → 轮询`，全部结束统一刷新一次。
-  同时修复：配额统计改读 manifest 声明的 `total_bytes`（后补 `.packing.zip.tmp`），不再每次 `init` 遍历数 GB 暂存——实测 `init` 从 ~20s 降到 **0.032s**。
-  自测：多文件夹后端 27 项 + 完整端到端 40 项 + 配额/打包 13 项 + 前端分组/追加/弹窗 Node vm 单测 14 项，全部通过（含并发两会话、同名 zip 自动加时间戳且不覆盖原 zip）。
+  同时：域名/回退地址统一改为 https（https 页面请求 http 域名会被混合内容拦截）；配额统计改读 manifest 声明的 `total_bytes`
+  （后补 `.packing.zip.tmp`），不再每次 `init` 遍历数 GB 暂存——实测 `init` 从 ~20s 降到 **0.032s**。
+  自测：多文件夹后端 27 项 + 完整端到端 40 项 + 配额/打包 13 项 + 前端分组/追加/移除/弹窗 Node vm 单测 26 项，全部通过（含并发两会话、同名 zip 自动加时间戳且不覆盖原 zip）。
+- **R18（域名更正 HTTPS + 子文件夹拆分多选，2026-10-28）**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`，属安全上下文），`url_head`/回退地址/页面提示/测试统一为 https，修掉「https 页面请求 http 域名被混合内容拦截」的隐患；新增第三种多选方式——只选一个父文件夹，在弹窗勾选其多个**直接子文件夹**，`applyFolderSplit()` 把每个勾选项转成独立上传组，`FILE_REL_OVERRIDES`（WeakMap）把 `Root/sub/x` 改写为 `sub/x` 且不改动原分组；未勾选子目录不上传，根目录散文件直接上传。自测：前端 Node vm 单测扩到 44 项（含拆分可见性/候选/统计/标签/前缀剥离/散文件/空目录）全过。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，

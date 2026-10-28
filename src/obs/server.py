@@ -1,9 +1,10 @@
 # 服务对外访问地址前缀（站点域名，用于服务端生成的静态链接与示例文字）
-#   - 站点域名：http://ocs.dimond.top（= http://dimond.top:19082 = 宿主机 http://localhost:19082 = 容器内 http://localhost:8082）
+#   - 站点域名：https://ocs.dimond.top（反代终止 TLS；http 会 301 跳转到 https）
+#     = 宿主机 http://localhost:19082 = 容器内 http://localhost:8082
 #   - 网页端的「上传/下载」动作不走这里，而是由前端 JS 先试直连 http://localhost:19082、失败再回退本域名
 # 使用位置：
 #   - 首页「文件托管」curl 上传示例、文件列表下载链接前缀、上传成功响应文本、启动日志示例
-url_head = "http://ocs.dimond.top"
+url_head = "https://ocs.dimond.top"
 
 import os
 import time
@@ -1031,6 +1032,29 @@ async def homepage(request: Request, sort: str = Query("time")):
                 font-weight: 600;
             }
             .folder-add-more:hover { background: #d9eafb !important; }
+            /* 子文件夹勾选（一次选父目录、勾选多个子文件夹分别打包） */
+            .folder-sub-list {
+                margin: 6px 0 0;
+                padding: 0;
+                list-style: none;
+                max-height: 26vh;
+                overflow: auto;
+                border: 1px solid #e6e6e6;
+                border-radius: 4px;
+            }
+            .folder-sub-list li { border-bottom: 1px dashed #eee; }
+            .folder-sub-list li:last-child { border-bottom: none; }
+            .folder-sub-label {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 5px 8px;
+                font-size: 0.9em;
+                color: #333;
+                cursor: pointer;
+            }
+            .folder-sub-label:hover { background: #f7fbff; }
+            .folder-sub-label input[type="checkbox"] { margin: 0; flex: none; }
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
@@ -1040,12 +1064,16 @@ async def homepage(request: Request, sort: str = Query("time")):
             function encodeRelPath(p) {
                 return String(p || "").split("/").map(encodeURIComponent).join("/");
             }
-            // 单文件在界面上的显示名/上传路径：文件夹上传优先用遍历得到的相对路径
+            // 单文件在界面上的显示名/上传路径：文件夹上传优先用遍历得到的相对路径；
+            // 按子文件夹拆分上传时用 WeakMap 临时覆盖（Root/sub/x → sub/x），不改动原始分组。
+            const FILE_REL_OVERRIDES = new WeakMap();
             function fileRelPath(file) {
-                return (file && (file._relPath || file.webkitRelativePath)) || (file && file.name) || "";
+                if (!file) return "";
+                const override = FILE_REL_OVERRIDES.get(file);
+                return override || file._relPath || file.webkitRelativePath || file.name || "";
             }
             // crypto.subtle 只在安全上下文（https / localhost）可用；
-            // 通过 http://ocs.dimond.top 或 http://<局域网IP> 访问时它是 undefined，
+            // 通过 http://<局域网IP> 等非安全上下文访问时它是 undefined，
             // 若直接调用则大文件（>10MB 走分片）全部上传失败，故这里先探测再决定实现。
             const HAS_SUBTLE = !!(globalThis.crypto && globalThis.crypto.subtle && globalThis.crypto.subtle.digest);
             // 纯 JS SHA-256 兜底实现（非安全上下文用）。输出与 crypto.subtle.digest("SHA-256") 完全一致。
@@ -1147,7 +1175,7 @@ async def homepage(request: Request, sort: str = Query("time")):
             }
 
             // 单文件直传（≤10MB）：整段上传 + 整段校验（X-File-SHA256，服务端校验后才落账）
-            // 且先试 http://localhost:19082，不可达再回退 http://ocs.dimond.top
+            // 且先试 http://localhost:19082，不可达再回退 https://ocs.dimond.top
             // folderId 非空时走文件夹暂存接口，URL 使用相对路径（保留目录层级）
             async function uploadOneFileDirect(file, onProgress, folderId) {
                 const base = await obsBase();
@@ -1545,7 +1573,8 @@ async def homepage(request: Request, sort: str = Query("time")):
                 return await collectEntriesFromRoots(roots);
             }
 
-            // File System Access API（showDirectoryPicker，仅安全上下文）可直接多选文件夹
+            // File System Access API（showDirectoryPicker，需 https/localhost）。
+            // 注意：标准没有目录多选选项，multiple:true 会被浏览器忽略，一次只返回一个目录。
             async function walkDirectoryHandle(dirHandle, prefix, files, emptyDirs) {
                 let hasChild = false;
                 let iter;
@@ -1584,9 +1613,10 @@ async def homepage(request: Request, sort: str = Query("time")):
             async function pickDirectoriesNative() {
                 if (typeof window.showDirectoryPicker !== 'function') return null;
                 try {
-                    const picked = await window.showDirectoryPicker({ mode: 'read', multiple: true });
+                    // 标准不支持目录多选（没有 multiple 选项），一次返回一个目录句柄
+                    const picked = await window.showDirectoryPicker({ mode: 'read' });
                     if (!picked) return [];
-                    return Array.isArray(picked) ? picked : [picked];
+                    return [picked];
                 } catch (e) {
                     if (e && e.name === 'AbortError') return [];  // 用户取消
                     return null;  // 不支持/权限被拒 → 回退 webkitdirectory
@@ -1603,26 +1633,135 @@ async def homepage(request: Request, sort: str = Query("time")):
                 const first = g.files.length ? fileRelPath(g.files[0]) : '';
                 return g.folderName + '|' + g.files.length + '|' + bytes + '|' + first;
             }
+            // 把单个根文件夹按「直接子文件夹」拆成多个候选分组。
+            // 用途：浏览器目录选择器一次只能选一个文件夹，选父目录后勾选多个子文件夹即可分别打包。
+            function subfolderGroups(group) {
+                const map = new Map();
+                const rootPrefix = group && group.folderName ? (group.folderName + '/') : '';
+                const strip = (p) => {
+                    let r = String(p || '');
+                    if (rootPrefix && r.indexOf(rootPrefix) === 0) r = r.slice(rootPrefix.length);
+                    return r;
+                };
+                const ensure = (name) => {
+                    if (!map.has(name)) map.set(name, { folderName: name, files: [], emptyDirs: [] });
+                    return map.get(name);
+                };
+                const groupFiles = (group && group.files) || [];
+                for (let i = 0; i < groupFiles.length; i++) {
+                    const rel = strip(fileRelPath(groupFiles[i]));
+                    const slash = rel.indexOf('/');
+                    if (slash <= 0) continue;   // 根目录下的散文件不参与拆分
+                    ensure(rel.slice(0, slash)).files.push(groupFiles[i]);
+                }
+                const emptyDirs = (group && group.emptyDirs) || [];
+                for (let i = 0; i < emptyDirs.length; i++) {
+                    const rel = strip(emptyDirs[i]);
+                    const slash = rel.indexOf('/');
+                    if (slash <= 0) continue;
+                    ensure(rel.slice(0, slash)).emptyDirs.push(rel);
+                }
+                return Array.from(map.values());
+            }
+            // 只有「当前恰好一个根文件夹」时才允许按子文件夹拆分；缓存拆分结果，避免每次渲染都重算
+            function ensureSplitGroups(pending) {
+                if (!pending) return [];
+                const groups = pending.groups || [];
+                if (groups.length !== 1) {
+                    pending.splitGroups = [];
+                    pending._splitFor = null;
+                    pending.splitSelected = {};
+                    return [];
+                }
+                if (pending._splitFor !== groups[0]) {
+                    pending.splitGroups = subfolderGroups(groups[0]);
+                    pending._splitFor = groups[0];
+                    const valid = {};
+                    for (let i = 0; i < pending.splitGroups.length; i++) valid[pending.splitGroups[i].folderName] = true;
+                    const sel = pending.splitSelected || {};
+                    for (const name in sel) { if (!valid[name]) delete sel[name]; }
+                    pending.splitSelected = sel;
+                }
+                return pending.splitGroups;
+            }
+            function toggleSplitFolder(name, checked) {
+                if (!folderPending) return;
+                if (!folderPending.splitSelected) folderPending.splitSelected = {};
+                if (checked) folderPending.splitSelected[name] = true;
+                else delete folderPending.splitSelected[name];
+                renderFolderConfirm();
+            }
+            // 确认上传前把勾选的子文件夹转成独立上传组；文件相对路径去掉父目录前缀（Root/sub/x → sub/x）
+            function applyFolderSplit(pending) {
+                if (!pending) return;
+                const splitGroups = pending.splitGroups || [];
+                const selected = [];
+                for (let i = 0; i < splitGroups.length; i++) {
+                    const g = splitGroups[i];
+                    if (pending.splitSelected && pending.splitSelected[g.folderName]) selected.push(g);
+                }
+                if (!selected.length) return;   // 未勾选 → 保持整个文件夹
+                const rootGroup = (pending.groups || [])[0];
+                const rootPrefix = rootGroup && rootGroup.folderName ? (rootGroup.folderName + '/') : '';
+                const strip = (p) => {
+                    let r = String(p || '');
+                    if (rootPrefix && r.indexOf(rootPrefix) === 0) r = r.slice(rootPrefix.length);
+                    return r;
+                };
+                const loose = (pending.looseFiles || []).slice();
+                if (rootGroup) {
+                    const rootFiles = rootGroup.files || [];
+                    for (let i = 0; i < rootFiles.length; i++) {
+                        if (strip(fileRelPath(rootFiles[i])).indexOf('/') < 0) loose.push(rootFiles[i]);
+                    }
+                }
+                const finalGroups = [];
+                for (let i = 0; i < selected.length; i++) {
+                    const g = selected[i];
+                    const files = [];
+                    for (let j = 0; j < g.files.length; j++) {
+                        const f = g.files[j];
+                        FILE_REL_OVERRIDES.set(f, strip(fileRelPath(f)));
+                        files.push(f);
+                    }
+                    finalGroups.push({ folderName: g.folderName, files: files, emptyDirs: (g.emptyDirs || []).slice() });
+                }
+                pending.groups = finalGroups;
+                pending.looseFiles = loose;
+                pending.splitSelected = {};
+            }
             function renderFolderConfirm() {
                 const modalEl = document.getElementById('folderConfirmModal');
                 if (!modalEl || !folderPending) return;
                 const groups = folderPending.groups;
+                const splitGroups = ensureSplitGroups(folderPending);
+                const selectedNames = [];
+                for (let i = 0; i < splitGroups.length; i++) {
+                    const name = splitGroups[i].folderName;
+                    if (folderPending.splitSelected && folderPending.splitSelected[name]) selectedNames.push(name);
+                }
+                const splitMode = selectedNames.length > 0;
+                // 拆分模式下只统计勾选的子文件夹；否则统计整个（或累积的多个）文件夹
+                const displayGroups = splitMode
+                    ? splitGroups.filter((g) => folderPending.splitSelected[g.folderName])
+                    : groups;
                 const files = [];
                 let emptyDirs = 0, total = 0;
-                for (let i = 0; i < groups.length; i++) {
-                    emptyDirs += (groups[i].emptyDirs || []).length;
-                    for (let j = 0; j < groups[i].files.length; j++) {
-                        files.push(groups[i].files[j]);
-                        total += groups[i].files[j].size || 0;
+                for (let i = 0; i < displayGroups.length; i++) {
+                    emptyDirs += (displayGroups[i].emptyDirs || []).length;
+                    for (let j = 0; j < displayGroups[i].files.length; j++) {
+                        files.push(displayGroups[i].files[j]);
+                        total += displayGroups[i].files[j].size || 0;
                     }
                 }
                 for (let i = 0; i < folderPending.looseFiles.length; i++) {
                     files.push(folderPending.looseFiles[i]);
                     total += folderPending.looseFiles[i].size || 0;
                 }
-                const names = groups.map((g) => g.folderName).join('、');
-                document.getElementById('folderConfirmName').textContent =
-                    groups.length > 1 ? ('已选 ' + groups.length + ' 个：' + names) : (names || '文件夹');
+                const names = displayGroups.map((g) => g.folderName).join('、');
+                document.getElementById('folderConfirmName').textContent = splitMode
+                    ? ('已勾选 ' + selectedNames.length + ' 个子文件夹：' + names)
+                    : (groups.length > 1 ? ('已选 ' + groups.length + ' 个：' + names) : (names || '文件夹'));
                 document.getElementById('folderConfirmCount').textContent = files.length;
                 document.getElementById('folderConfirmSize').textContent = fmtSize(total);
                 let extra = '';
@@ -1631,22 +1770,29 @@ async def homepage(request: Request, sort: str = Query("time")):
                 document.getElementById('folderConfirmEmpty').textContent = extra;
                 document.getElementById('folderConfirmWarn').style.display =
                     folderPending.structureLost ? 'block' : 'none';
-                // 说明当前浏览器能怎么多选：安全上下文可直接多选；http 域名需逐个添加或拖拽
-                const nativeMulti = !!(window.isSecureContext && typeof window.showDirectoryPicker === 'function');
+                // 说明多选方式：目录选择器（showDirectoryPicker）按标准一次只返回一个目录，
+                // 没有 multiple 选项；因此提供三种多选方式：勾选子文件夹 / 逐个追加 / 一次拖入多个。
+                const secureCtx = !!window.isSecureContext;
+                const canSplit = groups.length === 1 && splitGroups.length > 0;
                 const hintEl = document.getElementById('folderPickHint');
                 if (hintEl) {
-                    hintEl.textContent = nativeMulti
-                        ? '可点「＋ 继续添加文件夹」追加；每个文件夹会分别打包为一个 zip。也可直接把多个文件夹拖到页面。'
-                        : '当前为 http 页面，系统文件夹对话框一次只能选一个：点「＋ 继续添加文件夹」累积多个，'
-                          + '或直接把多个文件夹拖到页面；也可改用 http://localhost:19082 打开本站，在对话框里直接多选。'
-                          + '每个文件夹会分别打包为一个 zip。';
+                    if (!secureCtx) {
+                        hintEl.textContent = '当前页面不是安全上下文（需 https 或 localhost），无法直接选择文件夹。'
+                            + '请改用 https://ocs.dimond.top 访问，或把多个文件夹一次拖到页面。';
+                    } else {
+                        let hintText = '浏览器目录选择器一次只能选一个文件夹（Web 标准限制），可用以下方式多选：';
+                        if (canSplit) hintText += '在下方勾选该文件夹内的多个子文件夹分别打包；';
+                        hintText += '点「＋ 继续添加文件夹」从其他位置继续添加；或直接把多个文件夹一次拖到页面。'
+                            + '每个文件夹会分别打包为一个 zip。';
+                        hintEl.textContent = hintText;
+                    }
                 }
-                // 已选文件夹列表（每个可单独移除）
+                // 已选文件夹列表（每个可单独移除；按子文件夹拆分时显示勾选项，不显示移除）
                 const groupListEl = document.getElementById('folderGroupList');
                 if (groupListEl) {
                     groupListEl.innerHTML = '';
-                    for (let i = 0; i < groups.length; i++) {
-                        const g = groups[i];
+                    for (let i = 0; i < displayGroups.length; i++) {
+                        const g = displayGroups[i];
                         let gSize = 0;
                         for (let j = 0; j < g.files.length; j++) gSize += g.files[j].size || 0;
                         const li = document.createElement('li');
@@ -1658,18 +1804,73 @@ async def homepage(request: Request, sort: str = Query("time")):
                         metaEl.className = 'fg-meta';
                         metaEl.textContent = g.files.length + ' 个文件 · ' + fmtSize(gSize)
                             + ((g.emptyDirs || []).length ? ' · ' + g.emptyDirs.length + ' 空目录' : '');
-                        const delEl = document.createElement('button');
-                        delEl.type = 'button';
-                        delEl.className = 'fg-del';
-                        delEl.title = '移除该文件夹';
-                        delEl.textContent = '×';
-                        delEl.onclick = (function (idx) {
-                            return function () { removeFolderGroup(idx); };
-                        })(i);
                         li.appendChild(nameEl);
                         li.appendChild(metaEl);
-                        li.appendChild(delEl);
+                        if (!splitMode) {
+                            const delEl = document.createElement('button');
+                            delEl.type = 'button';
+                            delEl.className = 'fg-del';
+                            delEl.title = '移除该文件夹';
+                            delEl.textContent = '×';
+                            delEl.onclick = (function (idx) {
+                                return function () { removeFolderGroup(idx); };
+                            })(i);
+                            li.appendChild(delEl);
+                        }
                         groupListEl.appendChild(li);
+                    }
+                }
+                // 子文件夹勾选：一次选择父目录后，可勾选多个子文件夹分别打包
+                const splitBox = document.getElementById('folderSplitBox');
+                const splitList = document.getElementById('folderSubList');
+                const splitNote = document.getElementById('folderSplitNote');
+                if (splitBox && splitList) {
+                    if (canSplit) {
+                        splitBox.style.display = 'block';
+                        if (splitNote) {
+                            let rootFiles = 0;
+                            const rootPrefix = groups[0].folderName ? (groups[0].folderName + '/') : '';
+                            const rootGroupFiles = groups[0].files || [];
+                            for (let i = 0; i < rootGroupFiles.length; i++) {
+                                let rel = String(fileRelPath(rootGroupFiles[i]) || '');
+                                if (rootPrefix && rel.indexOf(rootPrefix) === 0) rel = rel.slice(rootPrefix.length);
+                                if (rel.indexOf('/') < 0) rootFiles++;
+                            }
+                            splitNote.textContent = '该文件夹下有 ' + splitGroups.length + ' 个子文件夹：勾选的会分别打包为独立 zip'
+                                + '（未勾选的不会上传）；不勾选任何项则把整个文件夹打包成一个 zip。'
+                                + (rootFiles ? ' 根目录下 ' + rootFiles + ' 个文件在拆分时会直接上传。' : '');
+                        }
+                        splitList.innerHTML = '';
+                        for (let i = 0; i < splitGroups.length; i++) {
+                            const sg = splitGroups[i];
+                            let sgSize = 0;
+                            for (let j = 0; j < sg.files.length; j++) sgSize += sg.files[j].size || 0;
+                            const li = document.createElement('li');
+                            const label = document.createElement('label');
+                            label.className = 'folder-sub-label';
+                            const cb = document.createElement('input');
+                            cb.type = 'checkbox';
+                            cb.checked = !!(folderPending.splitSelected && folderPending.splitSelected[sg.folderName]);
+                            cb.onchange = (function (name) {
+                                return function () { toggleSplitFolder(name, this.checked); };
+                            })(sg.folderName);
+                            const nameEl = document.createElement('span');
+                            nameEl.className = 'fg-name';
+                            nameEl.textContent = sg.folderName;
+                            nameEl.title = sg.folderName;
+                            const metaEl = document.createElement('span');
+                            metaEl.className = 'fg-meta';
+                            metaEl.textContent = sg.files.length + ' 个文件 · ' + fmtSize(sgSize)
+                                + ((sg.emptyDirs || []).length ? ' · ' + sg.emptyDirs.length + ' 空目录' : '');
+                            label.appendChild(cb);
+                            label.appendChild(nameEl);
+                            label.appendChild(metaEl);
+                            li.appendChild(label);
+                            splitList.appendChild(li);
+                        }
+                    } else {
+                        splitBox.style.display = 'none';
+                        splitList.innerHTML = '';
                     }
                 }
                 const listEl = document.getElementById('folderFileList');
@@ -1687,14 +1888,18 @@ async def homepage(request: Request, sort: str = Query("time")):
                 }
                 const addBtn = document.getElementById('folderAddMoreBtn');
                 if (addBtn) {
-                    addBtn.style.display = (groups.length || folderPending.looseFiles.length) ? 'inline-block' : 'none';
-                    addBtn.textContent = '＋ 继续添加文件夹（已选 ' + groups.length + ' 个）';
+                    addBtn.style.display = (displayGroups.length || folderPending.looseFiles.length) ? 'inline-block' : 'none';
+                    addBtn.textContent = '＋ 继续添加文件夹（已选 ' + displayGroups.length + ' 个）';
                 }
                 const okBtn = document.getElementById('folderConfirmBtn');
                 if (okBtn) {
-                    okBtn.textContent = groups.length > 1
-                        ? ('上传并打包（' + groups.length + ' 个文件夹）')
-                        : '上传并打包';
+                    if (splitMode) {
+                        okBtn.textContent = '上传并打包（' + selectedNames.length + ' 个 zip）';
+                    } else if (groups.length > 1) {
+                        okBtn.textContent = '上传并打包（' + groups.length + ' 个文件夹）';
+                    } else {
+                        okBtn.textContent = '上传并打包';
+                    }
                 }
                 modalEl.style.display = 'flex';
             }
@@ -1740,14 +1945,16 @@ async def homepage(request: Request, sort: str = Query("time")):
             }
             function confirmFolderUpload() {
                 const pending = folderPending;
+                if (!pending) { cancelFolderUpload(); return; }
+                applyFolderSplit(pending);   // 勾选了子文件夹则转成多个独立上传组
                 cancelFolderUpload();
-                if (pending) uploadFolder(pending);
+                uploadFolder(pending);
             }
-            // 选择文件夹：优先用 File System Access API（真·多选，仅安全上下文）；
-            // 否则回退 webkitdirectory（一次一个，可在弹窗里点「继续添加文件夹」累积多选）
+            // 选择文件夹：优先用 File System Access API（https/localhost 可用，但标准规定一次只返回一个目录）；
+            // 否则回退 webkitdirectory。两者都靠弹窗「＋ 继续添加文件夹」累积多个，或直接拖拽多个文件夹。
             async function openFolderPicker(addMore) {
                 if (!addMore) { folderPending = null; folderPickAppend = false; }
-                // 非安全上下文（如 http://ocs.dimond.top）没有该 API，直接同步触发 input，避免丢失用户手势
+                // 非安全上下文或浏览器不支持该 API 时，直接同步触发 input，避免丢失用户手势
                 if (!window.isSecureContext || typeof window.showDirectoryPicker !== 'function') {
                     folderPickAppend = !!addMore;
                     const inp = document.getElementById('folderInput');
@@ -2106,12 +2313,13 @@ async def homepage(request: Request, sort: str = Query("time")):
             });
         </script>
         <script>
-            // 下载/打开：先试宿主机本地地址 http://localhost:19082，不可用再回退域名 http://ocs.dimond.top
-            // 页面文字只展示域名 http://ocs.dimond.top；本地地址仅用于加速探测（二者指向同一服务）
+            // 下载/打开：先试宿主机本地地址 http://localhost:19082，不可用再回退域名 https://ocs.dimond.top
+            // 页面文字只展示域名 https://ocs.dimond.top；本地地址仅用于加速探测（二者指向同一服务）
+            // 回退必须用 https：页面本身是 https，向 http 域名发 XHR/fetch 会被浏览器按混合内容拦截。
             var DOWNLOAD_HOST_PRIMARY = "http://localhost:19082";
-            var DOWNLOAD_HOST_FALLBACK = "http://ocs.dimond.top";
+            var DOWNLOAD_HOST_FALLBACK = "https://ocs.dimond.top";
 
-            // 上传/接口地址：先试 http://localhost:19082，不可达再回退域名 http://ocs.dimond.top
+            // 上传/接口地址：先试 http://localhost:19082，不可达再回退域名 https://ocs.dimond.top
             var OBS_HOSTS = [DOWNLOAD_HOST_PRIMARY, DOWNLOAD_HOST_FALLBACK];
             var _obsBasePromise = null;
             function obsBase() {
@@ -2143,7 +2351,7 @@ async def homepage(request: Request, sort: str = Query("time")):
                 return host + "/" + String(name).split("/").map(encodeURIComponent).join("/");
             }
 
-            // 下载/查看地址：页面加载后统一改写为「先 http://localhost:19082，不可达再 http://ocs.dimond.top」。
+            // 下载/查看地址：页面加载后统一改写为「先 http://localhost:19082，不可达再 https://ocs.dimond.top」。
             // 关键：不能在点击回调里先 preventDefault 再异步探测、之后用 a.click() 触发下载——
             // 程序化点击发生在用户手势之外，会被浏览器当作弹窗拦截（点击「没反应」）；
             // 而复制链接粘贴到地址栏属于直接导航，不受拦截，所以才「粘贴能下、点击不能」。
@@ -2182,13 +2390,13 @@ async def homepage(request: Request, sort: str = Query("time")):
         </div>
 
         <div id="uploadZone" style="margin: 20px 0; padding: 30px; border: 2px dashed #ccc; background: #f9f9f9; text-align: center; border-radius: 8px; transition: border-color 0.3s, background 0.3s;">
-            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
+            <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件/文件夹到此处上传（文件夹可一次拖入多个），或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
             <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
-            <!-- 文件夹上传：优先 showDirectoryPicker 多选；webkitdirectory 为单目录回退（可点「继续添加文件夹」累积） -->
+            <!-- 文件夹上传：https/localhost 优先 showDirectoryPicker（一次一个目录）；webkitdirectory 为回退；弹窗内「继续添加文件夹」累积 -->
             <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files)" style="display:none;">
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
-            <button type="button" onclick="openFolderPicker(false)" title="支持多选文件夹" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹（可多选）</button>
+            <button type="button" onclick="openFolderPicker(false)" title="浏览器一次选一个文件夹，可点「继续添加文件夹」累积或直接拖入多个" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹（可多选）</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
 
@@ -2212,6 +2420,10 @@ async def homepage(request: Request, sort: str = Query("time")):
                 <p id="folderPickHint" class="folder-pick-hint"></p>
                 <p>文件夹：<b id="folderConfirmName"></b></p>
                 <ul id="folderGroupList" class="folder-group-list"></ul>
+                <div id="folderSplitBox" style="display:none; margin:8px 0;">
+                    <p id="folderSplitNote" class="folder-pick-hint"></p>
+                    <ul id="folderSubList" class="folder-sub-list"></ul>
+                </div>
                 <p>共 <b id="folderConfirmCount">0</b> 个文件，合计 <b id="folderConfirmSize">0 B</b><span id="folderConfirmEmpty"></span></p>
                 <p id="folderConfirmWarn" style="display:none; color:#c00;">粘贴只拿到文件列表、目录结构已丢失，是否继续扁平上传？</p>
                 <ul id="folderFileList" class="paste-file-list"></ul>

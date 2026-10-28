@@ -20,15 +20,15 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 项 | 值 |
 |----|----|
 | 项目根目录 | `/home/agent/.claude/workspace/project` |
-| 域名 | **`http://ocs.dimond.top`**（= `http://dimond.top:19082` = 宿主机 `http://localhost:19082` = 容器内 `http://localhost:8082`） |
+| 域名 | **`https://ocs.dimond.top`**（= `http://dimond.top:19082` = 宿主机 `http://localhost:19082` = 容器内 `http://localhost:8082`） |
 | 端口 | `8082`（容器内部） |
 | 主程序 | `src/obs/server.py`（FastAPI） |
 | 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」「上传文件夹」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
-| 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `http://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
+| 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `https://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
 | 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
 | Office 预览 | **不依赖 LibreOffice/Office 套件**：`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，转 HTML 经 `/preview-content/{filename:path}` 供 `<iframe>` 内嵌；仅这 5 种后缀且 ≤25MB 可转，其余退化占位（思路参考 `qq939/interview-jobfinder`） |
-| 文件夹上传 | **网盘式、支持多选**：每个顶层文件夹**独立一个会话、分别打包一个 zip**。选择优先 `showDirectoryPicker({multiple:true})`（仅安全上下文 localhost/HTTPS）；`http://ocs.dimond.top` 等非安全上下文回退 `webkitdirectory` 单目录 + 弹窗「继续添加文件夹」累积；拖拽/粘贴（`webkitGetAsEntry()` 递归）天然支持多个目录。逐文件暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包 zip → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理（配额大小读 manifest 声明值，避免遍历大目录） |
+| 文件夹上传 | **网盘式、支持多选**：每个顶层文件夹**独立一个会话、分别打包一个 zip**。站点 `https://ocs.dimond.top` 为安全上下文，优先用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 只属于文件选择器），一次只能选一个目录，故弹窗内「＋ 继续添加文件夹」累积、或直接把多个文件夹拖入页面；选单个父目录时还可在弹窗勾选其多个**子文件夹**分别打包。非安全上下文（局域网 http）回退 `webkitdirectory`。逐文件暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包 zip → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理（配额大小读 manifest 声明值，避免遍历大目录） |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
 | 启动脚本 | `user_start.sh`（被 `start.sh` 调用） |
 | 启动日志 | `logs/start.log`；运行日志 `logs/server.log`；问答日志 `logs/agent_tui.log` |
@@ -128,8 +128,8 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 - **Claude 问答**：沿用 `ask_claude` → `asyncio.create_subprocess_exec('node', run_claude.js)` +
   `CLAUDE_MSG`(base64) + `CLAUDE_CAPTURE_STDIO=1`，勿绕开 `run_claude.js`。
 - **视频前端**：改 `src/obs/video_static/`；由 `get_video_static_dir()` 定位，`/video` 路由直接读文件。
-- **域名 / 上传下载回退**：站点域名 `http://ocs.dimond.top`；**页面文字只展示该域名**，链接前缀常量 `url_head = "http://ocs.dimond.top"`（`src/obs/server.py` 顶部），
-  驱动首页 curl 示例、文件列表下载链接与上传响应 URL。**页面上传/下载请求为加速先试直连 `http://localhost:19082`，不可达回退域名 `http://ocs.dimond.top`**：
+- **域名 / 上传下载回退**：站点域名 `https://ocs.dimond.top`；**页面文字只展示该域名**，链接前缀常量 `url_head = "https://ocs.dimond.top"`（`src/obs/server.py` 顶部），
+  驱动首页 curl 示例、文件列表下载链接与上传响应 URL。**页面上传/下载请求为加速先试直连 `http://localhost:19082`，不可达回退域名 `https://ocs.dimond.top`**：
   下载/打开用 `applyDownloadHosts(base)`（**加载期**改写所有 `a[data-name]` 的 `href`，点击走原生跳转即直接下载；
   **切勿**改成在点击回调里 `preventDefault` + 异步探测 + `a.click()`——会丢用户手势被弹窗拦截）；上传/接口（PUT、`/upload/init|chunk|complete`、DELETE）用
   `obsBase()`（页面加载预热探测）/`obsFetch()`，跨域由 `CORSMiddleware` 放行（常量 `DOWNLOAD_HOST_PRIMARY` / `DOWNLOAD_HOST_FALLBACK`）。
@@ -142,13 +142,17 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   `GET /preview-content/{filename:path}` 把片段包成独立 HTML 文档（`text/html`）供 `<iframe>` 内嵌；无解析器的 `doc/ppt/odt/ods/odp/rtf` 一律退化为下载占位。
   依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`（**不要**再装 LibreOffice）。思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe）。
 - **文件夹上传（多选）**：前端按**顶层文件夹**分组——`groupsFromFileList()`（`webkitRelativePath` 首段分组）、`collectEntriesFromRoots()`（拖拽/粘贴 Entry 递归）、
-  `collectGroupsFromDirectoryHandles()`（`showDirectoryPicker({multiple:true})` 的 `FileSystemDirectoryHandle.values()` 异步遍历，空目录也记录）；
-  待上传态为 `folderPending = {groups, looseFiles, structureLost}`，`addGroupsToPending()` 按 `folderName|文件数|总字节|首个 relpath` 去重；
+  `collectGroupsFromDirectoryHandles()`（`showDirectoryPicker({mode:'read'})` 的 `FileSystemDirectoryHandle.values()` 异步遍历，空目录也记录）；
+  **注意：Web 标准不支持目录多选**（`multiple` 仅属于 `showOpenFilePicker`），目录选择器一次只返回一个 handle；多选靠「＋ 继续添加文件夹」累积、拖拽多个目录，
+  或**子文件夹拆分**：选中单个父目录时 `subfolderGroups()` 列出其一级子目录，`toggleSplitFolder()` 勾选后 `applyFolderSplit()` 把每个勾选子目录转成独立上传组
+  （`FILE_REL_OVERRIDES` WeakMap 把 `Root/sub/x` 改写成 `sub/x`，不改动原分组；根目录散文件转 `pending.looseFiles` 直接上传，未勾选的子目录不上传）；
+  待上传态为 `folderPending = {groups, looseFiles, splitGroups, splitSelected, structureLost}`，`addGroupsToPending()` 按 `folderName|文件数|总字节|首个 relpath` 去重；
   `renderFolderConfirm()` 逐项渲染 `#folderGroupList`（名称/文件数/大小/空目录，`×` 走 `removeFolderGroup()` 可单独移除）、
-  `#folderPickHint` 说明当前页面多选方式、`#folderAddMoreBtn` 高亮显示「＋ 继续添加文件夹（已选 N 个）」、`#folderConfirmBtn` 显示「N 个文件夹」。
+  `#folderPickHint` 说明当前页面多选方式、`#folderSplitBox`/`#folderSubList` 子文件夹勾选、`#folderAddMoreBtn` 高亮显示「＋ 继续添加文件夹（已选 N 个）」、
+  `#folderConfirmBtn` 显示「N 个文件夹」或拆分时的「N 个 zip」。
   `uploadFolder()` 逐个 group 调 `uploadFolderGroup()`：各自 `POST /api/folder/init` → `uploadFiles(files, {folderId, noReload:true})` → `POST /zip` → 轮询 `/zip/status`，最后统一 reload 一次；
-  `showDirectoryPicker` **只在安全上下文可用**（`localhost`/HTTPS），`http://ocs.dimond.top` 下须回退 `webkitdirectory`（同步 `input.click()` 保用户手势）。
-  `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，文件名取 `file._relPath || file.webkitRelativePath || file.name`；
+  `showDirectoryPicker` 需**安全上下文**（HTTPS / localhost）；`https://ocs.dimond.top` 满足条件，局域网 http 下自动回退 `webkitdirectory`（同步 `input.click()` 保用户手势）。
+  `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，路径取 `fileRelPath(file)`（`FILE_REL_OVERRIDES` 覆盖 → `_relPath` → `webkitRelativePath` → `name`）；
   目录遍历用 `entryFile`/`readAllEntries`/`walkEntry`（`readEntries()` 必须循环读到空数组）；后端暂存 `_staging_*` 系列函数 + `manifest.json`，`_safe_relpath()` 防穿越，
   `_staging_entry_size()` 优先读 manifest `total_bytes`（并按需加 `.packing.zip.tmp`），**不要让配额检查遍历整个暂存目录**（数 GB 会话会让 `init` 卡十几秒）；
   `_pack_folder_sync()` 用 `zipfile` 写 `.packing.zip.tmp` 并校验后 `os.replace` 到 `_unique_zip_path()`（同名加时间戳后缀），**成功才** `rmtree` 暂存；
@@ -165,7 +169,7 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | HLS 失败 `ffmpeg/ffprobe not found` | `bin/` 被 gitignore，未随仓库分发 | `bash scripts/install_ffmpeg.sh` 拉取静态二进制；`user_start.sh` 会自动把 `bin/` 加入 PATH |
 | HLS `ffmpeg 退出码 1: ... No such file or directory` | `UPLOAD_DIR` 相对路径 + ffmpeg `cwd=tmp_dir` | 已在 `_do_generate_hls()` 用 `os.path.abspath()` 修复，勿改回相对路径 |
 | `git clone github.com/qq939/obs.git` 直连超时 | 容器直连 github.com 被拦截（443） | 走镜像：`https://ghproxy.net/https://github.com/qq939/obs/archive/refs/heads/main.tar.gz` |
-| 下载走错地址 | 跨网访问时直连 `http://localhost:19082` 不可达 | 页面 `applyDownloadHosts()` 加载时已把 href 改写为可达主机（不可达回退 `http://ocs.dimond.top`），无需手工改链接 |
+| 下载走错地址 | 跨网访问时直连 `http://localhost:19082` 不可达 | 页面 `applyDownloadHosts()` 加载时已把 href 改写为可达主机（不可达回退 `https://ocs.dimond.top`），无需手工改链接 |
 | 点击下载「没反应」 | 在点击回调里 `preventDefault` 后异步探测再 `a.click()`，丢失用户手势被弹窗拦截 | 不要这么做；改为页面加载期改写 href（`applyDownloadHosts()`），点击走原生跳转 |
 | 预览页 404 | 文件不在 `obs/`，或名含 `../` 被 `safe_upload_path()` 拦截 | 确认文件已上传到 `obs/`；跨目录名会被判越界（这是有意的防护） |
 | Office 预览显示「暂不支持在线预览」 | 后缀非 `docx/xlsx/xlsm/xls/pptx`、文件 >25MB、或缺转换库导致转换失败 | 属预期降级（`doc/ppt/odt/ods/odp/rtf` 无纯 Python 解析器，一律占位）；装依赖 `pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx` |
@@ -181,7 +185,7 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | 文件夹 relpath 400 | 含 `..`/绝对路径/盘符/NUL | 前端传 `webkitRelativePath` 或 `getAsEntry()` 递归得到的相对路径 |
 | 文件夹打包 `failed` | zip 校验失败（条目数不符/损坏/空）或磁盘不足 | 暂存保留，修复后重新 `POST /zip`；日志见 `logs/server.log` |
 | 文件夹刷新后重传 | `ocs-folder:*` localStorage 或服务端会话丢失/被清理 | 重新选同一文件夹走 `resume_folder_id`；会话被配额清理则只能重传 |
-| 「上传文件夹」只弹单目录选择 | 非安全上下文（如 `http://ocs.dimond.top`）没有 `showDirectoryPicker`，系统对话框一次只能选一个目录 | 属预期回退：选完在弹窗点高亮的「＋ 继续添加文件夹（已选 N 个）」累积，或直接拖拽多个文件夹；改用 `http://localhost:19082`（安全上下文）可在对话框里一次多选 |
+| 「上传文件夹」一次只能选一个目录 | **Web 标准不支持目录多选**：`showDirectoryPicker` 一次只返回一个目录，`webkitdirectory multiple` 同样只选一个（`multiple` 仅属于 `showOpenFilePicker`） | 属浏览器限制，非 bug：选完点高亮的「＋ 继续添加文件夹（已选 N 个）」累积，或直接拖拽多个文件夹到页面；也可只选父目录后在弹窗勾选多个子文件夹分别打包 |
 | `/api/folder/init` 卡十几秒 | 暂存目录很大时旧实现在配额检查里遍历全部字节 | 已改为读 manifest `total_bytes`（`_staging_entry_size()`）；若仍慢，检查是否有 manifest 缺失的遗留会话 |
 | 多选后 zip 同名被覆盖 | 旧实现直接写目标 zip | 已用 `_unique_zip_path()` 加时间戳后缀，原 zip 保留；请求名与最终名以 `/zip/status` 的 `zip_name` 为准 |
 

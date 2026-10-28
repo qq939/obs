@@ -358,8 +358,9 @@
         const ctx = createSha256(); ctx.update(new Uint8Array(buffer)); return ctx.digestHex();
     }
 
-    // 上传/接口地址：先试宿主机本地 http://localhost:19082，不可达再回退域名 http://ocs.dimond.top（二者指向同一服务）
-    const OBS_HOSTS = ['http://localhost:19082', 'http://ocs.dimond.top'];
+    // 上传/接口地址：先试宿主机本地 http://localhost:19082，不可达再回退域名 https://ocs.dimond.top（二者指向同一服务）
+    // 回退必须用 https：页面本身是 https，向 http 域名发请求会被浏览器按混合内容拦截。
+    const OBS_HOSTS = ['http://localhost:19082', 'https://ocs.dimond.top'];
     let _obsBasePromise = null;
     function obsBase() {
         if (!_obsBasePromise) {
@@ -1426,7 +1427,7 @@
         if (!confirm('删除「' + v.name + '」及其 HLS 分片？')) return;
         if (triggerEl) triggerEl.disabled = true;
         try {
-            // 走 obsFetch：先试 http://localhost:19082，不可达再回退 http://ocs.dimond.top
+            // 走 obsFetch：先试 http://localhost:19082，不可达再回退 https://ocs.dimond.top
             const res = await obsFetch(v.url, { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
             await loadFeed();
