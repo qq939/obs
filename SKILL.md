@@ -143,7 +143,9 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`（**不要**再装 LibreOffice）。思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe）。
 - **文件夹上传（多选）**：前端按**顶层文件夹**分组——`groupsFromFileList()`（`webkitRelativePath` 首段分组）、`collectEntriesFromRoots()`（拖拽/粘贴 Entry 递归）、
   `collectGroupsFromDirectoryHandles()`（`showDirectoryPicker({multiple:true})` 的 `FileSystemDirectoryHandle.values()` 异步遍历，空目录也记录）；
-  待上传态为 `folderPending = {groups, looseFiles, structureLost}`，`addGroupsToPending()` 按 `folderName|文件数|总字节|首个 relpath` 去重；弹窗可「继续添加文件夹」累积后再确认。
+  待上传态为 `folderPending = {groups, looseFiles, structureLost}`，`addGroupsToPending()` 按 `folderName|文件数|总字节|首个 relpath` 去重；
+  `renderFolderConfirm()` 逐项渲染 `#folderGroupList`（名称/文件数/大小/空目录，`×` 走 `removeFolderGroup()` 可单独移除）、
+  `#folderPickHint` 说明当前页面多选方式、`#folderAddMoreBtn` 高亮显示「＋ 继续添加文件夹（已选 N 个）」、`#folderConfirmBtn` 显示「N 个文件夹」。
   `uploadFolder()` 逐个 group 调 `uploadFolderGroup()`：各自 `POST /api/folder/init` → `uploadFiles(files, {folderId, noReload:true})` → `POST /zip` → 轮询 `/zip/status`，最后统一 reload 一次；
   `showDirectoryPicker` **只在安全上下文可用**（`localhost`/HTTPS），`http://ocs.dimond.top` 下须回退 `webkitdirectory`（同步 `input.click()` 保用户手势）。
   `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，文件名取 `file._relPath || file.webkitRelativePath || file.name`；
@@ -179,7 +181,7 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | 文件夹 relpath 400 | 含 `..`/绝对路径/盘符/NUL | 前端传 `webkitRelativePath` 或 `getAsEntry()` 递归得到的相对路径 |
 | 文件夹打包 `failed` | zip 校验失败（条目数不符/损坏/空）或磁盘不足 | 暂存保留，修复后重新 `POST /zip`；日志见 `logs/server.log` |
 | 文件夹刷新后重传 | `ocs-folder:*` localStorage 或服务端会话丢失/被清理 | 重新选同一文件夹走 `resume_folder_id`；会话被配额清理则只能重传 |
-| 「上传文件夹」只弹单目录选择 | 非安全上下文（如 `http://ocs.dimond.top`）没有 `showDirectoryPicker` | 属预期回退：选完在弹窗点「继续添加文件夹」累积；或改用 `http://localhost:19082`（安全上下文）一次多选 |
+| 「上传文件夹」只弹单目录选择 | 非安全上下文（如 `http://ocs.dimond.top`）没有 `showDirectoryPicker`，系统对话框一次只能选一个目录 | 属预期回退：选完在弹窗点高亮的「＋ 继续添加文件夹（已选 N 个）」累积，或直接拖拽多个文件夹；改用 `http://localhost:19082`（安全上下文）可在对话框里一次多选 |
 | `/api/folder/init` 卡十几秒 | 暂存目录很大时旧实现在配额检查里遍历全部字节 | 已改为读 manifest `total_bytes`（`_staging_entry_size()`）；若仍慢，检查是否有 manifest 缺失的遗留会话 |
 | 多选后 zip 同名被覆盖 | 旧实现直接写目标 zip | 已用 `_unique_zip_path()` 加时间戳后缀，原 zip 保留；请求名与最终名以 `/zip/status` 的 `zip_name` 为准 |
 

@@ -172,7 +172,8 @@ pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 
 - **多选目录**：安全上下文（`localhost`/HTTPS）优先用 `showDirectoryPicker({multiple:true})` 一次选多个文件夹；
   非安全上下文（如 `http://ocs.dimond.top`）回退 `<input type="file" webkitdirectory directory multiple>`（浏览器只允许一次选一个目录），
-  选完在弹窗点「**继续添加文件夹**」可反复追加，达到同样的多选效果。拖拽多个文件夹天然支持。
+  选完在弹窗点醒目的「**＋ 继续添加文件夹（已选 N 个）**」可反复追加，达到同样的多选效果；弹窗顶部会明确提示当前页面为何不能一次多选，
+  并给出改用 `http://localhost:19082`（安全上下文）直接多选的建议。拖拽多个文件夹天然支持。
 - **选择目录回退**：隐藏 input 选中后用 `webkitRelativePath` 作为相对路径，按首段自动分组；`FileSystemDirectoryHandle` 遍历同样按顶层目录分组。
 - **拖拽目录**：`drop` 事件用 `dataTransfer.items[i].webkitGetAsEntry()` 拿到多个目录 Entry，递归 `readEntries()`（每次只返回一批，需循环读到空）遍历所有层级；
   拿不到 Entry API 时回退为扁平 `dataTransfer.files`。
@@ -180,7 +181,8 @@ pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
   确认弹窗会**如实提示**「粘贴只拿到 X 个文件、目录结构已丢失，是否继续扁平上传？」。纯文本粘贴保持浏览器默认行为。
 - **上传**：按顶层文件夹分组，逐个创建会话并复用现有单文件直传（≤10MB，`PUT ...` + `X-File-SHA256`）与分片上传（>10MB，`/upload/init` + `/upload/chunk` + `/upload/complete`，带 `folder_id` + `relpath`）；
   进度与失败信息显示 `[i/N] 文件夹名` 与 **relpath**。顶层散文件直接上传，不参与打包。
-- **确认弹窗**：展示文件夹数量/名称列表、文件总数、总大小、空文件夹数量；重复选择同一文件夹自动去重；扁平回退时额外显示结构丢失警告。
+- **确认弹窗**：展示已选文件夹**逐项列表**（名称、文件数、大小、空目录数，可点 `×` 单独移除）、文件总数、总大小；「继续添加文件夹」高亮并显示已选数量，
+  确认按钮在多选时显示「上传并打包（N 个文件夹）」；重复选择同一文件夹自动去重；扁平回退时额外显示结构丢失警告。
 - **续传**：`localStorage` 以 `ocs-folder:{文件夹名}:{文件数}:{总字节}:{首个文件相对路径}` 记住每个文件夹的 `folder_id`，刷新/断网后重新选择同一文件夹会命中服务端会话继续传。
 
 **后端（暂存区 `obs/.folder-staging/{folder_id}/`）**
@@ -255,7 +257,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-13 07:28 | R14 | **Excel 逐 sheet 预览**：`_sheet_sections()` 为每张 sheet 生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条；xlsx/xlsm(openpyxl) 与 xls(xlrd) 均支持（`8eb6363`） |
 | 2026-10-27 11:40 | R15 | **首页上传区文案顺序 + 统一字号**：把「文件托管上传：`curl --upload-file ...`」提示移到「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**下方**，两者同置于上传框 `#uploadZone` 内，且**字号统一为 `0.8em`（小号）** |
 | 2026-10-27 19:00 | R16 | **文件夹上传（网盘式）**：选择/拖拽/粘贴文件夹递归上传，服务端暂存 + manifest + 断点续传，完成后后台打包成**一个 zip**、删除源目录，首页只留 zip；200GB 暂存配额按最久未活动优先清理；新增 `/api/folder/*` 端点（见 §3.3） |
-| 2026-10-28 15:15 | R17 | **文件夹多选上传**：安全上下文用 `showDirectoryPicker({multiple:true})` 一次多选；非安全上下文（域名 http）回退 webkitdirectory + 弹窗「继续添加文件夹」累积；拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
+| 2026-10-28 15:15 | R17 | **文件夹多选上传**：安全上下文用 `showDirectoryPicker({multiple:true})` 一次多选；非安全上下文（域名 http）回退 webkitdirectory + 弹窗「＋ 继续添加文件夹」累积；弹窗逐项列出已选文件夹（可 `×` 移除）、提示当前页面为何不能一次多选并建议用 localhost:19082；拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 

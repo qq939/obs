@@ -983,6 +983,54 @@ async def homepage(request: Request, sort: str = Query("time")):
             .paste-btn-cancel:hover { background: #f2f2f2; }
             .paste-btn-ok { background: #4A90D9; border-color: #4A90D9; color: #fff; }
             .paste-btn-ok:hover { background: #3a7ec0; }
+            /* 文件夹多选：已选列表 + 醒目的「继续添加」 */
+            .folder-pick-hint {
+                font-size: 0.82em;
+                color: #888;
+                margin: 0 0 8px 0;
+                line-height: 1.5;
+            }
+            .folder-group-list {
+                margin: 8px 0;
+                padding: 0;
+                list-style: none;
+                max-height: 26vh;
+                overflow: auto;
+            }
+            .folder-group-list li {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 5px 0;
+                border-bottom: 1px dashed #eee;
+                font-size: 0.9em;
+                color: #333;
+            }
+            .folder-group-list .fg-name {
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .folder-group-list .fg-meta { color: #999; font-size: 0.82em; white-space: nowrap; }
+            .folder-group-list .fg-del {
+                border: none;
+                background: transparent;
+                color: #c00;
+                cursor: pointer;
+                font-size: 1.1em;
+                line-height: 1;
+                padding: 0 4px;
+            }
+            .folder-group-list .fg-del:hover { color: #900; }
+            .folder-add-more {
+                background: #eaf3fc !important;
+                border-color: #4A90D9 !important;
+                color: #2a6fb0 !important;
+                font-weight: 600;
+            }
+            .folder-add-more:hover { background: #d9eafb !important; }
         </style>
         <script>
             const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
@@ -1574,7 +1622,7 @@ async def homepage(request: Request, sort: str = Query("time")):
                 }
                 const names = groups.map((g) => g.folderName).join('、');
                 document.getElementById('folderConfirmName').textContent =
-                    groups.length > 1 ? ('共 ' + groups.length + ' 个：' + names) : (names || '文件夹');
+                    groups.length > 1 ? ('已选 ' + groups.length + ' 个：' + names) : (names || '文件夹');
                 document.getElementById('folderConfirmCount').textContent = files.length;
                 document.getElementById('folderConfirmSize').textContent = fmtSize(total);
                 let extra = '';
@@ -1583,6 +1631,47 @@ async def homepage(request: Request, sort: str = Query("time")):
                 document.getElementById('folderConfirmEmpty').textContent = extra;
                 document.getElementById('folderConfirmWarn').style.display =
                     folderPending.structureLost ? 'block' : 'none';
+                // 说明当前浏览器能怎么多选：安全上下文可直接多选；http 域名需逐个添加或拖拽
+                const nativeMulti = !!(window.isSecureContext && typeof window.showDirectoryPicker === 'function');
+                const hintEl = document.getElementById('folderPickHint');
+                if (hintEl) {
+                    hintEl.textContent = nativeMulti
+                        ? '可点「＋ 继续添加文件夹」追加；每个文件夹会分别打包为一个 zip。也可直接把多个文件夹拖到页面。'
+                        : '当前为 http 页面，系统文件夹对话框一次只能选一个：点「＋ 继续添加文件夹」累积多个，'
+                          + '或直接把多个文件夹拖到页面；也可改用 http://localhost:19082 打开本站，在对话框里直接多选。'
+                          + '每个文件夹会分别打包为一个 zip。';
+                }
+                // 已选文件夹列表（每个可单独移除）
+                const groupListEl = document.getElementById('folderGroupList');
+                if (groupListEl) {
+                    groupListEl.innerHTML = '';
+                    for (let i = 0; i < groups.length; i++) {
+                        const g = groups[i];
+                        let gSize = 0;
+                        for (let j = 0; j < g.files.length; j++) gSize += g.files[j].size || 0;
+                        const li = document.createElement('li');
+                        const nameEl = document.createElement('span');
+                        nameEl.className = 'fg-name';
+                        nameEl.textContent = g.folderName;
+                        nameEl.title = g.folderName;
+                        const metaEl = document.createElement('span');
+                        metaEl.className = 'fg-meta';
+                        metaEl.textContent = g.files.length + ' 个文件 · ' + fmtSize(gSize)
+                            + ((g.emptyDirs || []).length ? ' · ' + g.emptyDirs.length + ' 空目录' : '');
+                        const delEl = document.createElement('button');
+                        delEl.type = 'button';
+                        delEl.className = 'fg-del';
+                        delEl.title = '移除该文件夹';
+                        delEl.textContent = '×';
+                        delEl.onclick = (function (idx) {
+                            return function () { removeFolderGroup(idx); };
+                        })(i);
+                        li.appendChild(nameEl);
+                        li.appendChild(metaEl);
+                        li.appendChild(delEl);
+                        groupListEl.appendChild(li);
+                    }
+                }
                 const listEl = document.getElementById('folderFileList');
                 listEl.innerHTML = '';
                 const limit = Math.min(files.length, 50);
@@ -1597,8 +1686,26 @@ async def homepage(request: Request, sort: str = Query("time")):
                     listEl.appendChild(li);
                 }
                 const addBtn = document.getElementById('folderAddMoreBtn');
-                if (addBtn) addBtn.style.display = groups.length ? 'inline-block' : 'none';
+                if (addBtn) {
+                    addBtn.style.display = (groups.length || folderPending.looseFiles.length) ? 'inline-block' : 'none';
+                    addBtn.textContent = '＋ 继续添加文件夹（已选 ' + groups.length + ' 个）';
+                }
+                const okBtn = document.getElementById('folderConfirmBtn');
+                if (okBtn) {
+                    okBtn.textContent = groups.length > 1
+                        ? ('上传并打包（' + groups.length + ' 个文件夹）')
+                        : '上传并打包';
+                }
                 modalEl.style.display = 'flex';
+            }
+            function removeFolderGroup(index) {
+                if (!folderPending || !folderPending.groups[index]) return;
+                folderPending.groups.splice(index, 1);
+                if (!folderPending.groups.length && !folderPending.looseFiles.length) {
+                    cancelFolderUpload();
+                    return;
+                }
+                renderFolderConfirm();
             }
             function addGroupsToPending(groups, looseFiles, structureLost) {
                 if (!folderPending) folderPending = { groups: [], looseFiles: [], structureLost: false };
@@ -2101,16 +2208,17 @@ async def homepage(request: Request, sort: str = Query("time")):
         <!-- 文件夹上传确认对话框（默认隐藏；使用位置：showFolderConfirm / cancelFolderUpload / confirmFolderUpload） -->
         <div id="folderConfirmModal" class="paste-modal-mask" style="display:none;">
             <div class="paste-modal">
-                <h3>检测到文件夹（可多选）</h3>
-                <p style="font-size:0.85em; color:#999; margin:0 0 8px;">可继续添加多个文件夹；确认后每个文件夹分别打包为一个 zip。</p>
+                <h3>已选择的文件夹（可多选）</h3>
+                <p id="folderPickHint" class="folder-pick-hint"></p>
                 <p>文件夹：<b id="folderConfirmName"></b></p>
+                <ul id="folderGroupList" class="folder-group-list"></ul>
                 <p>共 <b id="folderConfirmCount">0</b> 个文件，合计 <b id="folderConfirmSize">0 B</b><span id="folderConfirmEmpty"></span></p>
                 <p id="folderConfirmWarn" style="display:none; color:#c00;">粘贴只拿到文件列表、目录结构已丢失，是否继续扁平上传？</p>
                 <ul id="folderFileList" class="paste-file-list"></ul>
                 <div class="paste-modal-actions">
                     <button type="button" class="paste-btn-cancel" onclick="cancelFolderUpload()">取消</button>
-                    <button type="button" id="folderAddMoreBtn" class="paste-btn-cancel" onclick="openFolderPicker(true)" style="display:none;">继续添加文件夹</button>
-                    <button type="button" class="paste-btn-ok" onclick="confirmFolderUpload()">上传并打包</button>
+                    <button type="button" id="folderAddMoreBtn" class="paste-btn-cancel folder-add-more" onclick="openFolderPicker(true)" style="display:none;">＋ 继续添加文件夹</button>
+                    <button type="button" id="folderConfirmBtn" class="paste-btn-ok" onclick="confirmFolderUpload()">上传并打包</button>
                 </div>
             </div>
         </div>
