@@ -163,22 +163,25 @@ curl -s http://127.0.0.1:8082/preview-content/report.xlsx | head                
 pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 ```
 
-### 3.3 文件夹上传（暂存 → 打包成一个 zip）
+### 3.3 文件夹上传（暂存 → 每个文件夹打包成一个 zip）
 
-首页上传区新增「**上传文件夹**」按钮，并支持**拖拽文件夹**与页面内 **Ctrl+V / Cmd+V 粘贴文件夹**。整个文件夹会先逐文件上传到服务端暂存区，
-全部完成后由后台打包成**一个 zip**，成功后删除暂存源目录——首页最终**只出现该 zip**，不残留一堆散文件。
+首页上传区新增「**上传文件夹（可多选）**」按钮，并支持**拖拽多个文件夹**与页面内 **Ctrl+V / Cmd+V 粘贴文件夹**。每个文件夹会先逐文件上传到服务端暂存区，
+全部完成后由后台**分别打包成一个 zip**，成功后删除该暂存源目录——首页最终**只出现这些 zip**，不残留一堆散文件。
 
 **前端（`src/obs/server.py` 内联 JS）**
 
-- **选择目录**：隐藏的 `<input type="file" webkitdirectory directory multiple>`；选中后用 `webkitRelativePath` 作为每个文件的上传相对路径。
-- **拖拽目录**：`drop` 事件用 `dataTransfer.items[i].webkitGetAsEntry()` 拿到目录 Entry，递归 `readEntries()`（每次只返回一批，需循环读到空）遍历所有层级；
+- **多选目录**：安全上下文（`localhost`/HTTPS）优先用 `showDirectoryPicker({multiple:true})` 一次选多个文件夹；
+  非安全上下文（如 `http://ocs.dimond.top`）回退 `<input type="file" webkitdirectory directory multiple>`（浏览器只允许一次选一个目录），
+  选完在弹窗点「**继续添加文件夹**」可反复追加，达到同样的多选效果。拖拽多个文件夹天然支持。
+- **选择目录回退**：隐藏 input 选中后用 `webkitRelativePath` 作为相对路径，按首段自动分组；`FileSystemDirectoryHandle` 遍历同样按顶层目录分组。
+- **拖拽目录**：`drop` 事件用 `dataTransfer.items[i].webkitGetAsEntry()` 拿到多个目录 Entry，递归 `readEntries()`（每次只返回一批，需循环读到空）遍历所有层级；
   拿不到 Entry API 时回退为扁平 `dataTransfer.files`。
 - **粘贴目录**：`paste` 事件同样优先用 `clipboardData.items[i].webkitGetAsEntry()` 还原目录结构；浏览器只给文件列表、结构丢失时，
   确认弹窗会**如实提示**「粘贴只拿到 X 个文件、目录结构已丢失，是否继续扁平上传？」。纯文本粘贴保持浏览器默认行为。
-- **上传**：复用现有单文件直传（≤10MB，`PUT ...` + `X-File-SHA256`）与分片上传（>10MB，`/upload/init` + `/upload/chunk` + `/upload/complete`，带 `folder_id` + `relpath`）；
-  进度与失败信息均显示 **relpath**（相对路径），便于看清层级。
-- **确认弹窗**：上传前展示文件夹名、文件数、总大小、空文件夹数量（复用粘贴弹窗样式）；扁平回退时额外显示结构丢失警告。
-- **续传**：`localStorage` 以 `ocs-folder:{文件夹名}:{文件数}:{总字节}` 记住 `folder_id`，刷新/断网后重新选同一文件夹会命中服务端会话继续传。
+- **上传**：按顶层文件夹分组，逐个创建会话并复用现有单文件直传（≤10MB，`PUT ...` + `X-File-SHA256`）与分片上传（>10MB，`/upload/init` + `/upload/chunk` + `/upload/complete`，带 `folder_id` + `relpath`）；
+  进度与失败信息显示 `[i/N] 文件夹名` 与 **relpath**。顶层散文件直接上传，不参与打包。
+- **确认弹窗**：展示文件夹数量/名称列表、文件总数、总大小、空文件夹数量；重复选择同一文件夹自动去重；扁平回退时额外显示结构丢失警告。
+- **续传**：`localStorage` 以 `ocs-folder:{文件夹名}:{文件数}:{总字节}:{首个文件相对路径}` 记住每个文件夹的 `folder_id`，刷新/断网后重新选择同一文件夹会命中服务端会话继续传。
 
 **后端（暂存区 `obs/.folder-staging/{folder_id}/`）**
 
@@ -190,7 +193,7 @@ pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 | 路径安全 | `_safe_relpath()` 拒绝绝对路径、盘符、`../`、NUL 字节；`_resolve_staging_target()` 用 `realpath` 保证落在该会话 `data/` 内 |
 | 打包 | `POST /api/folder/{id}/zip` 后台任务：`zipfile` + `ZIP_DEFLATED` 写 `.packing.zip.tmp` → 校验（可打开、条目数与 manifest 完成数一致、`testzip()` 无损坏、大小 > 0）→ 原子 `os.replace` 到 `obs/`；**空目录写成显式目录条目**；同名 zip 自动加时间戳后缀，不静默覆盖 |
 | 成功/失败 | 成功 `shutil.rmtree` 暂存目录，首页只剩 zip；失败保留暂存与源文件，可直接重试 |
-| 配额 | 暂存默认上限 **200GB**（`FOLDER_STAGING_LIMIT` 可覆盖）；超限按「**最久未活动优先**」清理旧会话，最近 `FOLDER_ACTIVE_GRACE_SECONDS=600s` 内活跃或正在打包的会话**绝不删除**；仅剩活跃会话仍不足时对新会话返回 **507** |
+| 配额 | 暂存默认上限 **200GB**（`FOLDER_STAGING_LIMIT` 可覆盖）；统计优先读 manifest 声明的 `total_bytes`（避免每次 init 遍历数 GB 暂存目录），manifest 缺失才回退实际遍历；超限按「**最久未活动优先**」清理旧会话，最近 `FOLDER_ACTIVE_GRACE_SECONDS=600s` 内活跃或正在打包的会话**绝不删除**；仅剩活跃会话仍不足时对新会话返回 **507** |
 | 进度 | `GET /api/folder/{id}/manifest` 返回 `total_files/done_files/partial_files/uploaded_bytes`；`GET /api/folder/{id}/zip/status` 返回打包任务状态 |
 
 ```bash
@@ -252,6 +255,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-13 07:28 | R14 | **Excel 逐 sheet 预览**：`_sheet_sections()` 为每张 sheet 生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条；xlsx/xlsm(openpyxl) 与 xls(xlrd) 均支持（`8eb6363`） |
 | 2026-10-27 11:40 | R15 | **首页上传区文案顺序 + 统一字号**：把「文件托管上传：`curl --upload-file ...`」提示移到「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**下方**，两者同置于上传框 `#uploadZone` 内，且**字号统一为 `0.8em`（小号）** |
 | 2026-10-27 19:00 | R16 | **文件夹上传（网盘式）**：选择/拖拽/粘贴文件夹递归上传，服务端暂存 + manifest + 断点续传，完成后后台打包成**一个 zip**、删除源目录，首页只留 zip；200GB 暂存配额按最久未活动优先清理；新增 `/api/folder/*` 端点（见 §3.3） |
+| 2026-10-28 15:15 | R17 | **文件夹多选上传**：安全上下文用 `showDirectoryPicker({multiple:true})` 一次多选；非安全上下文（域名 http）回退 webkitdirectory + 弹窗「继续添加文件夹」累积；拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -266,16 +270,20 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R14 / R15 / R16）：**
+**最后 3 轮对话总结（R15 / R16 / R17）：**
 
-- **R14（Excel 逐 sheet 预览，2026-10-13）**：用户要求 Excel 需对**每个 sheet 页**都预览。新增 `_sheet_sections()`——每张 sheet 各自 `<h3 id="sheet-N">` 锚点区块，
-  多表时顶部加 sticky `sheet-nav` 切换条（单表不加）；`xlsx/xlsm`(openpyxl) 与 `xls`(xlrd) 两分支均改用它。多表样例（3 表 xlsx / 2 表 xls）逐表渲染 + nav 均验证通过（`8eb6363`）。
 - **R15（首页上传区文案顺序 + 统一字号，2026-10-27）**：把「文件托管上传：`curl --upload-file file.txt {url_head}/file.txt`」从上传框**上方**移到
   「拖拽文件到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」**正下方**，两者同置于 `#uploadZone` 内；并按用户要求**统一为小号字 `font-size: 0.8em`**（两行 style 完全一致）。
 - **R16（文件夹上传 → 单个 zip，2026-10-27）**：新增网盘式文件夹上传——目录选择 `webkitdirectory`、拖拽/粘贴经 `webkitGetAsEntry()` 递归还原层级；
   服务端 `obs/.folder-staging/<folder_id>/` 暂存 + `manifest.json` 记录进度（复用现有直传/分片上传，仅额外带 `folder_id`+`relpath`），全部完成后后台
   `zipfile` 打包成一个 zip 并校验、原子落盘 `obs/`，成功即删除暂存源目录，首页只留 zip；支持刷新/断网续传与 200GB 暂存配额清理（活跃会话不删）。
   自测：后端端到端 40 项 + 配额/打包失败单测 13 项全过（含 3 级嵌套、中文路径、空目录、12MB 分片、md5 抽查、续传与秒传、路径穿越拒绝）。
+- **R17（文件夹多选上传，2026-10-28）**：每个顶层文件夹独立会话、**分别打包一个 zip**。安全上下文用 `showDirectoryPicker({mode:'read', multiple:true})`
+  一次选多个目录（`FileSystemDirectoryHandle.values()` 递归，空目录记录）；`http://ocs.dimond.top` 为非安全上下文，回退 `webkitdirectory` 单目录 +
+  弹窗「继续添加文件夹」累积；拖拽/粘贴多个目录按顶层分组，扁平回退如实提示结构丢失。弹窗汇总数量/文件数/总大小/空目录，重复选择按
+  `folderName|文件数|总字节|首个 relpath` 去重；逐个 group 独立走 `init → 上传 → zip → 轮询`，全部结束统一刷新一次。
+  同时修复：配额统计改读 manifest 声明的 `total_bytes`（后补 `.packing.zip.tmp`），不再每次 `init` 遍历数 GB 暂存——实测 `init` 从 ~20s 降到 **0.032s**。
+  自测：多文件夹后端 27 项 + 完整端到端 40 项 + 配额/打包 13 项 + 前端分组/追加/弹窗 Node vm 单测 14 项，全部通过（含并发两会话、同名 zip 自动加时间戳且不覆盖原 zip）。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，

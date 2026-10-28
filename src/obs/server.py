@@ -1445,24 +1445,32 @@ async def homepage(request: Request, sort: str = Query("time")):
                     for (let i = 0; i < children.length; i++) await walkEntry(children[i], dirPath, files, emptyDirs);
                 }
             }
-            // 把若干顶层 Entry 递归收集为文件列表（保留相对路径）与空目录列表
+            // 把若干顶层 Entry 递归收集为「按顶层文件夹分组」的结果：
+            // groups = [{folderName, files, emptyDirs}]，顶层散文件放 looseFiles
             async function collectEntriesFromRoots(roots) {
-                const files = [], emptyDirs = [];
-                let hasDirs = false, folderName = '文件夹';
+                const groups = [], looseFiles = [];
+                let hasDirs = false;
                 for (let i = 0; i < roots.length; i++) {
                     const root = roots[i];
                     if (root && root.isDirectory) {
                         hasDirs = true;
-                        if (folderName === '文件夹') folderName = root.name;
+                        const group = { folderName: root.name, files: [], emptyDirs: [] };
                         let children = [];
                         try { children = await readAllEntries(root.createReader()); } catch (e) { children = []; }
-                        if (children.length === 0) emptyDirs.push(root.name);
-                        for (let j = 0; j < children.length; j++) await walkEntry(children[j], root.name, files, emptyDirs);
+                        if (children.length === 0) group.emptyDirs.push(root.name);
+                        for (let j = 0; j < children.length; j++) {
+                            await walkEntry(children[j], root.name, group.files, group.emptyDirs);
+                        }
+                        groups.push(group);
                     } else if (root && root.isFile) {
-                        await walkEntry(root, '', files, emptyDirs);
+                        const f = await entryFile(root);
+                        if (f) {
+                            try { f._relPath = f.name; } catch (e) {}
+                            looseFiles.push(f);
+                        }
                     }
                 }
-                return { files, emptyDirs, hasDirs, folderName };
+                return { groups: groups, looseFiles: looseFiles, hasDirs: hasDirs };
             }
             async function entriesFromDataTransfer(dt) {
                 if (!dt || !dt.items || !dt.items.length) return null;
@@ -1489,20 +1497,90 @@ async def homepage(request: Request, sort: str = Query("time")):
                 return await collectEntriesFromRoots(roots);
             }
 
-            // 文件夹确认弹窗（复用粘贴弹窗样式）
+            // File System Access API（showDirectoryPicker，仅安全上下文）可直接多选文件夹
+            async function walkDirectoryHandle(dirHandle, prefix, files, emptyDirs) {
+                let hasChild = false;
+                let iter;
+                try {
+                    iter = (typeof dirHandle.values === 'function') ? dirHandle.values() : dirHandle.entries();
+                } catch (e) { emptyDirs.push(prefix); return; }
+                for await (const item of iter) {
+                    hasChild = true;
+                    let handle = item, name = item && item.name;
+                    if (Array.isArray(item)) { name = item[0]; handle = item[1]; }
+                    if (!handle) continue;
+                    const rel = prefix ? (prefix + '/' + name) : name;
+                    if (handle.kind === 'file') {
+                        try {
+                            const f = await handle.getFile();
+                            try { f._relPath = rel; } catch (e) {}
+                            files.push(f);
+                        } catch (e) {}
+                    } else {
+                        await walkDirectoryHandle(handle, rel, files, emptyDirs);
+                    }
+                }
+                if (!hasChild) emptyDirs.push(prefix);
+            }
+            async function collectGroupsFromDirectoryHandles(handles) {
+                const groups = [];
+                for (let i = 0; i < handles.length; i++) {
+                    const h = handles[i];
+                    if (!h || h.kind !== 'directory') continue;
+                    const group = { folderName: h.name, files: [], emptyDirs: [] };
+                    await walkDirectoryHandle(h, h.name, group.files, group.emptyDirs);
+                    groups.push(group);
+                }
+                return groups;
+            }
+            async function pickDirectoriesNative() {
+                if (typeof window.showDirectoryPicker !== 'function') return null;
+                try {
+                    const picked = await window.showDirectoryPicker({ mode: 'read', multiple: true });
+                    if (!picked) return [];
+                    return Array.isArray(picked) ? picked : [picked];
+                } catch (e) {
+                    if (e && e.name === 'AbortError') return [];  // 用户取消
+                    return null;  // 不支持/权限被拒 → 回退 webkitdirectory
+                }
+            }
+
+            // 文件夹确认弹窗（复用粘贴弹窗样式）；支持一次累积多个文件夹
             let folderPending = null;
-            function showFolderConfirm(files, emptyDirs, folderName, structureLost) {
-                folderPending = { files: files, emptyDirs: emptyDirs || [],
-                                  folderName: folderName || '文件夹', structureLost: !!structureLost };
+            let folderPickAppend = false;
+
+            function groupKey(g) {
+                let bytes = 0;
+                for (let i = 0; i < g.files.length; i++) bytes += g.files[i].size || 0;
+                const first = g.files.length ? fileRelPath(g.files[0]) : '';
+                return g.folderName + '|' + g.files.length + '|' + bytes + '|' + first;
+            }
+            function renderFolderConfirm() {
                 const modalEl = document.getElementById('folderConfirmModal');
-                if (!modalEl) return;
-                let total = 0;
-                for (let i = 0; i < files.length; i++) total += files[i].size || 0;
-                document.getElementById('folderConfirmName').textContent = folderPending.folderName;
+                if (!modalEl || !folderPending) return;
+                const groups = folderPending.groups;
+                const files = [];
+                let emptyDirs = 0, total = 0;
+                for (let i = 0; i < groups.length; i++) {
+                    emptyDirs += (groups[i].emptyDirs || []).length;
+                    for (let j = 0; j < groups[i].files.length; j++) {
+                        files.push(groups[i].files[j]);
+                        total += groups[i].files[j].size || 0;
+                    }
+                }
+                for (let i = 0; i < folderPending.looseFiles.length; i++) {
+                    files.push(folderPending.looseFiles[i]);
+                    total += folderPending.looseFiles[i].size || 0;
+                }
+                const names = groups.map((g) => g.folderName).join('、');
+                document.getElementById('folderConfirmName').textContent =
+                    groups.length > 1 ? ('共 ' + groups.length + ' 个：' + names) : (names || '文件夹');
                 document.getElementById('folderConfirmCount').textContent = files.length;
                 document.getElementById('folderConfirmSize').textContent = fmtSize(total);
-                document.getElementById('folderConfirmEmpty').textContent =
-                    folderPending.emptyDirs.length ? ('，含 ' + folderPending.emptyDirs.length + ' 个空文件夹') : '';
+                let extra = '';
+                if (emptyDirs) extra += '，含 ' + emptyDirs + ' 个空文件夹';
+                if (folderPending.looseFiles.length) extra += '，另有 ' + folderPending.looseFiles.length + ' 个散文件直接上传';
+                document.getElementById('folderConfirmEmpty').textContent = extra;
                 document.getElementById('folderConfirmWarn').style.display =
                     folderPending.structureLost ? 'block' : 'none';
                 const listEl = document.getElementById('folderFileList');
@@ -1518,48 +1596,137 @@ async def homepage(request: Request, sort: str = Query("time")):
                     li.textContent = '… 等共 ' + files.length + ' 个文件';
                     listEl.appendChild(li);
                 }
+                const addBtn = document.getElementById('folderAddMoreBtn');
+                if (addBtn) addBtn.style.display = groups.length ? 'inline-block' : 'none';
                 modalEl.style.display = 'flex';
+            }
+            function addGroupsToPending(groups, looseFiles, structureLost) {
+                if (!folderPending) folderPending = { groups: [], looseFiles: [], structureLost: false };
+                const seen = {};
+                for (let i = 0; i < folderPending.groups.length; i++) {
+                    seen[groupKey(folderPending.groups[i])] = true;
+                }
+                for (let i = 0; i < groups.length; i++) {
+                    const g = groups[i];
+                    if (!g || (!g.files.length && !(g.emptyDirs || []).length)) continue;
+                    const k = groupKey(g);
+                    if (seen[k]) continue;  // 重复选择同一文件夹时去重
+                    seen[k] = true;
+                    folderPending.groups.push(g);
+                }
+                if (looseFiles && looseFiles.length) {
+                    folderPending.looseFiles = folderPending.looseFiles.concat(looseFiles);
+                }
+                folderPending.structureLost = folderPending.structureLost || !!structureLost;
+                renderFolderConfirm();
+            }
+            // append=true 时把新选文件夹追加到当前待上传列表
+            function showFolderConfirm(groups, looseFiles, structureLost, append) {
+                if (!append) folderPending = null;
+                addGroupsToPending(groups || [], looseFiles || [], structureLost);
             }
             function cancelFolderUpload() {
                 folderPending = null;
+                folderPickAppend = false;
                 const el = document.getElementById('folderConfirmModal');
                 if (el) el.style.display = 'none';
             }
             function confirmFolderUpload() {
                 const pending = folderPending;
                 cancelFolderUpload();
-                if (pending && pending.files.length > 0) uploadFolder(pending);
+                if (pending) uploadFolder(pending);
             }
-            // 目录选择框（webkitdirectory）：webkitRelativePath 已含顶层文件夹名
-            function uploadFolderFromInput(fileList) {
-                if (!fileList || !fileList.length) return;
-                const files = [];
-                let rootName = '';
+            // 选择文件夹：优先用 File System Access API（真·多选，仅安全上下文）；
+            // 否则回退 webkitdirectory（一次一个，可在弹窗里点「继续添加文件夹」累积多选）
+            async function openFolderPicker(addMore) {
+                if (!addMore) { folderPending = null; folderPickAppend = false; }
+                // 非安全上下文（如 http://ocs.dimond.top）没有该 API，直接同步触发 input，避免丢失用户手势
+                if (!window.isSecureContext || typeof window.showDirectoryPicker !== 'function') {
+                    folderPickAppend = !!addMore;
+                    const inp = document.getElementById('folderInput');
+                    if (inp) { try { inp.value = ''; } catch (e) {} inp.click(); }
+                    return;
+                }
+                const nativeHandles = await pickDirectoriesNative();
+                if (nativeHandles === null) {
+                    folderPickAppend = !!addMore;
+                    const inp = document.getElementById('folderInput');
+                    if (inp) { try { inp.value = ''; } catch (e) {} inp.click(); }
+                    return;
+                }
+                if (!nativeHandles.length) return;  // 用户取消
+                let groups = [];
+                try { groups = await collectGroupsFromDirectoryHandles(nativeHandles); } catch (e) { groups = []; }
+                if (groups.length) showFolderConfirm(groups, [], false, !!addMore);
+            }
+            // webkitdirectory 回退：webkitRelativePath 已含顶层文件夹名，按首段分组
+            function groupsFromFileList(fileList) {
+                const map = new Map();
                 for (let i = 0; i < fileList.length; i++) {
                     const f = fileList[i];
                     const rel = f.webkitRelativePath || f.name;
                     try { f._relPath = rel; } catch (e) {}
-                    if (!rootName) rootName = rel.split('/')[0];
-                    files.push(f);
+                    const slash = rel.indexOf('/');
+                    const rootName = slash >= 0 ? rel.slice(0, slash) : '';
+                    if (!map.has(rootName)) {
+                        map.set(rootName, { folderName: rootName || '文件夹', files: [], emptyDirs: [] });
+                    }
+                    map.get(rootName).files.push(f);
                 }
-                showFolderConfirm(files, [], rootName || '文件夹', false);
+                return Array.from(map.values());
+            }
+            function uploadFolderFromInput(fileList) {
+                if (!fileList || !fileList.length) return;
+                const groups = groupsFromFileList(fileList);
+                showFolderConfirm(groups, [], false, folderPickAppend);
+                folderPickAppend = false;
+                const inp = document.getElementById('folderInput');
+                if (inp) { try { inp.value = ''; } catch (e) {} }
             }
 
-            // 同一文件夹（名称/文件数/总大小一致）的会话 key：刷新后重新选择可续传
+            // 同一文件夹（名称/文件数/总大小/首个文件路径一致）的会话 key：刷新后可续传
             function folderResumeKey(folderName, files, totalBytes) {
-                return 'ocs-folder:' + folderName + ':' + files.length + ':' + totalBytes;
+                const first = files.length ? fileRelPath(files[0]) : '';
+                return 'ocs-folder:' + folderName + ':' + files.length + ':' + totalBytes + ':' + first;
             }
-            // 文件夹上传主流程：init → 逐文件上传 → /zip → 轮询打包状态 → 刷新首页
+            // 多文件夹上传主流程：逐个 init → 上传 → /zip → 轮询，全部完成后统一刷新
             async function uploadFolder(pending) {
-                const files = pending.files;
                 const statusEl = document.getElementById('formUploadStatus');
-                const folderName = pending.folderName || '文件夹';
+                const groups = (pending.groups || []).slice();
+                const looseFiles = pending.looseFiles || [];
+                const failed = [];
+                for (let i = 0; i < groups.length; i++) {
+                    const ok = await uploadFolderGroup(groups[i], i + 1, groups.length, statusEl);
+                    if (!ok) failed.push(groups[i].folderName || '文件夹');
+                }
+                if (looseFiles.length) {
+                    statusEl.textContent = (groups.length ? '文件夹处理完成，' : '') + '正在上传散文件...';
+                    const res = await uploadFiles(looseFiles, { noReload: true });
+                    if (res.fail > 0) failed.push(res.failedNames.join('; '));
+                }
+                if (failed.length) {
+                    statusEl.textContent = `上传未完成：${failed.length} 项失败 → ${failed.join('; ')}（暂存已保留，重新选择可续传）`;
+                    return;
+                }
+                if (groups.length || looseFiles.length) {
+                    statusEl.textContent = (groups.length > 1
+                        ? `全部 ${groups.length} 个文件夹已打包完成`
+                        : '上传完成') + '，正在刷新...';
+                    setTimeout(() => window.location.reload(), 800);
+                }
+            }
+            async function uploadFolderGroup(group, index, totalGroups, statusEl) {
+                const files = group.files || [];
+                const folderName = group.folderName || '文件夹';
+                const emptyDirs = group.emptyDirs || [];
+                if (!files.length && !emptyDirs.length) return true;
                 let totalBytes = 0;
                 for (let i = 0; i < files.length; i++) totalBytes += files[i].size || 0;
+                const prefix = totalGroups > 1 ? `[${index}/${totalGroups}] ${folderName}：` : '';
                 const resumeKey = folderResumeKey(folderName, files, totalBytes);
                 let resumeId = null;
                 try { resumeId = localStorage.getItem(resumeKey); } catch (e) { resumeId = null; }
-                statusEl.textContent = '创建文件夹上传会话...';
+                statusEl.textContent = prefix + '创建文件夹上传会话...';
                 let info;
                 try {
                     const initResp = await obsFetch('/api/folder/init', {
@@ -1569,60 +1736,63 @@ async def homepage(request: Request, sort: str = Query("time")):
                             folder_name: folderName,
                             total_files: files.length,
                             total_bytes: totalBytes,
-                            empty_dirs: pending.emptyDirs || [],
+                            empty_dirs: emptyDirs,
                             resume_folder_id: resumeId || null
                         })
                     });
-                    if (!initResp.ok) { statusEl.textContent = '创建会话失败: ' + await initResp.text(); return; }
+                    if (!initResp.ok) { statusEl.textContent = prefix + '创建会话失败: ' + await initResp.text(); return false; }
                     info = await initResp.json();
                 } catch (e) {
-                    statusEl.textContent = '创建会话失败: ' + e;
-                    return;
+                    statusEl.textContent = prefix + '创建会话失败: ' + e;
+                    return false;
                 }
                 const folderId = info.folder_id;
                 try { localStorage.setItem(resumeKey, folderId); } catch (e) {}
-                const res = await uploadFiles(files, { folderId: folderId, noReload: true });
-                if (res.fail > 0) {
-                    statusEl.textContent = `文件夹上传未完成：成功${res.success}个，失败${res.fail}个 → ${res.failedNames.join('; ')}（暂存已保留，重新选择该文件夹可续传）`;
-                    return;
+                if (files.length) {
+                    const res = await uploadFiles(files, { folderId: folderId, noReload: true });
+                    if (res.fail > 0) {
+                        statusEl.textContent = `${prefix}上传未完成：成功${res.success}个，失败${res.fail}个 → ${res.failedNames.join('; ')}（暂存已保留，重新选择可续传）`;
+                        return false;
+                    }
                 }
-                statusEl.textContent = '文件上传完成，正在打包 zip...';
+                statusEl.textContent = prefix + '文件上传完成，正在打包 zip...';
                 try {
                     const zipResp = await obsFetch('/api/folder/' + folderId + '/zip', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ zip_name: folderName + '.zip' })
                     });
-                    if (!zipResp.ok) { statusEl.textContent = '打包失败: ' + await zipResp.text(); return; }
-                    await pollFolderZip(folderId, resumeKey);
+                    if (!zipResp.ok) { statusEl.textContent = prefix + '打包失败: ' + await zipResp.text(); return false; }
                 } catch (e) {
-                    statusEl.textContent = '打包失败: ' + e;
+                    statusEl.textContent = prefix + '打包失败: ' + e;
+                    return false;
                 }
+                return await pollFolderZip(folderId, resumeKey, prefix);
             }
-            async function pollFolderZip(folderId, resumeKey) {
+            async function pollFolderZip(folderId, resumeKey, prefix) {
                 const statusEl = document.getElementById('formUploadStatus');
                 for (let i = 0; i < 600; i++) {
                     await new Promise((resolve) => setTimeout(resolve, 1000));
                     try {
                         const r = await obsFetch('/api/folder/' + folderId + '/zip/status', { cache: 'no-store' });
-                        if (!r.ok) { statusEl.textContent = '查询打包状态失败: ' + await r.text(); return; }
+                        if (!r.ok) { statusEl.textContent = (prefix || '') + '查询打包状态失败: ' + await r.text(); return false; }
                         const st = await r.json();
                         if (st.status === 'done') {
                             try { localStorage.removeItem(resumeKey); } catch (e) {}
-                            statusEl.textContent = `打包完成：${st.zip_name} (${fmtSize(st.zip_size || 0)})，正在刷新...`;
-                            setTimeout(() => window.location.reload(), 800);
-                            return;
+                            statusEl.textContent = `${prefix || ''}打包完成：${st.zip_name} (${fmtSize(st.zip_size || 0)})`;
+                            return true;
                         }
                         if (st.status === 'failed') {
-                            statusEl.textContent = '打包失败: ' + (st.error || '未知错误') + '（暂存已保留，可重试）';
-                            return;
+                            statusEl.textContent = (prefix || '') + '打包失败: ' + (st.error || '未知错误') + '（暂存已保留，可重试）';
+                            return false;
                         }
-                        statusEl.textContent = '正在打包 zip...';
+                        statusEl.textContent = (prefix || '') + '正在打包 zip...';
                     } catch (e) {
                         // 网络抖动：继续轮询
                     }
                 }
-                statusEl.textContent = '打包超时，请稍后刷新页面查看结果';
+                statusEl.textContent = (prefix || '') + '打包超时，请稍后刷新页面查看结果';
+                return false;
             }
 
             // 页面任意位置粘贴：优先用 Entry API 还原文件夹结构；纯文本粘贴保持默认行为
@@ -1631,12 +1801,12 @@ async def homepage(request: Request, sort: str = Query("time")):
                 if (!cb) return;
                 let entRes = null;
                 try { entRes = await entriesFromClipboard(cb); } catch (err) { entRes = null; }
-                if (entRes && entRes.files.length > 0) {
+                if (entRes && (entRes.groups.length > 0 || entRes.looseFiles.length > 0)) {
                     e.preventDefault();
-                    if (entRes.hasDirs) {
-                        showFolderConfirm(entRes.files, entRes.emptyDirs, entRes.folderName, false);
+                    if (entRes.hasDirs && entRes.groups.length > 0) {
+                        showFolderConfirm(entRes.groups, entRes.looseFiles, false, false);
                     } else {
-                        showPasteConfirm(entRes.files.map((f, i) => withPasteName(f, i)));
+                        showPasteConfirm(entRes.looseFiles.map((f, i) => withPasteName(f, i)));
                     }
                     return;
                 }
@@ -1648,7 +1818,7 @@ async def homepage(request: Request, sort: str = Query("time")):
                 if (named.length === 1) {
                     showPasteConfirm(named);
                 } else {
-                    showFolderConfirm(named, [], '粘贴文件', true);
+                    showFolderConfirm([{ folderName: '粘贴文件', files: named, emptyDirs: [] }], [], true, false);
                 }
             });
 
@@ -1668,11 +1838,11 @@ async def homepage(request: Request, sort: str = Query("time")):
                     e.preventDefault(); e.stopPropagation();
                     let entRes = null;
                     try { entRes = await entriesFromDataTransfer(e.dataTransfer); } catch (err) { entRes = null; }
-                    if (entRes && entRes.files.length > 0) {
-                        if (entRes.hasDirs) {
-                            showFolderConfirm(entRes.files, entRes.emptyDirs, entRes.folderName, false);
+                    if (entRes && (entRes.groups.length > 0 || entRes.looseFiles.length > 0)) {
+                        if (entRes.groups.length > 0) {
+                            showFolderConfirm(entRes.groups, entRes.looseFiles, false, false);
                         } else {
-                            handleDragUpload(entRes.files);
+                            handleDragUpload(entRes.looseFiles);
                         }
                         return;
                     }
@@ -1908,10 +2078,10 @@ async def homepage(request: Request, sort: str = Query("time")):
             <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传</p>
             <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
-            <!-- 文件夹上传：webkitdirectory 让选择框可整目录选择，uploadFolderFromInput 负责遍历 -->
+            <!-- 文件夹上传：优先 showDirectoryPicker 多选；webkitdirectory 为单目录回退（可点「继续添加文件夹」累积） -->
             <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files)" style="display:none;">
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
-            <button type="button" onclick="document.getElementById('folderInput').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹</button>
+            <button type="button" onclick="openFolderPicker(false)" title="支持多选文件夹" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹（可多选）</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
 
@@ -1931,13 +2101,15 @@ async def homepage(request: Request, sort: str = Query("time")):
         <!-- 文件夹上传确认对话框（默认隐藏；使用位置：showFolderConfirm / cancelFolderUpload / confirmFolderUpload） -->
         <div id="folderConfirmModal" class="paste-modal-mask" style="display:none;">
             <div class="paste-modal">
-                <h3>检测到文件夹</h3>
+                <h3>检测到文件夹（可多选）</h3>
+                <p style="font-size:0.85em; color:#999; margin:0 0 8px;">可继续添加多个文件夹；确认后每个文件夹分别打包为一个 zip。</p>
                 <p>文件夹：<b id="folderConfirmName"></b></p>
                 <p>共 <b id="folderConfirmCount">0</b> 个文件，合计 <b id="folderConfirmSize">0 B</b><span id="folderConfirmEmpty"></span></p>
                 <p id="folderConfirmWarn" style="display:none; color:#c00;">粘贴只拿到文件列表、目录结构已丢失，是否继续扁平上传？</p>
                 <ul id="folderFileList" class="paste-file-list"></ul>
                 <div class="paste-modal-actions">
                     <button type="button" class="paste-btn-cancel" onclick="cancelFolderUpload()">取消</button>
+                    <button type="button" id="folderAddMoreBtn" class="paste-btn-cancel" onclick="openFolderPicker(true)" style="display:none;">继续添加文件夹</button>
                     <button type="button" class="paste-btn-ok" onclick="confirmFolderUpload()">上传并打包</button>
                 </div>
             </div>
@@ -2184,6 +2356,25 @@ def _dir_size(path: str) -> int:
     return total
 
 
+def _staging_entry_size(folder_id: str, path: str) -> int:
+    """单个暂存会话的占用：优先用 manifest 声明的大小（避免每次 init 遍历数 GB 目录），
+    manifest 不可用时才回退实际遍历；打包中的临时 zip 额外计入。"""
+    total = 0
+    manifest = _read_manifest(folder_id)
+    if manifest is not None:
+        try:
+            total = max(0, int(manifest.get("total_bytes") or 0))
+        except (TypeError, ValueError):
+            total = 0
+    if total <= 0:
+        total = _dir_size(path)
+    try:
+        total += os.path.getsize(os.path.join(path, ".packing.zip.tmp"))
+    except OSError:
+        pass
+    return total
+
+
 def _staging_total_bytes() -> int:
     root = _staging_root()
     if not os.path.isdir(root):
@@ -2191,8 +2382,8 @@ def _staging_total_bytes() -> int:
     total = 0
     for name in os.listdir(root):
         d = os.path.join(root, name)
-        if os.path.isdir(d):
-            total += _dir_size(d)
+        if os.path.isdir(d) and _FOLDER_ID_RE.match(name):
+            total += _staging_entry_size(name, d)
     return total
 
 
@@ -2224,7 +2415,7 @@ def _cleanup_candidates(protect: Optional[str]) -> List[tuple]:
             job = _folder_jobs.get(name) or {}
         if job.get("status") in ("queued", "running"):
             continue   # 正在打包：不删
-        out.append((last_active, name, _dir_size(d)))
+        out.append((last_active, name, _staging_entry_size(name, d)))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -2770,8 +2961,13 @@ async def folder_zip(folder_id: str, request: Request):
             status_code=409,
             detail=f"仍有文件未上传完成（{stats['done_files']}/{stats['total_files']}），暂不打包",
         )
-    # 打包前检查磁盘余量（源 + zip 保守 ×2）
-    source_size = await asyncio.to_thread(_dir_size, _staging_data_dir(folder_id))
+    # 打包前检查磁盘余量（源 + zip 保守 ×2）；有 manifest 声明大小就不遍历大目录
+    try:
+        source_size = sum(int(f.get("size") or 0) for f in (manifest.get("files") or {}).values())
+    except (TypeError, ValueError):
+        source_size = 0
+    if source_size <= 0:
+        source_size = await asyncio.to_thread(_dir_size, _staging_data_dir(folder_id))
     need = source_size * 2 + 16 * 1024 * 1024
     free = await asyncio.to_thread(_free_disk_bytes)
     if free and free < need:

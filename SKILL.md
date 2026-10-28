@@ -28,7 +28,7 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `http://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
 | 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
 | Office 预览 | **不依赖 LibreOffice/Office 套件**：`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，转 HTML 经 `/preview-content/{filename:path}` 供 `<iframe>` 内嵌；仅这 5 种后缀且 ≤25MB 可转，其余退化占位（思路参考 `qq939/interview-jobfinder`） |
-| 文件夹上传 | **网盘式**：选择（`webkitdirectory`）/拖拽/粘贴（`webkitGetAsEntry()` 递归）→ 暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包成**一个 zip** → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理 |
+| 文件夹上传 | **网盘式、支持多选**：每个顶层文件夹**独立一个会话、分别打包一个 zip**。选择优先 `showDirectoryPicker({multiple:true})`（仅安全上下文 localhost/HTTPS）；`http://ocs.dimond.top` 等非安全上下文回退 `webkitdirectory` 单目录 + 弹窗「继续添加文件夹」累积；拖拽/粘贴（`webkitGetAsEntry()` 递归）天然支持多个目录。逐文件暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包 zip → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理（配额大小读 manifest 声明值，避免遍历大目录） |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
 | 启动脚本 | `user_start.sh`（被 `start.sh` 调用） |
 | 启动日志 | `logs/start.log`；运行日志 `logs/server.log`；问答日志 `logs/agent_tui.log` |
@@ -117,6 +117,7 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
    Office：`GET /preview-content/<docx|xlsx|xls|pptx>` 返回 `text/html`（含 `<table>`/正文），不支持的 office 后缀返回 404。
    文件夹：`POST /api/folder/init` → `PUT /api/folder/{id}/file/...`（小文件）/`/upload/*`（>10MB 带 `folder_id`+`relpath`）→ `GET /manifest` 计数一致 →
    `POST /zip` → 轮询 `/zip/status` 到 `done` → 解压核对层级/文件数/空目录/md5，并确认 `obs/.folder-staging/{id}` 已删除、首页只剩 zip。
+   多选：同时 `init` 两个会话并行上传/打包，确认生成**两个互不覆盖**的 zip（同名时自动加时间戳后缀）、各自暂存目录都被删除。
 4. 跑回归：`python3 -m pytest test_server.py test_resumable.py src/obs/test_*.py -q`（需 ffmpeg 的用例可能跳过）。
 5. 更新 `README.md` / `SKILL.md`；`git add -A && git commit`，记录 `logs/commit.txt`。
 
@@ -140,10 +141,16 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   `office_html_cached()` 按 `mtime+size` 内存缓存（失败也缓存），转换经 `asyncio.to_thread` 下放；仅 `OFFICE_CONVERTIBLE_EXTS`（`docx xlsx xlsm xls pptx`）且 ≤`OFFICE_MAX_BYTES=25MB` 才转换。
   `GET /preview-content/{filename:path}` 把片段包成独立 HTML 文档（`text/html`）供 `<iframe>` 内嵌；无解析器的 `doc/ppt/odt/ods/odp/rtf` 一律退化为下载占位。
   依赖：`pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx`（**不要**再装 LibreOffice）。思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe）。
-- **文件夹上传**：前端 `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，文件名取 `file._relPath || file.webkitRelativePath || file.name`；
+- **文件夹上传（多选）**：前端按**顶层文件夹**分组——`groupsFromFileList()`（`webkitRelativePath` 首段分组）、`collectEntriesFromRoots()`（拖拽/粘贴 Entry 递归）、
+  `collectGroupsFromDirectoryHandles()`（`showDirectoryPicker({multiple:true})` 的 `FileSystemDirectoryHandle.values()` 异步遍历，空目录也记录）；
+  待上传态为 `folderPending = {groups, looseFiles, structureLost}`，`addGroupsToPending()` 按 `folderName|文件数|总字节|首个 relpath` 去重；弹窗可「继续添加文件夹」累积后再确认。
+  `uploadFolder()` 逐个 group 调 `uploadFolderGroup()`：各自 `POST /api/folder/init` → `uploadFiles(files, {folderId, noReload:true})` → `POST /zip` → 轮询 `/zip/status`，最后统一 reload 一次；
+  `showDirectoryPicker` **只在安全上下文可用**（`localhost`/HTTPS），`http://ocs.dimond.top` 下须回退 `webkitdirectory`（同步 `input.click()` 保用户手势）。
+  `uploadFiles(files, {folderId, noReload})` 复用单文件直传/分片上传，文件名取 `file._relPath || file.webkitRelativePath || file.name`；
   目录遍历用 `entryFile`/`readAllEntries`/`walkEntry`（`readEntries()` 必须循环读到空数组）；后端暂存 `_staging_*` 系列函数 + `manifest.json`，`_safe_relpath()` 防穿越，
-  `_pack_folder_sync()` 用 `zipfile` 写 `.packing.zip.tmp` 并校验后 `os.replace`，**成功才** `rmtree` 暂存；`_enforce_staging_quota()` 按最久未活动清理且保护活跃/打包中会话；
-  新路由 `/api/folder/...` 为多段路径，仍须放在泛匹配 `/{filename}` 之前声明。
+  `_staging_entry_size()` 优先读 manifest `total_bytes`（并按需加 `.packing.zip.tmp`），**不要让配额检查遍历整个暂存目录**（数 GB 会话会让 `init` 卡十几秒）；
+  `_pack_folder_sync()` 用 `zipfile` 写 `.packing.zip.tmp` 并校验后 `os.replace` 到 `_unique_zip_path()`（同名加时间戳后缀），**成功才** `rmtree` 暂存；
+  `_enforce_staging_quota()` 按最久未活动清理且保护活跃/打包中会话；新路由 `/api/folder/...` 为多段路径，仍须放在泛匹配 `/{filename}` 之前声明。
 - **ffmpeg**：`bin/ffmpeg`、`bin/ffprobe` 由 `scripts/install_ffmpeg.sh` 获取；`user_start.sh` 自动加入 PATH。
 - **端口**：默认 8082（`PORT` 环境变量可覆盖）。
 - **Hub 注册**：按 `systemreadme.md` §三 POST 到 `http://host.docker.internal:19081/api/tools`，
@@ -172,6 +179,9 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | 文件夹 relpath 400 | 含 `..`/绝对路径/盘符/NUL | 前端传 `webkitRelativePath` 或 `getAsEntry()` 递归得到的相对路径 |
 | 文件夹打包 `failed` | zip 校验失败（条目数不符/损坏/空）或磁盘不足 | 暂存保留，修复后重新 `POST /zip`；日志见 `logs/server.log` |
 | 文件夹刷新后重传 | `ocs-folder:*` localStorage 或服务端会话丢失/被清理 | 重新选同一文件夹走 `resume_folder_id`；会话被配额清理则只能重传 |
+| 「上传文件夹」只弹单目录选择 | 非安全上下文（如 `http://ocs.dimond.top`）没有 `showDirectoryPicker` | 属预期回退：选完在弹窗点「继续添加文件夹」累积；或改用 `http://localhost:19082`（安全上下文）一次多选 |
+| `/api/folder/init` 卡十几秒 | 暂存目录很大时旧实现在配额检查里遍历全部字节 | 已改为读 manifest `total_bytes`（`_staging_entry_size()`）；若仍慢，检查是否有 manifest 缺失的遗留会话 |
+| 多选后 zip 同名被覆盖 | 旧实现直接写目标 zip | 已用 `_unique_zip_path()` 加时间戳后缀，原 zip 保留；请求名与最终名以 `/zip/status` 的 `zip_name` 为准 |
 
 ## 参考
 
