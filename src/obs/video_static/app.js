@@ -118,9 +118,20 @@
     // 共享 positions 会让所有 entry 退化成同一个 t。
     function _timeFor(v) {
         if (!v) return 0;
-        // 新 entry 永远从 0 ~ duration 随机初始化
+        // 关闭随播 → 每个视频都从 00:00:00 开始；只有随机模式才给随机时间点
+        if (!random) return 0;
         const dur = (Number.isFinite(v.duration) && v.duration > 0) ? v.duration : 60;
         return Math.max(0, Math.random() * Math.max(1, dur - 0.5));
+    }
+
+    // 顺序模式：以某个 entry 为基准，取列表里偏移 delta 的下一个/上一个视频（首尾环绕，进度 0）
+    function _seqEntryFrom(refUuid, delta) {
+        const n = videos.length;
+        if (!n) return null;
+        const i = (refUuid ? videos.findIndex(v => v.name === refUuid) : -1);
+        const base = i >= 0 ? i : 0;
+        const idx = ((base + delta) % n + n) % n;
+        return { uuid: videos[idx].name, t: 0 };
     }
 
     // 取一个随机 uuid 的视频对象（不消耗 _fillPool）
@@ -152,8 +163,17 @@
     // 之后再用 playlistWindow[2].uuid 反查得到 activeIndex（见 _syncActiveIndexFromWindow）
     function initPlaylistWindow() {
         if (videos.length === 0) { playlistWindow = []; _fillPool = []; syncAppState(); return; }
+        const n = videos.length;
         const w = new Array(WINDOW_SIZE);
-        for (let i = 0; i < WINDOW_SIZE; i++) w[i] = _makeRandomEntry();
+        if (random) {
+            for (let i = 0; i < WINDOW_SIZE; i++) w[i] = _makeRandomEntry();
+        } else {
+            // 顺序模式：中间格 = videos[0]，往后按列表顺序，往前绕到列表末尾
+            for (let i = 0; i < WINDOW_SIZE; i++) {
+                const idx = ((i - 2) % n + n) % n;
+                w[i] = { uuid: videos[idx].name, t: 0 };
+            }
+        }
         playlistWindow = w;
         _syncActiveIndexFromWindow();
         syncAppState();
@@ -206,7 +226,9 @@
             for (let s = 0; s < steps; s++) {
                 const next = new Array(WINDOW_SIZE);
                 for (let i = 0; i < WINDOW_SIZE - 1; i++) next[i] = playlistWindow[i + 1];
-                next[WINDOW_SIZE - 1] = _makeRandomEntry();
+                next[WINDOW_SIZE - 1] = random
+                    ? _makeRandomEntry()
+                    : _seqEntryFrom(next[WINDOW_SIZE - 2] && next[WINDOW_SIZE - 2].uuid, 1);
                 playlistWindow = next;
             }
         } else {
@@ -215,7 +237,9 @@
             for (let s = 0; s < k; s++) {
                 const next = new Array(WINDOW_SIZE);
                 for (let i = 1; i < WINDOW_SIZE; i++) next[i] = playlistWindow[i - 1];
-                next[0] = _makeRandomEntry();
+                next[0] = random
+                    ? _makeRandomEntry()
+                    : _seqEntryFrom(next[1] && next[1].uuid, -1);
                 playlistWindow = next;
             }
         }
@@ -819,9 +843,8 @@
         // 因为 entry.t 是 entry 自身的属性，不能跨 entry 共享
         const seekT = (typeof entry.t === 'number' && isFinite(entry.t) && entry.t > 0)
             ? entry.t : 0;
-        if (seekT > 0) {
-            video._pendingSeek = seekT;
-        }
+        // 关闭随播：不管 entry.t 是多少，一律从头播（00:00:00）
+        video._pendingSeek = random ? seekT : 0;
 
         if (v.hls && v.hlsReady && hlsCapable(v)) {
             video.src = '';
@@ -1355,9 +1378,16 @@
 
     // Video metadata: restore pending seek
     video.addEventListener('loadedmetadata', () => {
-        if (video._pendingSeek !== undefined && isFinite(video._pendingSeek) &&
-            video._pendingSeek < video.duration - 0.3) {
-            video.currentTime = video._pendingSeek;
+        const ps = video._pendingSeek;
+        if (ps !== undefined && isFinite(ps)) {
+            if (ps <= 0) {
+                // 顺序模式（关闭随播）：每个视频第一个动作就是回到 00:00:00
+                try { video.currentTime = 0; } catch (_) {}
+            } else if (ps < video.duration - 0.3) {
+                video.currentTime = ps;
+            }
+        } else if (!random) {
+            try { video.currentTime = 0; } catch (_) {}
         }
         video._pendingSeek = undefined;
     });
