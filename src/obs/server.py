@@ -4,9 +4,10 @@
 #   - 网页端的「上传/下载」动作不走这里，而是由前端 JS 先试直连 http://localhost:19082、失败再回退本域名
 # 使用位置：
 #   - 首页「文件托管」curl 上传示例、文件列表下载链接前缀、上传成功响应文本、启动日志示例
-url_head = "https://ocs.dimond.top"
-
 import os
+
+# 可用环境变量 URL_HEAD 覆盖（部署到别的机器时指向本机地址，例如 http://192.168.0.201:8080）
+url_head = os.environ.get("URL_HEAD", "https://ocs.dimond.top").rstrip("/")
 import time
 import shutil
 import json
@@ -2488,7 +2489,7 @@ async def homepage(request: Request, sort: str = Query("time")):
             // 页面文字只展示域名 https://ocs.dimond.top；本地地址仅用于加速探测（二者指向同一服务）
             // 回退必须用 https：页面本身是 https，向 http 域名发 XHR/fetch 会被浏览器按混合内容拦截。
             var DOWNLOAD_HOST_PRIMARY = "__OCS_LOCAL_BASE__";
-            var DOWNLOAD_HOST_FALLBACK = "https://ocs.dimond.top";
+            var DOWNLOAD_HOST_FALLBACK = "__OCS_FALLBACK_BASE__";
 
             // 上传/接口地址：先试 http://localhost:19082，不可达再回退域名 https://ocs.dimond.top
             var OBS_HOSTS = [DOWNLOAD_HOST_PRIMARY, DOWNLOAD_HOST_FALLBACK];
@@ -2749,6 +2750,7 @@ async def homepage(request: Request, sort: str = Query("time")):
     """
     # 宿主机本地直连地址：默认 19082（ocs 卡片），其它卡片用自己的端口，避免把上传发到别的卡片
     html = html.replace("__OCS_LOCAL_BASE__", os.environ.get("OCS_LOCAL_BASE", "http://localhost:19082"))
+    html = html.replace("__OCS_FALLBACK_BASE__", os.environ.get("OCS_FALLBACK_BASE", url_head))
     return HTMLResponse(content=html)
 
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
