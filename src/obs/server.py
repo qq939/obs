@@ -132,7 +132,10 @@ HLS_SEGMENT_BYTES = 4 * 1024 * 1024
 HLS_TIMEOUT_SECONDS = 600
 # 每日定时任务时段（Asia/Shanghai，无夏令时）；可用环境变量覆盖
 #   使用位置：hls_cron_key / hls_cron_tick / /hls/cron
-HLS_CRON_ENABLED = os.environ.get("HLS_CRON_ENABLED", "1").lower() not in ("0", "false", "no")
+# 默认关闭：只有用户在页面里打开「每日 HLS 分片任务」才会跑（状态存 logs/hls_cron.json）
+HLS_CRON_ENABLED = os.environ.get("HLS_CRON_ENABLED", "0").lower() not in ("0", "false", "no")
+# 运行时开关状态文件（相对启动目录，user_start.sh 会 cd 到项目根）
+HLS_CRON_STATE_PATH = os.environ.get("HLS_CRON_STATE", os.path.join("logs", "hls_cron.json"))
 HLS_CRON_HOUR = int(os.environ.get("HLS_CRON_HOUR", 4))
 HLS_CRON_MINUTE = int(os.environ.get("HLS_CRON_MINUTE", 0))
 HLS_CRON_TZ = os.environ.get("HLS_CRON_TZ", "Asia/Shanghai")
@@ -398,6 +401,26 @@ def _cron_tzinfo(tz_name: str):
     except Exception:
         return timezone(timedelta(hours=8))
 
+def hls_cron_enabled_runtime() -> bool:
+    """运行时开关：优先读状态文件；文件不存在时用环境变量（默认关闭）。"""
+    try:
+        with open(HLS_CRON_STATE_PATH, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("enabled"))
+    except Exception:
+        return HLS_CRON_ENABLED
+
+
+def set_hls_cron_enabled(enabled: bool) -> bool:
+    """写入开关状态（持久化到 logs/hls_cron.json，重启后仍生效）。"""
+    d = os.path.dirname(HLS_CRON_STATE_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(HLS_CRON_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"enabled": bool(enabled),
+                   "updated_at": datetime.now(timezone.utc).isoformat()}, f)
+    return bool(enabled)
+
+
 def hls_cron_key(now: datetime, tz_name: str, hour: int, minute: int) -> Optional[str]:
     """若 now（带时区）落在目标时区的 hour:minute，返回该天的日期键 'YYYY-MM-DD'，否则 None。
     日期键用于「每天只触发一次」的去重。"""
@@ -414,7 +437,7 @@ def hls_cron_key(now: datetime, tz_name: str, hour: int, minute: int) -> Optiona
 async def hls_cron_tick() -> None:
     """定时轮询：命中 04:00 且当天未跑过，就执行一次扫描生成"""
     global _hls_cron_last_key
-    if not HLS_CRON_ENABLED:
+    if not hls_cron_enabled_runtime():
         return
     key = hls_cron_key(datetime.now(timezone.utc), HLS_CRON_TZ, HLS_CRON_HOUR, HLS_CRON_MINUTE)
     if key is None or key == _hls_cron_last_key:
@@ -2375,6 +2398,81 @@ async def homepage(request: Request, sort: str = Query("time")):
         </script>
     </head>
     <body>
+
+        <!-- 设置入口：右上角⚙，开关「每日 HLS 分片任务」（使用位置：本文件的 #settings-fab 样式与脚本） -->
+        <style>
+            #settings-fab{position:fixed;top:14px;right:16px;z-index:9999;width:38px;height:38px;border-radius:50%;
+                border:1px solid #ddd;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.12);cursor:pointer;
+                font-size:19px;line-height:36px;text-align:center;user-select:none}
+            #settings-fab:hover{background:#f5f5f5}
+            #settings-panel{position:fixed;top:60px;right:16px;z-index:9999;width:290px;background:#fff;
+                border:1px solid #e2e2e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.16);padding:14px 16px;
+                font-size:14px;color:#333}
+            #settings-panel[hidden]{display:none}
+            #settings-panel .sp-title{font-weight:600;margin-bottom:10px}
+            #settings-panel .sp-row{display:flex;align-items:flex-start;gap:10px;cursor:pointer}
+            #settings-panel .sp-row span{flex:1;line-height:1.35}
+            #settings-panel .sp-row small{color:#999;font-size:12px}
+            #settings-panel input[type=checkbox]{width:18px;height:18px;margin-top:2px;cursor:pointer}
+            #settings-panel .sp-status{margin-top:10px;font-size:12px;color:#888}
+        </style>
+        <div id="settings-fab" title="设置" role="button" aria-label="设置">⚙</div>
+        <div id="settings-panel" hidden>
+            <div class="sp-title">设置</div>
+            <label class="sp-row">
+                <span>每日 HLS 分片任务<br><small>每天 04:00 检查并为缺失的视频生成 HLS 分片</small></span>
+                <input type="checkbox" id="hlsCronToggle">
+            </label>
+            <div class="sp-status" id="hlsCronStatus">读取中…</div>
+        </div>
+        <script>
+        (function () {
+            const fab = document.getElementById('settings-fab');
+            const panel = document.getElementById('settings-panel');
+            const toggle = document.getElementById('hlsCronToggle');
+            const status = document.getElementById('hlsCronStatus');
+            if (!fab || !panel || !toggle) return;
+
+            fab.addEventListener('click', (e) => {
+                e.stopPropagation();
+                panel.hidden = !panel.hidden;
+            });
+            document.addEventListener('click', (e) => {
+                if (!panel.hidden && !panel.contains(e.target) && e.target !== fab) panel.hidden = true;
+            });
+            document.addEventListener('keydown', (e) => { if (e.key === 'Escape') panel.hidden = true; });
+
+            function render(d) {
+                toggle.checked = !!d.enabled;
+                const when = ('0' + d.hour).slice(-2) + ':' + ('0' + d.minute).slice(-2);
+                status.textContent = d.enabled
+                    ? ('已开启 · 每天 ' + when + '（' + d.tz + '）')
+                    : '已关闭（默认）';
+            }
+
+            async function load() {
+                try {
+                    const r = await fetch('/api/hls-cron', { cache: 'no-store' });
+                    render(await r.json());
+                } catch (e) { status.textContent = '读取失败：' + e.message; }
+            }
+
+            toggle.addEventListener('change', async () => {
+                status.textContent = '保存中…';
+                try {
+                    const r = await fetch('/api/hls-cron', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ enabled: toggle.checked })
+                    });
+                    const d = await r.json();
+                    render(d);
+                } catch (e) { status.textContent = '保存失败：' + e.message; }
+            });
+
+            load();
+        })();
+        </script>
         <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
         <h1 class="site-title"><a href="/video">文件托管服务</a></h1>
 
@@ -4417,6 +4515,25 @@ async def delete_file(filename: str, request: Request):
             log_line(f"删除 HLS 目录失败 file={filename} error={e}")
     log_line(f"删除文件 file={filename} hls_removed={hls_removed}")
     return Response(content="Deleted", status_code=200)
+
+@app.get("/api/hls-cron")
+async def get_hls_cron():
+    """查询每日 HLS 分片任务的开关状态（默认关闭）。"""
+    return {"enabled": hls_cron_enabled_runtime(), "hour": HLS_CRON_HOUR,
+            "minute": HLS_CRON_MINUTE, "tz": HLS_CRON_TZ}
+
+@app.post("/api/hls-cron")
+async def post_hls_cron(request: Request):
+    """打开/关闭每日 HLS 分片任务（持久化，重启后仍生效）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    enabled = bool(body.get("enabled"))
+    set_hls_cron_enabled(enabled)
+    log_line(f"HLS 定时任务开关 -> {'开启' if enabled else '关闭'}")
+    return {"enabled": enabled, "hour": HLS_CRON_HOUR,
+            "minute": HLS_CRON_MINUTE, "tz": HLS_CRON_TZ}
 
 # 启动服务器
 if __name__ == "__main__":

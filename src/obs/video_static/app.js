@@ -1428,7 +1428,8 @@
         if (triggerEl) triggerEl.disabled = true;
         try {
             // 走 obsFetch：先试 http://localhost:19082，不可达再回退 https://ocs.dimond.top
-            const res = await obsFetch(v.url, { method: 'DELETE' });
+            // 注意：v.url 是播放路径（/obs/xxx.mp4，GET 路由），删除必须用 /{文件名}
+            const res = await obsFetch('/' + encodeURIComponent(v.name), { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
             await loadFeed();
         } catch (err) {
