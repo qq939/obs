@@ -1956,7 +1956,113 @@ async def homepage(request: Request, sort: str = Query("time")):
                 renderFolderConfirm();
             }
             // append=true 时把新选文件夹追加到当前待上传列表
-            function showFolderConfirm(groups, looseFiles, structureLost, append) {
+
+            // ------------------------------------------------------------------
+            // 上传文件夹的两种方式（使用位置：chooseFolderUploadMode / showFolderConfirm）
+            //   files：打散上传（原来的逐文件逻辑）
+            //   zip  ：整个文件夹打包成 .tar.gz 后当一个文件上传
+            // ------------------------------------------------------------------
+            let folderZipOnce = false;
+
+            function chooseFolderUploadMode() {
+                const m = document.getElementById('folderModeModal');
+                if (m) m.style.display = 'block';
+            }
+            function closeFolderMode() {
+                const m = document.getElementById('folderModeModal');
+                if (m) m.style.display = 'none';
+            }
+            function pickFolderMode(mode) {
+                closeFolderMode();
+                folderZipOnce = (mode === 'zip');
+                // 复用原有选择器（原生目录选择 / webkitdirectory 回退）
+                openFolderPicker(false);
+            }
+
+            // 纯 JS 生成 tar（ustar），再交给 CompressionStream('gzip') 压缩
+            function tarOctal(value, len) {
+                const s = value.toString(8);
+                return s.padStart(len - 1, '0') + '\u0000';
+            }
+            function tarHeader(name, size, mtime) {
+                const enc = new TextEncoder();
+                const buf = new Uint8Array(512);
+                let nm = name, prefix = '';
+                if (enc.encode(nm).length > 100) {
+                    const cut = nm.lastIndexOf('/', 155);
+                    if (cut > 0) { prefix = nm.slice(0, cut); nm = nm.slice(cut + 1); }
+                }
+                const put = (str, off, len) => {
+                    const b = enc.encode(str);
+                    buf.set(b.subarray(0, len), off);
+                };
+                put(nm, 0, 100);
+                put(tarOctal(0o644, 8), 100, 8);
+                put(tarOctal(0, 8), 108, 8);
+                put(tarOctal(0, 8), 116, 8);
+                put(tarOctal(size, 12), 124, 12);
+                put(tarOctal(mtime, 12), 136, 12);
+                for (let i = 148; i < 156; i++) buf[i] = 0x20;   // 校验和先填空格
+                buf[156] = 0x30;                                  // typeflag '0' = 普通文件
+                put('ustar\u000000', 257, 8);
+                put('root', 265, 32);
+                put('root', 297, 32);
+                put(prefix, 345, 155);
+                let sum = 0;
+                for (let i = 0; i < 512; i++) sum += buf[i];
+                put(sum.toString(8).padStart(6, '0') + '\u0000 ', 148, 8);
+                return buf;
+            }
+
+            // groups: [{folderName, files:[File]}]  looseFiles: [File]
+            async function buildTarGz(groups, looseFiles) {
+                const parts = [];
+                const entries = [];
+                for (const g of (groups || [])) {
+                    for (const f of (g.files || [])) {
+                        let rel = f._relPath || f.webkitRelativePath || f.name;
+                        if (g.folderName && !rel.startsWith(g.folderName + '/')) {
+                            rel = g.folderName + '/' + rel.replace(/^\/+/, '');
+                        }
+                        entries.push([rel, f]);
+                    }
+                }
+                for (const f of (looseFiles || [])) entries.push([f.name, f]);
+
+                for (const [rel, f] of entries) {
+                    const mtime = Math.floor((f.lastModified || Date.now()) / 1000);
+                    parts.push(tarHeader(rel, f.size, mtime));
+                    parts.push(f);
+                    const pad = (512 - (f.size % 512)) % 512;
+                    if (pad) parts.push(new Uint8Array(pad));
+                }
+                parts.push(new Uint8Array(1024));   // 两个结束块
+
+                const tarBlob = new Blob(parts, { type: 'application/x-tar' });
+                const base = (groups && groups[0] && groups[0].folderName) ? groups[0].folderName : 'archive';
+                if (typeof CompressionStream === 'function') {
+                    const gz = await new Response(tarBlob.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+                    return { blob: gz, name: base + '.tar.gz' };
+                }
+                return { blob: tarBlob, name: base + '.tar' };
+            }
+
+            async function zipAndUpload(groups, looseFiles) {
+                const statusEl = document.getElementById('formUploadStatus');
+                if (statusEl) statusEl.textContent = '正在打包并压缩（' + ((groups || []).length) + ' 个文件夹）…';
+                const { blob, name } = await buildTarGz(groups, looseFiles);
+                if (statusEl) statusEl.textContent = '压缩完成：' + name + '（' + (blob.size / 1048576).toFixed(2) + ' MB），开始上传…';
+                const file = new File([blob], name, { type: 'application/gzip', lastModified: Date.now() });
+                return await uploadFiles([file], {});
+            }
+
+            async function showFolderConfirm(groups, looseFiles, structureLost, append) {
+                // 用户在「上传文件夹」里选了压缩上传：不再逐文件确认，直接打包成一个 tar.gz
+                if (folderZipOnce) {
+                    folderZipOnce = false;
+                    try { return await zipAndUpload(groups, looseFiles); }
+                    catch (e) { alert('压缩上传失败：' + e.message); return; }
+                }
                 if (!append) folderPending = null;
                 addGroupsToPending(groups || [], looseFiles || [], structureLost);
             }
@@ -2476,6 +2582,31 @@ async def homepage(request: Request, sort: str = Query("time")):
         <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
         <h1 class="site-title"><a href="/video">文件托管服务</a></h1>
 
+
+        <!-- 上传文件夹方式选择：打散上传 / 压缩上传（使用位置：chooseFolderUploadMode） -->
+        <div id="folderModeModal" style="display:none; position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.45);">
+            <div style="position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:min(440px,92vw);
+                        background:#fff; border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.28); padding:20px 22px;">
+                <div style="font-size:16px; font-weight:600; margin-bottom:6px;">上传文件夹</div>
+                <div style="font-size:13px; color:#888; line-height:1.5; margin-bottom:16px;">
+                    请选择处理方式。压缩上传会在浏览器里打包成 <code>.tar.gz</code>，只产生一个文件。
+                </div>
+                <button type="button" onclick="pickFolderMode('files')" style="display:block; width:100%; text-align:left;
+                        padding:12px 14px; margin-bottom:10px; border:1px solid #dcdcdc; border-radius:8px;
+                        background:#fff; cursor:pointer; font-size:14px;">
+                    <b>打散上传</b><br><span style="font-size:12px; color:#888;">遍历出每一个文件，逐个上传（保留目录结构）</span>
+                </button>
+                <button type="button" onclick="pickFolderMode('zip')" style="display:block; width:100%; text-align:left;
+                        padding:12px 14px; margin-bottom:14px; border:1px solid #dcdcdc; border-radius:8px;
+                        background:#fff; cursor:pointer; font-size:14px;">
+                    <b>压缩上传</b><br><span style="font-size:12px; color:#888;">整个文件夹打成 <code>.tar.gz</code>，作为一个文件上传</span>
+                </button>
+                <div style="text-align:right;">
+                    <button type="button" onclick="closeFolderMode()" style="padding:6px 16px; border:1px solid #ccc;
+                            background:#fff; border-radius:6px; cursor:pointer;">取消</button>
+                </div>
+            </div>
+        </div>
         <!-- 公告板模块 -->
         <div class="notice-board">
             <div id="ws-status-indicator" title="Connecting..."></div>
@@ -2493,8 +2624,8 @@ async def homepage(request: Request, sort: str = Query("time")):
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
             <!-- 文件夹上传：https/localhost 优先 showDirectoryPicker（一次一个目录）；webkitdirectory 为回退；弹窗内「继续添加文件夹」累积 -->
             <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files)" style="display:none;">
-            <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">选择文件</button>
-            <button type="button" onclick="openFolderPicker(false)" title="浏览器一次选一个文件夹，可点「继续添加文件夹」累积或直接拖入多个" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹（可多选）</button>
+            <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">上传文件</button>
+            <button type="button" onclick="chooseFolderUploadMode()" title="先选上传方式：逐文件上传，或整个文件夹打包成 tar.gz" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
         </div>
 

@@ -96,7 +96,7 @@ POST http://host.docker.internal:19081/api/tools
 ```bash
 cd /home/agent/.claude/workspace/project
 git config user.name "harness-agent"        # 容器默认没有身份，不设会 commit 失败
-git config user.email "agent@hermit.local"
+git config user.email "agent@harness.local"
 [ -d .git ] || { git init; git add -A; git commit -m "Initial commit"; }
 
 # 每次对话结束：提交本次变更，并把 commit 记进 logs/commit.txt
@@ -106,6 +106,15 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 
 `.gitignore` 至少包含：`logs/  node_modules/  .DS_Store  __pycache__/  *.log  .env  uploads/  dist/  build/`
 （完整格式与示例见 skill `harness-git`）
+
+远程仓库（GitHub）名字**必须以 `harness` 开头**，形如 `harness-<项目>`；新建仓库时直接这样命名。
+已有远程不合规：先在 GitHub 改名（旧地址会自动重定向），再 `git remote set-url origin <新地址>`。
+自检：
+
+```bash
+git remote get-url origin | sed -E 's#.*/##; s#\.git$##' | grep -q '^harness' \
+  || echo "远程仓库名不合规：必须以 harness 开头"
+```
 
 ================================================================================
 五、每张卡片自己的注入：project/claudeagent.md

@@ -45,6 +45,8 @@ if [ -x "$PROJECT_DIR/bin/ffmpeg" ]; then
     export PATH="$PROJECT_DIR/bin:$PATH"
     log "已启用内置 ffmpeg: $PROJECT_DIR/bin/ffmpeg"
 fi
+# 幂等安装依赖（重建容器后不依赖镜像层里的 pip 包）
+python3 -m pip install -q --break-system-packages -r requirements.txt >> logs/pip_boot.log 2>&1 || true
 PORT="$PORT" UPLOAD_DIR="obs" HLS_DIR="obs_shards" LOG_DIR="logs" \
     nohup python3 src/obs/server.py >> "$LOG_FILE" 2>&1 &
 PID=$!

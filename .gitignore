@@ -49,3 +49,8 @@ tips.txt
 
 # ---- Playwright ----
 .playwright-mcp/
+
+# ---- 卡片本地注入文件（平台生成，不入库）----
+claudeagent.md
+initial_message.md
+*.bak*

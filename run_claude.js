@@ -15,7 +15,23 @@ if (!CLAUDE_MSG) {
 }
 
 let message = Buffer.from(CLAUDE_MSG, 'base64').toString('utf8');
-const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+// 日志时间戳统一用北京时间（容器默认 UTC，toISOString() 会差 8 小时）。
+// 可用 HARNESS_TZ 覆盖；Intl 不依赖容器里的 tzdata，取不到就退回 UTC。
+const LOG_TZ = process.env.HARNESS_TZ || 'Asia/Shanghai';
+function localTimestamp() {
+    try {
+        return new Intl.DateTimeFormat('sv-SE', {
+            timeZone: LOG_TZ,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false,
+        }).format(new Date()).replace('T', ' ').slice(0, 19);
+    } catch (e) {
+        return new Date().toISOString().replace('T', ' ').substring(0, 19);
+    }
+}
+const timestamp = localTimestamp();
 
 const logEntry = `\n[${timestamp}] $ ${message}\n`;
 
@@ -27,30 +43,54 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 本卡片自己的注入：project/claudeagent.md
-//   - CLAUDE.md 是平台级注入（所有卡片共享，平台维护）
-//   - claudeagent.md 是**这一张卡片自己的**注入（写本卡片的核心目标/职责/对外接口），
-//     由卡片 agent 维护，control 建卡片时会生成模板
-// 这里把它注入到每次调用的消息前面，于是无论走面板「发送」还是容器 /ask/claude，
-// Claude 都带着本卡片的核心目标在干活。
+// 每轮消息的固定后缀：规范 + 终极目标
+//
+//   最终发给 Claude 的 message = 用户消息
+//                                + （规范：initial_message.md 的内容）
+//                                + （终极目标：claudeagent.md 的内容）
+//
+// 为什么改成「后缀」而不是「建卡时发一条初始消息」：
+//   - 建卡/重启不该主动消耗一轮 token，也不该在没人看着的时候让 agent 自己开工；
+//   - 但规范和目标必须每轮都在，否则聊长了 agent 会忘掉自己的职责；
+//   - 放在消息末尾比放在前面更贴近"指令补丁"的语义，也不会打乱用户原话。
+//
+// 两个文件都在 config/rules/ 下（容器启动时会被复制到 project 目录）：
+//   initial_message.md —— 平台级规范（所有卡片同一份）
+//   claudeagent.md     —— 本卡片自己的终极目标（用户通过面板「任务」按钮维护）
 // ---------------------------------------------------------------------------
+const SPEC_FILE = path.join(WORKSPACE_DIR, 'initial_message.md');
+const SPEC_MAX_CHARS = 2000;
 const AGENT_PROFILE_FILE = path.join(WORKSPACE_DIR, 'claudeagent.md');
 const AGENT_PROFILE_MAX_CHARS = 4000;
-let agentProfile = '';
-try {
-    if (fs.existsSync(AGENT_PROFILE_FILE)) {
-        agentProfile = fs.readFileSync(AGENT_PROFILE_FILE, 'utf8').trim();
+
+function readTrimmed(file, maxChars, label) {
+    try {
+        if (!fs.existsSync(file)) return '';
+        let text = fs.readFileSync(file, 'utf8').trim();
+        if (text.length > maxChars) text = text.slice(0, maxChars) + '\n...(已截断)';
+        return text;
+    } catch (e) {
+        console.error(`[WARN] Failed to read ${label}:`, e.message);
+        return '';
     }
-} catch (e) {
-    console.error('[WARN] Failed to read claudeagent.md:', e.message);
+}
+
+const specText = readTrimmed(SPEC_FILE, SPEC_MAX_CHARS, 'initial_message.md');
+const agentProfile = readTrimmed(AGENT_PROFILE_FILE, AGENT_PROFILE_MAX_CHARS, 'claudeagent.md');
+
+const suffixParts = [];
+if (specText) {
+    suffixParts.push(`（规范：${specText}）`);
+} else {
+    console.error('[WARN] initial_message.md 不存在或为空；本轮不带规范');
 }
 if (agentProfile) {
-    if (agentProfile.length > AGENT_PROFILE_MAX_CHARS) {
-        agentProfile = agentProfile.slice(0, AGENT_PROFILE_MAX_CHARS) + '\n...(已截断)';
-    }
-    message = `【本卡片的核心目标 · claudeagent.md】\n${agentProfile}\n\n----------\n\n${message}`;
+    suffixParts.push(`（终极目标：${agentProfile}）`);
 } else {
-    console.error('[WARN] claudeagent.md 不存在或为空；建议先写清本卡片的核心目标');
+    console.error('[WARN] claudeagent.md 不存在或为空；本轮不带终极目标');
+}
+if (suffixParts.length) {
+    message = `${message}\n\n${suffixParts.join('\n\n')}`;
 }
 
 // 处理图片（可选）
