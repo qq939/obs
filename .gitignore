@@ -54,3 +54,7 @@ tips.txt
 claudeagent.md
 initial_message.md
 *.bak*
+
+# 一次性补丁脚本（用完删，不入库）
+patch_*.py
+find_nul.py
