@@ -3580,6 +3580,10 @@ PREVIEW_TEXT_EXTS = {"txt", "csv", "tsv", "json", "md", "log", "xml", "yml", "ya
                      "ts", "tsx", "jsx", "css", "sh", "bash", "sql", "c", "h", "cpp",
                      "hpp", "cc", "java", "go", "rs", "rb", "php", "vue", "bat", "ps1",
                      "lua", "kt", "swift", "scala", "pl", "dart", "r"}
+# 允许在预览页直接编辑并保存的后缀（纯文本；写入统一按 UTF-8）。
+EDITABLE_TEXT_EXTS = {"txt", "md"}
+# 在线编辑的体积上限，避免把超大文件整段读进内存。
+MAX_EDIT_TEXT_BYTES = 5 * 1024 * 1024
 PREVIEW_OFFICE_EXTS = {"doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf"}
 
 PREVIEW_EXTS = (PREVIEW_IMAGE_EXTS | PREVIEW_AUDIO_EXTS | PREVIEW_VIDEO_EXTS |
@@ -3615,6 +3619,11 @@ def preview_kind(name: str) -> str:
     if e in PREVIEW_OFFICE_EXTS:
         return "office"
     return "other"
+
+
+def is_editable_text(name: str, size: int = 0) -> bool:
+    """txt/md 且不超过编辑体积上限时，允许在预览页直接编辑保存。"""
+    return file_ext(name) in EDITABLE_TEXT_EXTS and 0 <= size <= MAX_EDIT_TEXT_BYTES
 
 
 def safe_upload_path(upload_dir: str, filename: str) -> str:
@@ -3807,6 +3816,13 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
                     color: #fff; text-decoration: none; padding: 9px 18px; border-radius: 8px; font-size: 14px;
                     font-weight: 600; box-shadow: 0 2px 10px rgba(47,111,235,.35); }
     .btn-download:hover { background: #3b7cf7; }
+    .btn-edit { flex: 0 0 auto; display: none; align-items: center; gap: 6px; background: #262b36; color: #e6e6e6;
+                border: 1px solid #39404f; padding: 8px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; }
+    .btn-edit:hover { background: #303744; }
+    .btn-edit[disabled] { opacity: .55; cursor: default; }
+    .save-state { flex: 0 0 auto; color: #7d8494; font-size: 12px; white-space: nowrap; }
+    .save-state.ok { color: #4ade80; }
+    .save-state.err { color: #ff7b72; }
     .stage { flex: 1 1 auto; min-height: 0; position: relative; overflow: auto; padding: 16px;
              display: flex; align-items: center; justify-content: center; }
     .stage img { max-width: 100%; max-height: 100%; object-fit: contain; background: #000;
@@ -3814,9 +3830,13 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     .stage video { max-width: 100%; max-height: 100%; background: #000; }
     .stage audio { width: min(720px, 100%); }
     iframe.frame { width: 100%; height: 100%; border: 0; background: #fff; border-radius: 8px; }
-    .csv-wrap, .text-wrap { width: 100%; height: 100%; overflow: auto; border: 1px solid #262b36; border-radius: 10px; background: #12151b; }
+    .csv-wrap, .text-wrap, .editor-wrap { width: 100%; height: 100%; overflow: auto; border: 1px solid #262b36; border-radius: 10px; background: #12151b; }
     pre.text { margin: 0; padding: 18px 22px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                font-size: 13px; line-height: 1.6; white-space: pre; tab-size: 4; }
+    textarea.editor { display: block; width: 100%; height: 100%; margin: 0; padding: 18px 22px; border: 0; outline: none;
+                      resize: none; overflow: auto; background: #12151b; color: #e6e6e6;
+                      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                      font-size: 13px; line-height: 1.6; white-space: pre; tab-size: 4; }
     table.csv { border-collapse: collapse; width: 100%; font-size: 13px; }
     table.csv th, table.csv td { border: 1px solid #2a3040; padding: 6px 10px; text-align: left; white-space: nowrap; }
     table.csv th { background: #1c2230; position: sticky; top: 0; }
@@ -3833,7 +3853,9 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="topbar">
     <a class="btn-back" href="/">← 返回</a>
-    <div class="name" title="{{NAME}}">{{NAME}}<span class="meta">{{META}}</span></div>
+    <div class="name" title="{{NAME}}">{{NAME}}<span class="meta" id="fileMeta">{{META}}</span></div>
+    <span class="save-state" id="saveState"></span>
+    <button class="btn-edit" id="editBtn" type="button">✎ 编辑</button>
     <a class="btn-download" id="dlBtn" href="{{DOWNLOAD_URL}}" download>⬇ 下载</a>
 </div>
 <div class="stage">
@@ -3844,7 +3866,101 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     var inlineUrl = {{INLINE_JSON}};
     var kind = {{KIND_JSON}};
     var delim = {{DELIM_JSON}};
+    var editable = {{EDITABLE_JSON}};
+    var saveUrl = {{SAVE_JSON}};
+    var fileExt = {{EXT_JSON}};
+    var editBtn = document.getElementById("editBtn");
+    var saveState = document.getElementById("saveState");
+    var textView = document.getElementById("textView");
+    var editorWrap = document.getElementById("editorWrap");
+    var editor = document.getElementById("editorText");
+    var loadedText = null;
+    var editing = false;
+    var dirty = false;
+
     function decodeResp(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }
+    function fmtSize(n) {
+        var v = Number(n) || 0;
+        if (v < 1024) { return v + " B"; }
+        var units = ["KB", "MB", "GB", "TB"], i = -1;
+        do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+        return v.toFixed(1) + " " + units[i];
+    }
+    function setSaveState(msg, cls) {
+        if (!saveState) { return; }
+        saveState.textContent = msg || "";
+        saveState.className = "save-state" + (cls ? " " + cls : "");
+    }
+    function enterEdit() {
+        if (loadedText === null || !editorWrap || !editor) { return; }
+        editor.value = loadedText;
+        editing = true; dirty = false;
+        if (textView) { textView.style.display = "none"; }
+        editorWrap.style.display = "block";
+        editBtn.textContent = "💾 保存";
+        setSaveState("Ctrl+S 保存", "");
+        editor.focus();
+    }
+    function exitEdit() {
+        editing = false; dirty = false;
+        if (editorWrap) { editorWrap.style.display = "none"; }
+        if (textView) { textView.style.display = "block"; }
+        if (editBtn) { editBtn.textContent = "✎ 编辑"; }
+        setSaveState("", "");
+    }
+    function saveEdit() {
+        if (!editing || !editor) { return; }
+        var value = editor.value;
+        editBtn.disabled = true;
+        setSaveState("保存中…", "");
+        fetch(saveUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: value
+        }).then(function (r) {
+            if (!r.ok) {
+                return r.text().then(function (t) {
+                    throw new Error("HTTP " + r.status + (t ? "：" + t : ""));
+                });
+            }
+            return r.json();
+        }).then(function (data) {
+            loadedText = value;
+            var pre = document.getElementById("previewText");
+            if (pre) { pre.textContent = value; }
+            var meta = document.getElementById("fileMeta");
+            if (meta) { meta.textContent = fmtSize(data.size) + (fileExt ? " · " + fileExt.toUpperCase() : ""); }
+            editBtn.disabled = false;
+            exitEdit();
+            setSaveState("已保存 · " + fmtSize(data.size), "ok");
+            setTimeout(function () { if (!dirty) { setSaveState("", ""); } }, 4000);
+        }).catch(function (e) {
+            editBtn.disabled = false;
+            setSaveState("保存失败：" + e.message, "err");
+        });
+    }
+    if (editable && editBtn && editor) {
+        editBtn.style.display = "inline-flex";
+        editBtn.disabled = true;
+        editBtn.addEventListener("click", function () {
+            if (editing) { saveEdit(); } else { enterEdit(); }
+        });
+        editor.addEventListener("input", function () {
+            dirty = true;
+            setSaveState("未保存", "");
+        });
+        editor.addEventListener("keydown", function (e) {
+            if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+                e.preventDefault(); saveEdit();
+            } else if (e.key === "Escape") {
+                if (dirty && !window.confirm("放弃未保存的修改？")) { return; }
+                exitEdit();
+            }
+        });
+        window.addEventListener("beforeunload", function (e) {
+            if (dirty) { e.preventDefault(); e.returnValue = ""; }
+        });
+    }
     function escapeHtml(s) {
         return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
@@ -3891,11 +4007,14 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     }
     if (kind === "text") {
         fetch(inlineUrl, { cache: "no-store" }).then(decodeResp).then(function (t) {
+            loadedText = t;
             var pre = document.getElementById("previewText");
             if (pre) { pre.textContent = t; }
+            if (editable && editBtn) { editBtn.disabled = false; }
         }).catch(function (e) {
             var pre = document.getElementById("previewText");
             if (pre) { pre.textContent = "加载失败：" + e.message; pre.className = "text err"; }
+            if (editable && editBtn) { editBtn.disabled = true; }
         });
     } else if (kind === "csv") {
         fetch(inlineUrl, { cache: "no-store" }).then(decodeResp).then(renderCsv).catch(function (e) {
@@ -3917,6 +4036,8 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
     download_url = "/" + quote(filename, safe="")   # safe='' → 斜杠编码成 %2F，确保命中 /{filename}
     kind_token = "none"
     delim = ","
+    editable = False
+    save_url = ""
 
     if kind == "office" and office_ok:
         content_url = "/preview-content/" + quote(filename, safe="/")
@@ -3937,7 +4058,13 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
         body = '<div class="csv-wrap" id="csvWrap"><pre class="text">加载中…</pre></div>'
     elif kind == "text":
         kind_token = "text"
-        body = '<div class="text-wrap"><pre class="text" id="previewText">加载中…</pre></div>'
+        editable = is_editable_text(filename, size)
+        save_url = "/api/text/" + quote(filename, safe="/") if editable else ""
+        body = '<div class="text-wrap" id="textView"><pre class="text" id="previewText">加载中…</pre></div>'
+        if editable:
+            # 编辑态的 textarea 与只读预览并排存在，切换时只改 display
+            body += ('<div class="editor-wrap" id="editorWrap" style="display:none">'
+                     '<textarea class="editor" id="editorText" spellcheck="false"></textarea></div>')
     else:
         icon = "📄" if kind == "office" else "📦"
         desc = ("此格式暂不支持在线预览（支持 docx/xlsx/xls/pptx），请点击右上角「下载」按钮下载后查看。"
@@ -3957,6 +4084,9 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
     html = html.replace("{{INLINE_JSON}}", json.dumps(inline_url))
     html = html.replace("{{KIND_JSON}}", json.dumps(kind_token))
     html = html.replace("{{DELIM_JSON}}", json.dumps(delim))
+    html = html.replace("{{EDITABLE_JSON}}", json.dumps(bool(editable)))
+    html = html.replace("{{SAVE_JSON}}", json.dumps(save_url))
+    html = html.replace("{{EXT_JSON}}", json.dumps(ext))
     return html
 
 
@@ -3997,6 +4127,56 @@ async def preview_content(filename: str, request: Request):
             .replace("{{TITLE}}", html_escape(os.path.basename(filename)))
             .replace("{{BODY}}", body))
     return HTMLResponse(content=page)
+
+
+@app.put("/api/text/{filename:path}")
+async def save_text_content(filename: str, request: Request):
+    """保存预览页里编辑过的 txt/md 内容。
+
+    仅允许已存在、后缀为 txt/md、且不超过 MAX_EDIT_TEXT_BYTES 的文件；
+    请求体按 UTF-8 文本处理，先写同目录临时文件再原子替换，避免半截文件。
+    路径经 safe_upload_path() 校验，越界一律 404。
+    """
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    filename = unquote(filename)
+    file_path = safe_upload_path(upload_dir, filename)
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if file_ext(filename) not in EDITABLE_TEXT_EXTS:
+        raise HTTPException(status_code=415, detail="该文件类型不支持在线编辑")
+    try:
+        old_size = os.path.getsize(file_path)
+    except OSError:
+        old_size = 0
+    if old_size > MAX_EDIT_TEXT_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大，不支持在线编辑")
+
+    body = await request.body()
+    if len(body) > MAX_EDIT_TEXT_BYTES:
+        raise HTTPException(status_code=413, detail="内容超过在线编辑上限")
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="内容必须是 UTF-8 文本")
+
+    tmp_path = file_path + ".edit.tmp"
+    try:
+        async with aiofiles.open(tmp_path, "wb") as out_file:
+            await out_file.write(body)
+        await asyncio.to_thread(os.replace, tmp_path, file_path)
+    except Exception as e:
+        with suppress(OSError):
+            os.remove(tmp_path)
+        log_line(f"在线编辑保存失败 file={filename} error={e}")
+        raise HTTPException(status_code=500, detail=f"保存失败: {str(e)}")
+
+    log_line(f"在线编辑保存 file={filename} bytes={len(body)}")
+    return JSONResponse({
+        "ok": True,
+        "filename": filename,
+        "size": len(body),
+        "url": f"{url_head}/{filename}",
+    })
 
 
 # ============================================================================

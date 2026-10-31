@@ -26,7 +26,7 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」「上传文件夹」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `https://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
-| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
+| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；**`txt`/`md` 还有「✎ 编辑」**，编辑后 `PUT /api/text/{filename:path}` 保存（UTF-8、≤5MB、原子替换）；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
 | Office 预览 | **不依赖 LibreOffice/Office 套件**：`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，转 HTML 经 `/preview-content/{filename:path}` 供 `<iframe>` 内嵌；仅这 5 种后缀且 ≤25MB 可转，其余退化占位（思路参考 `qq939/interview-jobfinder`） |
 | 文件夹上传 | **网盘式、支持多选**：每个顶层文件夹**独立一个会话、分别打包一个 zip**。站点 `https://ocs.dimond.top` 为安全上下文，优先用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 只属于文件选择器），一次只能选一个目录，故弹窗内「＋ 继续添加文件夹」累积、或直接把多个文件夹拖入页面；选单个父目录时还可在弹窗勾选其多个**子文件夹**分别打包。非安全上下文（局域网 http）回退 `webkitdirectory`。逐文件暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包 zip → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理（配额大小读 manifest 声明值，避免遍历大目录） |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
@@ -80,6 +80,7 @@ PUT  /{filename}                          简单上传（流式）
 GET  /obs/{filename}                      访问/播放 obs 下文件（内联；预览页内嵌用）
 GET  /preview/{filename:path}             文件预览页（图片/PDF/HTML/音视频/文本(CSV)/Office），右上角下载按钮
 GET  /preview-content/{filename:path}     Office（docx/xlsx/xls/pptx）转换后的 HTML（text/html），供预览页 iframe 内嵌
+PUT  /api/text/{filename:path}           在线编辑保存 txt/md（body=UTF-8；≤5MB；临时文件+os.replace 原子替换）
 GET  /{filename}                          下载（Range 206；Content-Disposition: attachment）
 DELETE /{filename}                        删除
 GET/POST /notice, POST /save_notice       公告板读写/存文件
@@ -115,6 +116,8 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 3. 功能自测：`/health` → `/`（文件页）→ `/video` → `/videos` → `PUT /x` → `GET /obs/x` → `DELETE /x`；
    预览：`GET /preview/<可预览文件>` 返回 200 且含 `class="btn-download"`，`GET /preview/..%2F..%2Fetc%2Fpasswd` 返回 404；
    Office：`GET /preview-content/<docx|xlsx|xls|pptx>` 返回 `text/html`（含 `<table>`/正文），不支持的 office 后缀返回 404。
+   txt/md 编辑：`GET /preview/<x.txt|md>` 含 `#editBtn`/`#editorWrap` → `PUT /api/text/<x.txt>` 返回 `{"ok":true}` → `GET /obs/<x.txt>` 内容一致；
+   非 txt/md 返回 415、文件不存在/越界 404、非 UTF-8 400。
    文件夹：`POST /api/folder/init` → `PUT /api/folder/{id}/file/...`（小文件）/`/upload/*`（>10MB 带 `folder_id`+`relpath`）→ `GET /manifest` 计数一致 →
    `POST /zip` → 轮询 `/zip/status` 到 `done` → 解压核对层级/文件数/空目录/md5，并确认 `obs/.folder-staging/{id}` 已删除、首页只剩 zip。
    多选：同时 `init` 两个会话并行上传/打包，确认生成**两个互不覆盖**的 zip（同名时自动加时间戳后缀）、各自暂存目录都被删除。
@@ -136,6 +139,11 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 - **文件预览**：可预览后缀集合 `PREVIEW_*_EXTS`（`src/obs/server.py`），`is_previewable()`/`preview_kind()` 分类；
   预览页内联内容用**同源** `/obs/{filename}`，下载按钮用**同源** `/{filename}`（不涉及主机回退）；
   新增路由 `/preview/{filename:path}` 必须放在泛匹配 `/{filename}` **之前**；对外文件名一律经 `safe_upload_path()` 校验在 `obs/` 内。
+- **txt/md 在线编辑**：`EDITABLE_TEXT_EXTS={"txt","md"}`、`MAX_EDIT_TEXT_BYTES=5MB`；预览页由 `render_preview_page()` 决定是否输出 `#editorWrap`，
+  前端 `#editBtn` 切换只读 `<pre>` 与 `<textarea>`，`Ctrl/Cmd+S`/「💾 保存」调 `PUT /api/text/{filename:path}`；
+  后端**只允许已存在文件**，依次校验 `safe_upload_path()`（越界 404）→ 后缀（415）→ 旧文件/新内容体积（413）→ UTF-8（400），
+  先写同目录 `*.edit.tmp` 再 `os.replace` 原子替换；保存后前端原地更新 `#previewText` 与 `#fileMeta`，有未保存修改离开页面会 `beforeunload` 确认。
+  **新增可编辑后缀**：把后缀加入 `EDITABLE_TEXT_EXTS` 即可（同时应属于 `PREVIEW_TEXT_EXTS`），不要放宽后端校验顺序。
 - **Office → HTML（纯 Python，勿引入 Office 套件）**：`office_to_html()` 按后缀分发到解析器产出 HTML 片段（表首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行/表、整数浮点去 `.0`）；
   **Excel（`xlsx/xlsm/xls`）逐 sheet 渲染**：`_sheet_sections()` 给每张表生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条（单表不加），保证每个 sheet 页都能单独查看；
   `office_html_cached()` 按 `mtime+size` 内存缓存（失败也缓存），转换经 `asyncio.to_thread` 下放；仅 `OFFICE_CONVERTIBLE_EXTS`（`docx xlsx xlsm xls pptx`）且 ≤`OFFICE_MAX_BYTES=25MB` 才转换。
@@ -175,6 +183,9 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | Office 预览显示「暂不支持在线预览」 | 后缀非 `docx/xlsx/xlsm/xls/pptx`、文件 >25MB、或缺转换库导致转换失败 | 属预期降级（`doc/ppt/odt/ods/odp/rtf` 无纯 Python 解析器，一律占位）；装依赖 `pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx` |
 | `/preview-content` 返回 404/415 | 后缀不可转换（404）或解析不出内容（415） | 404 属预期；415 多为文件损坏或非真正 Office 格式 |
 | Office 预览变慢 | 每次转换未命中缓存（`mtime`/`size` 变化） | 首次转换后会进内存缓存，重复访问走缓存；大表受 `OFFICE_MAX_ROWS=3000` 截断 |
+| txt/md 没有「编辑」按钮 | 后缀不在 `EDITABLE_TEXT_EXTS`（仅 `txt`/`md`）或文件 >5MB | 属预期：加后缀改 `EDITABLE_TEXT_EXTS`；超大文件先下载编辑后再上传 |
+| 编辑保存返回 415 / 413 / 400 / 404 | 非 txt/md / 内容或原文件超 5MB / 非 UTF-8 / 文件不存在或路径越界 | 按状态码修正；保存按 UTF-8 编码，含二进制请勿用在线编辑 |
+| 编辑保存后内容回退 | 保存请求未成功（状态提示为红字）或并发覆盖 | 看页面「保存失败」提示与 `logs/server.log`；原子替换保证不会写半截文件 |
 | `ModuleNotFoundError: No module named 'fastapi'` | 容器内缺少 Python 依赖 | `pip3 install --break-system-packages fastapi "uvicorn[standard]" aiofiles python-dotenv python-multipart` |
 | 8082 不通 | 进程退出/端口占用 | 看 `logs/start.log`；`kill "$(pgrep -f '[s]rc/obs/server.py')"` 后 `./user_start.sh` |
 | `/video` 404 | 缺 `src/obs/video_static/` | 补齐 `index.html/app.js/style.css/vendor/hls.min.js` |

@@ -440,3 +440,46 @@ def test_upload_returns_md5():
     assert body.get("url") == f"https://ocs.dimond.top/{filename}"
     # 校验服务器返回的 md5 与本地计算一致
     assert body.get("md5") == hashlib.md5(content).hexdigest()
+
+def test_preview_text_has_edit_ui():
+    """txt 预览页应出现「编辑」按钮与编辑器容器。"""
+    filename = "edit_ui_note.txt"
+    assert requests.put(f"{BASE_URL}/{filename}", data="第一行\nsecond\n".encode()).status_code == 201
+    resp = requests.get(f"{BASE_URL}/preview/{filename}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="editBtn"' in html
+    assert 'id="editorWrap"' in html
+    assert 'var editable = true' in html
+    assert f"/api/text/{filename}" in html
+
+def test_preview_md_editable():
+    """md 预览页同样可编辑。"""
+    filename = "edit_ui_note.md"
+    assert requests.put(f"{BASE_URL}/{filename}", data="# 标题\n\n正文\n".encode()).status_code == 201
+    resp = requests.get(f"{BASE_URL}/preview/{filename}")
+    assert resp.status_code == 200
+    assert 'id="editorWrap"' in resp.text
+    assert 'var editable = true' in resp.text
+
+def test_save_text_content():
+    """PUT /api/text/... 应原子保存新内容并返回大小。"""
+    filename = "edit_save_note.txt"
+    assert requests.put(f"{BASE_URL}/{filename}", data=b"old content").status_code == 201
+    new = "新内容\nsecond line\n".encode("utf-8")
+    resp = requests.put(f"{BASE_URL}/api/text/{filename}", data=new,
+                        headers={"Content-Type": "text/plain;charset=utf-8"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["size"] == len(new)
+    with open(os.path.join(TEST_DIR, filename), "rb") as f:
+        assert f.read() == new
+
+def test_edit_rejects_unsupported_missing_traversal_and_binary():
+    """非 txt/md、文件不存在、路径穿越、非 UTF-8 内容都必须拒绝。"""
+    assert requests.put(f"{BASE_URL}/edit_ui_note.png", data=b"\x89PNG").status_code == 201
+    assert requests.put(f"{BASE_URL}/api/text/edit_ui_note.png", data=b"x").status_code == 415
+    assert requests.put(f"{BASE_URL}/api/text/edit_missing.txt", data=b"x").status_code == 404
+    assert requests.put(f"{BASE_URL}/api/text/..%2F..%2Fetc%2Fpasswd", data=b"x").status_code == 404
+    assert requests.put(f"{BASE_URL}/api/text/edit_ui_note.txt", data=b"\xff\xfe\x00").status_code == 400

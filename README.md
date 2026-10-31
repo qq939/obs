@@ -10,7 +10,7 @@
 - **启动脚本**：`user_start.sh`（由 `start.sh` 在容器启动时调用）
 - **启动日志**：`logs/start.log`；问答日志：`logs/agent_tui.log`；应用日志：`logs/server.log`
 - **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`https://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
-- **文件预览**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件（见 §3.2）
+- **文件预览 / 编辑**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件；**txt/md 还可点「✎ 编辑」直接修改并保存**（见 §3.2）
 
 ---
 
@@ -101,6 +101,7 @@ project/
 | GET | `/obs/{filename:path}` | 直接访问 obs 目录文件（内联展示；预览页内嵌用） |
 | GET | `/preview/{filename:path}` | **文件预览页**（图片/PDF/HTML/音视频/文本/CSV/Office…），右上角固定「⬇ 下载」按钮（见 §3.2） |
 | GET | `/preview-content/{filename:path}` | Office（docx/xlsx/xls/pptx）转换后的 **HTML**（`text/html`），供预览页 iframe 内嵌 |
+| PUT | `/api/text/{filename:path}` | **在线编辑保存 txt/md**：请求体为 UTF-8 文本（≤5MB），原子替换原文件 |
 | GET | `/videos` | 视频列表（含时长） |
 | GET | `/video` `/video/style.css` `/video/app.js` `/video/vendor/hls.min.js` | 视频流页面与静态资源 |
 | POST | `/hls/generate-all` | 批量生成 HLS（后台串行，可 `?dry_run=true`） |
@@ -141,7 +142,7 @@ project/
 | 视频 video | `mp4 webm mov m4v ogv mkv` | `<video controls autoplay>` |
 | PDF | `pdf` | `<iframe>` 内嵌 |
 | HTML | `html htm` | `<iframe sandbox="allow-scripts allow-popups">`（无 `allow-same-origin`，隔离同源） |
-| 文本/表格 | `txt csv tsv json md log xml yml yaml ini py js ts css sh sql …` | 前端 `fetch` 后渲染：CSV/TSV → 表格（支持引号与转义），其余 → `<pre>` 等宽 |
+| 文本/表格 | `txt csv tsv json md log xml yml yaml ini py js ts css sh sql …` | 前端 `fetch` 后渲染：CSV/TSV → 表格（支持引号与转义），其余 → `<pre>` 等宽；**`txt`/`md` 右上角多一个「✎ 编辑」按钮**，可直接改内容并保存（见下） |
 | Office（可转换） | `docx xlsx xlsm xls pptx` | **服务端用纯 Python 库转成 HTML**，预览页 `<iframe src="/preview-content/...">` 内嵌：`docx`→mammoth，`xlsx/xlsm`→openpyxl，`xls`→xlrd，`pptx`→python-pptx；**Excel 逐 sheet 渲染**（多表带顶部 `sheet-nav` 切换条） |
 | Office（其余）/其他 | `doc ppt odt ods odp rtf` 及所有其它后缀 | 占位卡片 + 大号下载按钮（提示「暂不支持在线预览，请下载」） |
 
@@ -152,6 +153,10 @@ project/
 - **路径穿越防护**：`safe_upload_path()` 用 `os.path.realpath` 校验目标必须落在 `obs/` 内，越界（`../`）返回 404。
 - 路由 `@app.get("/preview/{filename:path}")` 必须声明在泛匹配 `/{filename}` **之前**；`/preview-content/{filename:path}` 紧随其后。
 - **Office → HTML（不依赖 LibreOffice / Office 套件）**：`office_to_html()` 按后缀分发到纯 Python 解析器，产出 HTML 片段（表格首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行/表、整数浮点去掉 `.0`）；**Excel（`xlsx/xlsm/xls`）逐 sheet 渲染**——`_sheet_sections()` 给每张表生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条，确保每个 sheet 页都能单独查看；`office_html_cached()` 按 `mtime+size` 做内存缓存（失败结果也缓存，避免反复触发），转换经 `asyncio.to_thread` 下放线程池。仅 `OFFICE_CONVERTIBLE_EXTS` 且 ≤ `OFFICE_MAX_BYTES=25MB` 才转换，否则退化为占位卡片。**思路参考 `qq939/interview-jobfinder`（服务端转 HTML + 前端 iframe 渲染，PDF 走浏览器原生查看器）**。
+- **txt/md 在线编辑**：`EDITABLE_TEXT_EXTS = {"txt","md"}`、`MAX_EDIT_TEXT_BYTES = 5MB`；预览页对可编辑文件显示「✎ 编辑」，切换为全屏 `<textarea>`，
+  `Ctrl/Cmd+S` 或「💾 保存」调用 `PUT /api/text/{filename:path}`（body 为 UTF-8 文本），保存成功后原地更新预览与大小，失败显示原因；
+  前端有未保存修改时离开页面会二次确认。后端仅允许**已存在**的 txt/md，校验 `safe_upload_path()`（越界 404）、后缀（415）、体积（413）、UTF-8（400），
+  写入先落到同目录 `*.edit.tmp` 再 `os.replace` 原子替换，避免半截文件；保存时整段读入请求体，故用 5MB 上限控制内存。
 
 ```bash
 # 预览页（返回 HTML，右上角带下载按钮）
@@ -160,6 +165,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/preview/report.cs
 curl -sI http://127.0.0.1:8082/report.csv | grep -i content-disposition            # attachment; filename*=UTF-8''report.csv
 # Office 预览：转换后的 HTML 片段页（iframe 内嵌用）
 curl -s http://127.0.0.1:8082/preview-content/report.xlsx | head                 # text/html，含 <table>…
+# txt/md 在线编辑保存（UTF-8，原子替换）
+curl -s -X PUT --data-binary @new_note.md http://127.0.0.1:8082/api/text/note.md  # {"ok":true,...}
 # 依赖（纯 Python，无需 Office 套件）
 pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 ```
@@ -264,6 +271,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-27 19:00 | R16 | **文件夹上传（网盘式）**：选择/拖拽/粘贴文件夹递归上传，服务端暂存 + manifest + 断点续传，完成后后台打包成**一个 zip**、删除源目录，首页只留 zip；200GB 暂存配额按最久未活动优先清理；新增 `/api/folder/*` 端点（见 §3.3） |
 | 2026-10-28 15:15 | R17 | **文件夹多选上传**：站点 `https://ocs.dimond.top`（安全上下文）用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 仅属于文件选择器），弹窗「＋ 继续添加文件夹（已选 N 个）」累积、逐项列出已选文件夹（可 `×` 移除），拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；局域网 http 回退 webkitdirectory；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
 | 2026-10-28 18:00 | R18 | **域名更正为 HTTPS + 子文件夹拆分多选**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`），`url_head`/回退地址/文案/测试统一为 https（https 页面请求 http 域名会被混合内容拦截）；新增「选父目录 → 勾选多个子文件夹 → 分别打包」多选方式（`subfolderGroups/toggleSplitFolder/applyFolderSplit` + `FILE_REL_OVERRIDES`），未勾选子目录不上传、根目录散文件直传；前端 Node vm 用例 44 项全过 |
+| 2026-10-31 20:05 | R19 | **txt/md 在线编辑**：预览页对 txt/md 显示「✎ 编辑」，切换全屏 textarea，`Ctrl/Cmd+S` 或「💾 保存」调用 `PUT /api/text/{filename:path}`；后端仅允许已存在文件，校验路径穿越（404）/后缀（415）/5MB（413）/UTF-8（400），写 `*.edit.tmp` 后 `os.replace` 原子替换；保存成功原地更新预览与大小，未保存离开有确认；新增 4 项 pytest 全过 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -278,12 +286,8 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R16 / R17 / R18）：**
+**最后 3 轮对话总结（R17 / R18 / R19）：**
 
-- **R16（文件夹上传 → 单个 zip，2026-10-27）**：新增网盘式文件夹上传——目录选择 `webkitdirectory`、拖拽/粘贴经 `webkitGetAsEntry()` 递归还原层级；
-  服务端 `obs/.folder-staging/<folder_id>/` 暂存 + `manifest.json` 记录进度（复用现有直传/分片上传，仅额外带 `folder_id`+`relpath`），全部完成后后台
-  `zipfile` 打包成一个 zip 并校验、原子落盘 `obs/`，成功即删除暂存源目录，首页只留 zip；支持刷新/断网续传与 200GB 暂存配额清理（活跃会话不删）。
-  自测：后端端到端 40 项 + 配额/打包失败单测 13 项全过（含 3 级嵌套、中文路径、空目录、12MB 分片、md5 抽查、续传与秒传、路径穿越拒绝）。
 - **R17（文件夹多选上传，2026-10-28）**：每个顶层文件夹独立会话、**分别打包一个 zip**。站点域名为 `https://ocs.dimond.top`（安全上下文），
   用 `showDirectoryPicker({mode:'read'})` 读取目录（`FileSystemDirectoryHandle.values()` 递归，空目录记录）；因 **Web 标准不支持目录多选**，
   弹窗内逐项列出已选文件夹（可 `×` 移除）并提供醒目的「＋ 继续添加文件夹（已选 N 个）」累积；真正的多选可一次拖入多个文件夹或粘贴；
@@ -293,6 +297,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
   （后补 `.packing.zip.tmp`），不再每次 `init` 遍历数 GB 暂存——实测 `init` 从 ~20s 降到 **0.032s**。
   自测：多文件夹后端 27 项 + 完整端到端 40 项 + 配额/打包 13 项 + 前端分组/追加/移除/弹窗 Node vm 单测 26 项，全部通过（含并发两会话、同名 zip 自动加时间戳且不覆盖原 zip）。
 - **R18（域名更正 HTTPS + 子文件夹拆分多选，2026-10-28）**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`，属安全上下文），`url_head`/回退地址/页面提示/测试统一为 https，修掉「https 页面请求 http 域名被混合内容拦截」的隐患；新增第三种多选方式——只选一个父文件夹，在弹窗勾选其多个**直接子文件夹**，`applyFolderSplit()` 把每个勾选项转成独立上传组，`FILE_REL_OVERRIDES`（WeakMap）把 `Root/sub/x` 改写为 `sub/x` 且不改动原分组；未勾选子目录不上传，根目录散文件直接上传。自测：前端 Node vm 单测扩到 44 项（含拆分可见性/候选/统计/标签/前缀剥离/散文件/空目录）全过。
+- **R19（txt/md 在线编辑，2026-10-31）**：预览页对 `.txt`/`.md` 增加「✎ 编辑」——切换为全屏等宽 `<textarea>`，`Ctrl/Cmd+S` 或点「💾 保存」调用 `PUT /api/text/{filename:path}`；保存中/已保存/失败均有状态提示，有未保存修改时离开页面会二次确认。后端 `EDITABLE_TEXT_EXTS={"txt","md"}`、`MAX_EDIT_TEXT_BYTES=5MB`，仅允许已存在文件，依次校验路径穿越（404）、后缀（415）、体积（413）、UTF-8（400），先写同目录 `*.edit.tmp` 再 `os.replace` 原子替换，避免半截文件；成功后前端原地更新预览与文件大小。自测：新增 4 项 pytest（txt 编辑 UI、md 编辑 UI、保存并回读、非法请求拒绝）全过。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，
