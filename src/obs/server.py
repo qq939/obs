@@ -2550,11 +2550,13 @@ async def homepage(request: Request, sort: str = Query("time")):
 
         <!-- 设置入口：右上角⚙，开关「每日 HLS 分片任务」（使用位置：本文件的 #settings-fab 样式与脚本） -->
         <style>
-            #settings-fab{position:fixed;top:14px;right:16px;z-index:9999;width:38px;height:38px;border-radius:50%;
-                border:1px solid #ddd;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.12);cursor:pointer;
-                font-size:19px;line-height:36px;text-align:center;user-select:none}
+            /* 设置入口：贴在公告板「x」按钮正上方（小一号） */
+            #settings-anchor{position:absolute;right:5px;bottom:calc(100% + 4px);z-index:9999}
+            #settings-fab{width:22px;height:22px;border-radius:50%;
+                border:1px solid #ddd;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.10);cursor:pointer;
+                font-size:13px;line-height:20px;text-align:center;user-select:none}
             #settings-fab:hover{background:#f5f5f5}
-            #settings-panel{position:fixed;top:60px;right:16px;z-index:9999;width:290px;background:#fff;
+            #settings-panel{position:absolute;top:calc(100% + 6px);right:0;z-index:9999;width:290px;background:#fff;
                 border:1px solid #e2e2e2;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.16);padding:14px 16px;
                 font-size:14px;color:#333}
             #settings-panel[hidden]{display:none}
@@ -2565,17 +2567,9 @@ async def homepage(request: Request, sort: str = Query("time")):
             #settings-panel input[type=checkbox]{width:18px;height:18px;margin-top:2px;cursor:pointer}
             #settings-panel .sp-status{margin-top:10px;font-size:12px;color:#888}
         </style>
-        <div id="settings-fab" title="设置" role="button" aria-label="设置">⚙</div>
-        <div id="settings-panel" hidden>
-            <div class="sp-title">设置</div>
-            <label class="sp-row">
-                <span>每日 HLS 分片任务<br><small>每天 04:00 检查并为缺失的视频生成 HLS 分片</small></span>
-                <input type="checkbox" id="hlsCronToggle">
-            </label>
-            <div class="sp-status" id="hlsCronStatus">读取中…</div>
-        </div>
         <script>
-        (function () {
+        // 按钮标记在公告板里（页面靠后），所以等 DOM 就绪再初始化
+        document.addEventListener('DOMContentLoaded', function () {
             const fab = document.getElementById('settings-fab');
             const panel = document.getElementById('settings-panel');
             const toggle = document.getElementById('hlsCronToggle');
@@ -2620,7 +2614,7 @@ async def homepage(request: Request, sort: str = Query("time")):
             });
 
             load();
-        })();
+        });
         </script>
         <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
         <h1 class="site-title"><a href="/video">文件托管服务</a></h1>
@@ -2652,6 +2646,18 @@ async def homepage(request: Request, sort: str = Query("time")):
         </div>
         <!-- 公告板模块 -->
         <div class="notice-board">
+            <!-- 设置入口：绝对定位在「x」按钮正上方 -->
+            <div id="settings-anchor">
+                <div id="settings-fab" title="设置" role="button" aria-label="设置">⚙</div>
+                <div id="settings-panel" hidden>
+                    <div class="sp-title">设置</div>
+                    <label class="sp-row">
+                        <span>每日 HLS 分片任务<br><small>每天 04:00 检查并为缺失的视频生成 HLS 分片</small></span>
+                        <input type="checkbox" id="hlsCronToggle">
+                    </label>
+                    <div class="sp-status" id="hlsCronStatus">读取中…</div>
+                </div>
+            </div>
             <div id="ws-status-indicator" title="Connecting..."></div>
             <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
             <textarea id="notice-content" placeholder="公告板..."></textarea>
