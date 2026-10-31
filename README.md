@@ -10,7 +10,7 @@
 - **启动脚本**：`user_start.sh`（由 `start.sh` 在容器启动时调用）
 - **启动日志**：`logs/start.log`；问答日志：`logs/agent_tui.log`；应用日志：`logs/server.log`
 - **上传/下载策略**：页面请求**先试直连 `http://localhost:19082`（加速）**，不可用自动回退域名 **`https://ocs.dimond.top`**；网页文字只展示域名（见 §3.1）
-- **文件预览 / 编辑**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件；**txt/md 还可点「✎ 编辑」直接修改并保存**（见 §3.2）
+- **文件预览 / 编辑**：点击图片/PDF/HTML/音视频/文本(CSV)/Office 等后缀先进 **`/preview/...`**，右上角固定「⬇ 下载」按钮；**Office（docx/xlsx/xls/pptx）用纯 Python 库转 HTML 内嵌预览**，不依赖 Office 套件；**txt/md 还可点「✎ 编辑」直接修改正文与文件名并保存**（见 §3.2）
 
 ---
 
@@ -102,6 +102,7 @@ project/
 | GET | `/preview/{filename:path}` | **文件预览页**（图片/PDF/HTML/音视频/文本/CSV/Office…），右上角固定「⬇ 下载」按钮（见 §3.2） |
 | GET | `/preview-content/{filename:path}` | Office（docx/xlsx/xls/pptx）转换后的 **HTML**（`text/html`），供预览页 iframe 内嵌 |
 | PUT | `/api/text/{filename:path}` | **在线编辑保存 txt/md**：请求体为 UTF-8 文本（≤5MB），原子替换原文件 |
+| POST | `/api/text/{filename:path}/rename` | **在线重命名 txt/md**：JSON `{"new_name":"新名.md"}`，仅改同目录文件名，目标已存在返回 409 |
 | GET | `/videos` | 视频列表（含时长） |
 | GET | `/video` `/video/style.css` `/video/app.js` `/video/vendor/hls.min.js` | 视频流页面与静态资源 |
 | POST | `/hls/generate-all` | 批量生成 HLS（后台串行，可 `?dry_run=true`） |
@@ -157,6 +158,9 @@ project/
   `Ctrl/Cmd+S` 或「💾 保存」调用 `PUT /api/text/{filename:path}`（body 为 UTF-8 文本），保存成功后原地更新预览与大小，失败显示原因；
   前端有未保存修改时离开页面会二次确认。后端仅允许**已存在**的 txt/md，校验 `safe_upload_path()`（越界 404）、后缀（415）、体积（413）、UTF-8（400），
   写入先落到同目录 `*.edit.tmp` 再 `os.replace` 原子替换，避免半截文件；保存时整段读入请求体，故用 5MB 上限控制内存。
+- **txt/md 在线重命名**：编辑态顶部有「文件名」输入框，可只改同目录下的文件名。保存时先 `POST /api/text/{filename:path}/rename`（JSON `{"new_name":"新名.md"}`），
+  成功后再用返回的新路径 `PUT` 正文；后端校验源文件存在（404）、源/目标后缀必须 `.txt`/`.md`（415）、新名不含 `/` `\`/NUL 且不是 `.`/`..`、≤255 字节（400）、
+  目标已存在（409），最后 `os.rename` 原子改名。前端改名后同步更新标题、下载按钮、`history` 地址，保存失败会保留编辑态并显示原因。
 
 ```bash
 # 预览页（返回 HTML，右上角带下载按钮）
@@ -167,6 +171,9 @@ curl -sI http://127.0.0.1:8082/report.csv | grep -i content-disposition         
 curl -s http://127.0.0.1:8082/preview-content/report.xlsx | head                 # text/html，含 <table>…
 # txt/md 在线编辑保存（UTF-8，原子替换）
 curl -s -X PUT --data-binary @new_note.md http://127.0.0.1:8082/api/text/note.md  # {"ok":true,...}
+# txt/md 在线重命名（仅同目录改文件名，目标已存在返回 409）
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"new_name":"note-20261031.md"}' http://127.0.0.1:8082/api/text/note.md/rename  # {"ok":true,...}
 # 依赖（纯 Python，无需 Office 套件）
 pip3 install --break-system-packages mammoth openpyxl xlrd python-pptx
 ```
@@ -272,6 +279,7 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
 | 2026-10-28 15:15 | R17 | **文件夹多选上传**：站点 `https://ocs.dimond.top`（安全上下文）用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 仅属于文件选择器），弹窗「＋ 继续添加文件夹（已选 N 个）」累积、逐项列出已选文件夹（可 `×` 移除），拖拽/粘贴多个文件夹按顶层分组，每个文件夹**分别**打包一个 zip；局域网 http 回退 webkitdirectory；配额统计改用 manifest 声明大小，修复暂存较大时 init 卡顿 |
 | 2026-10-28 18:00 | R18 | **域名更正为 HTTPS + 子文件夹拆分多选**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`），`url_head`/回退地址/文案/测试统一为 https（https 页面请求 http 域名会被混合内容拦截）；新增「选父目录 → 勾选多个子文件夹 → 分别打包」多选方式（`subfolderGroups/toggleSplitFolder/applyFolderSplit` + `FILE_REL_OVERRIDES`），未勾选子目录不上传、根目录散文件直传；前端 Node vm 用例 44 项全过 |
 | 2026-10-31 20:05 | R19 | **txt/md 在线编辑**：预览页对 txt/md 显示「✎ 编辑」，切换全屏 textarea，`Ctrl/Cmd+S` 或「💾 保存」调用 `PUT /api/text/{filename:path}`；后端仅允许已存在文件，校验路径穿越（404）/后缀（415）/5MB（413）/UTF-8（400），写 `*.edit.tmp` 后 `os.replace` 原子替换；保存成功原地更新预览与大小，未保存离开有确认；新增 4 项 pytest 全过 |
+| 2026-10-31 21:20 | R20 | **txt/md 编辑态改文件名**：编辑模式顶部新增「文件名」输入框，保存时先 `POST /api/text/{filename:path}/rename`（JSON `new_name`）再 `PUT` 正文；后端校验源文件存在（404）、源/目标后缀 `.txt`/`.md`（415）、非法名（400，不含 `/` `\`/NUL、非 `.`/`..`、≤255 字节）、目标已存在（409），`os.rename` 原子改名；前端改名后同步标题/下载按钮/地址栏；新增 3 项 pytest（文件名编辑器、改名保留正文、非法请求拒绝）全过 |
 
 **构建结构（由日志、`user_history.md` 与仓库状态还原）：**
 
@@ -286,18 +294,11 @@ curl -X DELETE http://127.0.0.1:8082/a.txt
    → 轮询 `/health` 就绪。
 5. **Git 契约**：项目根目录须为 git 仓库，每次对话后提交；容器无默认身份，需 `git config --local`。
 
-**最后 3 轮对话总结（R17 / R18 / R19）：**
+**最后 3 轮对话总结（R18 / R19 / R20）：**
 
-- **R17（文件夹多选上传，2026-10-28）**：每个顶层文件夹独立会话、**分别打包一个 zip**。站点域名为 `https://ocs.dimond.top`（安全上下文），
-  用 `showDirectoryPicker({mode:'read'})` 读取目录（`FileSystemDirectoryHandle.values()` 递归，空目录记录）；因 **Web 标准不支持目录多选**，
-  弹窗内逐项列出已选文件夹（可 `×` 移除）并提供醒目的「＋ 继续添加文件夹（已选 N 个）」累积；真正的多选可一次拖入多个文件夹或粘贴；
-  非安全上下文（局域网 http）回退 `webkitdirectory`。拖拽/粘贴多个目录按顶层分组，扁平回退如实提示结构丢失；重复选择按
-  `folderName|文件数|总字节|首个 relpath` 去重；逐个 group 独立走 `init → 上传 → zip → 轮询`，全部结束统一刷新一次。
-  同时：域名/回退地址统一改为 https（https 页面请求 http 域名会被混合内容拦截）；配额统计改读 manifest 声明的 `total_bytes`
-  （后补 `.packing.zip.tmp`），不再每次 `init` 遍历数 GB 暂存——实测 `init` 从 ~20s 降到 **0.032s**。
-  自测：多文件夹后端 27 项 + 完整端到端 40 项 + 配额/打包 13 项 + 前端分组/追加/移除/弹窗 Node vm 单测 26 项，全部通过（含并发两会话、同名 zip 自动加时间戳且不覆盖原 zip）。
 - **R18（域名更正 HTTPS + 子文件夹拆分多选，2026-10-28）**：确认站点为 `https://ocs.dimond.top`（`http` 301→`https`，属安全上下文），`url_head`/回退地址/页面提示/测试统一为 https，修掉「https 页面请求 http 域名被混合内容拦截」的隐患；新增第三种多选方式——只选一个父文件夹，在弹窗勾选其多个**直接子文件夹**，`applyFolderSplit()` 把每个勾选项转成独立上传组，`FILE_REL_OVERRIDES`（WeakMap）把 `Root/sub/x` 改写为 `sub/x` 且不改动原分组；未勾选子目录不上传，根目录散文件直接上传。自测：前端 Node vm 单测扩到 44 项（含拆分可见性/候选/统计/标签/前缀剥离/散文件/空目录）全过。
 - **R19（txt/md 在线编辑，2026-10-31）**：预览页对 `.txt`/`.md` 增加「✎ 编辑」——切换为全屏等宽 `<textarea>`，`Ctrl/Cmd+S` 或点「💾 保存」调用 `PUT /api/text/{filename:path}`；保存中/已保存/失败均有状态提示，有未保存修改时离开页面会二次确认。后端 `EDITABLE_TEXT_EXTS={"txt","md"}`、`MAX_EDIT_TEXT_BYTES=5MB`，仅允许已存在文件，依次校验路径穿越（404）、后缀（415）、体积（413）、UTF-8（400），先写同目录 `*.edit.tmp` 再 `os.replace` 原子替换，避免半截文件；成功后前端原地更新预览与文件大小。自测：新增 4 项 pytest（txt 编辑 UI、md 编辑 UI、保存并回读、非法请求拒绝）全过。
+- **R20（txt/md 编辑态改文件名，2026-10-31）**：txt/md 编辑模式除正文外还可修改文件名——编辑态顶部有「文件名」输入框，保存时先 `POST /api/text/{filename:path}/rename`（JSON `{"new_name":"新名.md"}`）改名，成功后用返回的新路径 `PUT` 正文；后端只允许同目录改基名，源文件不存在（404）、源或目标后缀不是 `.txt`/`.md`（415）、新名含 `/` `\`/NUL 或为 `.`/`..` 或超 255 字节（400）、目标已存在（409）都会拒绝，成功用 `os.rename` 原子改名；前端改名后同步页面标题、下载按钮 href 与 `history` 地址，失败保留编辑态并显示具体原因。自测：新增 3 项 pytest（文件名编辑器注入、改名保留正文、非法请求拒绝）+ 手工 API 探针 33 项全过。
 
 **R1~R3 回顾：** R1/R2 为初始交付指令（非回合、一次交付，落盘 `user_start.sh` + README/SKILL + logs）；
 R3 要求把 **`qq939/obs.git` main 分支部署到 8082** —— 直连 github.com 被拦截，改经 `ghproxy.net` 镜像取得 main 源码，

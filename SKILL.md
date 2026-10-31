@@ -26,7 +26,7 @@ description: 开发、测试、排查与维护容器内 Web App 8082（OBS 文�
 | 默认页 `/` | **文件托管页面**（OBS 上传/下载/列表/公告板）；上传框 `#uploadZone` 内文案自上而下：「拖拽文件/文件夹到此处上传，或在页面按 Ctrl+V / Cmd+V 粘贴上传」→ `文件托管上传： curl --upload-file ...` → 「选择文件」「上传文件夹」按钮；**前两行均为小号字 `font-size: 0.8em`**（style 完全一致） |
 | `/video` | **视频流播放页面**（竖屏翻页，HLS/直连） |
 | 上传/下载策略 | 先试直连 `http://localhost:19082`（加速），失败回退域名 `https://ocs.dimond.top`：下载用 `applyDownloadHosts()`（加载期改写 `a[data-name]` 的 `href`，点击走原生跳转）；上传/接口用 `obsBase()`/`obsFetch()`（页面加载预热探测）；跨域由 `CORSMiddleware` 放行。网页只展示域名 |
-| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；**`txt`/`md` 还有「✎ 编辑」**，编辑后 `PUT /api/text/{filename:path}` 保存（UTF-8、≤5MB、原子替换）；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
+| 文件预览 | 可预览后缀点击进 `/preview/{filename:path}`（右上角醒目「⬇ 下载」）：图片/音视频/PDF/HTML/文本(CSV 表格)/**Office（纯 Python 转 HTML 后 iframe 内嵌）**；**`txt`/`md` 还有「✎ 编辑」**，编辑态可同时改**正文与文件名**：先 `POST /api/text/{filename:path}/rename`（仅同目录改基名，409=重名）再 `PUT /api/text/{filename:path}` 保存（UTF-8、≤5MB、原子替换）；内容用同源 `/obs/...`，下载用同源 `/{filename}`；`safe_upload_path()` 防穿越；路由须在 `/{filename}` 之前 |
 | Office 预览 | **不依赖 LibreOffice/Office 套件**：`docx→mammoth`、`xlsx/xlsm→openpyxl`、`xls→xlrd`、`pptx→python-pptx`，转 HTML 经 `/preview-content/{filename:path}` 供 `<iframe>` 内嵌；仅这 5 种后缀且 ≤25MB 可转，其余退化占位（思路参考 `qq939/interview-jobfinder`） |
 | 文件夹上传 | **网盘式、支持多选**：每个顶层文件夹**独立一个会话、分别打包一个 zip**。站点 `https://ocs.dimond.top` 为安全上下文，优先用 `showDirectoryPicker({mode:'read'})`；但 **Web 标准不支持目录多选**（`multiple` 只属于文件选择器），一次只能选一个目录，故弹窗内「＋ 继续添加文件夹」累积、或直接把多个文件夹拖入页面；选单个父目录时还可在弹窗勾选其多个**子文件夹**分别打包。非安全上下文（局域网 http）回退 `webkitdirectory`。逐文件暂存 `obs/.folder-staging/<folder_id>/data/` → 全部传完后后台打包 zip → 删除暂存、首页只留 zip；小文件走 `PUT /api/folder/{id}/file/{relpath}`，>10MB 复用 `/upload/*` 并带 `folder_id`+`relpath`；支持续传与 200GB 配额清理（配额大小读 manifest 声明值，避免遍历大目录） |
 | ffmpeg | 内置 `bin/ffmpeg`、`bin/ffprobe`（`user_start.sh` 加入 PATH；缺失用 `scripts/install_ffmpeg.sh` 获取） |
@@ -81,6 +81,7 @@ GET  /obs/{filename}                      访问/播放 obs 下文件（内联�
 GET  /preview/{filename:path}             文件预览页（图片/PDF/HTML/音视频/文本(CSV)/Office），右上角下载按钮
 GET  /preview-content/{filename:path}     Office（docx/xlsx/xls/pptx）转换后的 HTML（text/html），供预览页 iframe 内嵌
 PUT  /api/text/{filename:path}           在线编辑保存 txt/md（body=UTF-8；≤5MB；临时文件+os.replace 原子替换）
+POST /api/text/{filename:path}/rename    在线重命名 txt/md（JSON {"new_name":"新名.md"}；仅同目录改基名；已存在 409）
 GET  /{filename}                          下载（Range 206；Content-Disposition: attachment）
 DELETE /{filename}                        删除
 GET/POST /notice, POST /save_notice       公告板读写/存文件
@@ -116,8 +117,10 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 3. 功能自测：`/health` → `/`（文件页）→ `/video` → `/videos` → `PUT /x` → `GET /obs/x` → `DELETE /x`；
    预览：`GET /preview/<可预览文件>` 返回 200 且含 `class="btn-download"`，`GET /preview/..%2F..%2Fetc%2Fpasswd` 返回 404；
    Office：`GET /preview-content/<docx|xlsx|xls|pptx>` 返回 `text/html`（含 `<table>`/正文），不支持的 office 后缀返回 404。
-   txt/md 编辑：`GET /preview/<x.txt|md>` 含 `#editBtn`/`#editorWrap` → `PUT /api/text/<x.txt>` 返回 `{"ok":true}` → `GET /obs/<x.txt>` 内容一致；
+   txt/md 编辑：`GET /preview/<x.txt|md>` 含 `#editBtn`/`#editorWrap`/`#fileNameInput` → `PUT /api/text/<x.txt>` 返回 `{"ok":true}` → `GET /obs/<x.txt>` 内容一致；
    非 txt/md 返回 415、文件不存在/越界 404、非 UTF-8 400。
+   重命名：`POST /api/text/<x.txt>/rename` JSON `{"new_name":"y.md"}` 返回 200 且旧路径 404、新路径内容不变；
+   目标已存在 409、含 `/` `\`/`.`/`..`/超 255 字节 400、源或目标非 txt/md 415、源不存在 404、非法 JSON 400。
    文件夹：`POST /api/folder/init` → `PUT /api/folder/{id}/file/...`（小文件）/`/upload/*`（>10MB 带 `folder_id`+`relpath`）→ `GET /manifest` 计数一致 →
    `POST /zip` → 轮询 `/zip/status` 到 `done` → 解压核对层级/文件数/空目录/md5，并确认 `obs/.folder-staging/{id}` 已删除、首页只剩 zip。
    多选：同时 `init` 两个会话并行上传/打包，确认生成**两个互不覆盖**的 zip（同名时自动加时间戳后缀）、各自暂存目录都被删除。
@@ -143,6 +146,11 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   前端 `#editBtn` 切换只读 `<pre>` 与 `<textarea>`，`Ctrl/Cmd+S`/「💾 保存」调 `PUT /api/text/{filename:path}`；
   后端**只允许已存在文件**，依次校验 `safe_upload_path()`（越界 404）→ 后缀（415）→ 旧文件/新内容体积（413）→ UTF-8（400），
   先写同目录 `*.edit.tmp` 再 `os.replace` 原子替换；保存后前端原地更新 `#previewText` 与 `#fileMeta`，有未保存修改离开页面会 `beforeunload` 确认。
+- **txt/md 编辑态改文件名**：编辑态顶部 `#fileNameInput` 只填**基名**；保存时若与当前基名不同，先
+  `POST /api/text/{filename:path}/rename`（JSON `{"new_name":"新名.md"}`），成功后再用返回的新 `filename` 拼 `PUT` 路径保存正文。
+  后端只允许同目录改基名：源不存在 404 → 源后缀非 txt/md 415 → 名字非法（空/`.`/`..`/含 `/` `\`/NUL/超 255 字节）400 →
+  目标后缀非 txt/md 415 → 目标已存在 409，最后 `os.rename` 原子改名；同名视为 no-op 返回 200。
+  前端 `updateNameUi()` 改名后同步 `currentName`/`saveUrl`/`fileExt`/标题/下载按钮/`history.replaceState`。
   **新增可编辑后缀**：把后缀加入 `EDITABLE_TEXT_EXTS` 即可（同时应属于 `PREVIEW_TEXT_EXTS`），不要放宽后端校验顺序。
 - **Office → HTML（纯 Python，勿引入 Office 套件）**：`office_to_html()` 按后缀分发到解析器产出 HTML 片段（表首行作表头、最多 `OFFICE_MAX_ROWS=3000` 行/表、整数浮点去 `.0`）；
   **Excel（`xlsx/xlsm/xls`）逐 sheet 渲染**：`_sheet_sections()` 给每张表生成 `<h3 id="sheet-N">` 锚点区块，多表时顶部加 sticky `sheet-nav` 切换条（单表不加），保证每个 sheet 页都能单独查看；
@@ -186,6 +194,9 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
 | txt/md 没有「编辑」按钮 | 后缀不在 `EDITABLE_TEXT_EXTS`（仅 `txt`/`md`）或文件 >5MB | 属预期：加后缀改 `EDITABLE_TEXT_EXTS`；超大文件先下载编辑后再上传 |
 | 编辑保存返回 415 / 413 / 400 / 404 | 非 txt/md / 内容或原文件超 5MB / 非 UTF-8 / 文件不存在或路径越界 | 按状态码修正；保存按 UTF-8 编码，含二进制请勿用在线编辑 |
 | 编辑保存后内容回退 | 保存请求未成功（状态提示为红字）或并发覆盖 | 看页面「保存失败」提示与 `logs/server.log`；原子替换保证不会写半截文件 |
+| 重命名返回 409 | 目标文件名已存在（同目录） | 换一个名字；当前实现**不覆盖**已有文件 |
+| 重命名返回 400 / 415 / 404 | 名字非法（空/`.`/`..`/含 `/` `\`/超 255 字节）/ 源或目标后缀非 `.txt`/`.md` / 源不存在或越界 | 输入框只填**基名**（不含目录），后缀保持 `.txt` 或 `.md`；改名不能跨目录 |
+| 改名成功但正文提示保存失败 | 先改名后保存正文，正文 PUT 失败（如体积/编码问题） | 地址栏与下载按钮已是新名，重新进入编辑保存正文即可；改名本身不会丢内容 |
 | `ModuleNotFoundError: No module named 'fastapi'` | 容器内缺少 Python 依赖 | `pip3 install --break-system-packages fastapi "uvicorn[standard]" aiofiles python-dotenv python-multipart` |
 | 8082 不通 | 进程退出/端口占用 | 看 `logs/start.log`；`kill "$(pgrep -f '[s]rc/obs/server.py')"` 后 `./user_start.sh` |
 | `/video` 404 | 缺 `src/obs/video_static/` | 补齐 `index.html/app.js/style.css/vendor/hls.min.js` |

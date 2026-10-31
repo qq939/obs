@@ -3831,9 +3831,16 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     .stage audio { width: min(720px, 100%); }
     iframe.frame { width: 100%; height: 100%; border: 0; background: #fff; border-radius: 8px; }
     .csv-wrap, .text-wrap, .editor-wrap { width: 100%; height: 100%; overflow: auto; border: 1px solid #262b36; border-radius: 10px; background: #12151b; }
+    .editor-wrap { display: none; flex-direction: column; }
+    .editor-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+                   background: #171a21; border-bottom: 1px solid #262b36; color: #9aa2b1; font-size: 13px; }
+    .editor-head input { flex: 1 1 auto; min-width: 0; background: #12151b; color: #e6e6e6; border: 1px solid #39404f;
+                         border-radius: 6px; padding: 7px 10px; font-size: 13px; font-family: inherit; }
+    .editor-head input:focus { outline: none; border-color: #2f6feb; }
+    .editor-head .ext-tip { flex: 0 0 auto; color: #7d8494; font-size: 12px; }
     pre.text { margin: 0; padding: 18px 22px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                font-size: 13px; line-height: 1.6; white-space: pre; tab-size: 4; }
-    textarea.editor { display: block; width: 100%; height: 100%; margin: 0; padding: 18px 22px; border: 0; outline: none;
+    textarea.editor { display: block; flex: 1 1 auto; min-height: 0; width: 100%; margin: 0; padding: 18px 22px; border: 0; outline: none;
                       resize: none; overflow: auto; background: #12151b; color: #e6e6e6;
                       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                       font-size: 13px; line-height: 1.6; white-space: pre; tab-size: 4; }
@@ -3853,7 +3860,7 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="topbar">
     <a class="btn-back" href="/">← 返回</a>
-    <div class="name" title="{{NAME}}">{{NAME}}<span class="meta" id="fileMeta">{{META}}</span></div>
+    <div class="name" title="{{NAME}}"><span id="fileNameText">{{NAME}}</span><span class="meta" id="fileMeta">{{META}}</span></div>
     <span class="save-state" id="saveState"></span>
     <button class="btn-edit" id="editBtn" type="button">✎ 编辑</button>
     <a class="btn-download" id="dlBtn" href="{{DOWNLOAD_URL}}" download>⬇ 下载</a>
@@ -3869,11 +3876,15 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     var editable = {{EDITABLE_JSON}};
     var saveUrl = {{SAVE_JSON}};
     var fileExt = {{EXT_JSON}};
+    var currentName = {{FILENAME_JSON}};
     var editBtn = document.getElementById("editBtn");
     var saveState = document.getElementById("saveState");
     var textView = document.getElementById("textView");
     var editorWrap = document.getElementById("editorWrap");
     var editor = document.getElementById("editorText");
+    var nameInput = document.getElementById("fileNameInput");
+    var fileNameText = document.getElementById("fileNameText");
+    var dlBtn = document.getElementById("dlBtn");
     var loadedText = null;
     var editing = false;
     var dirty = false;
@@ -3891,14 +3902,46 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
         saveState.textContent = msg || "";
         saveState.className = "save-state" + (cls ? " " + cls : "");
     }
+    function encPath(name) {
+        return String(name).split("/").map(encodeURIComponent).join("/");
+    }
+    function baseName(name) {
+        var s = String(name || "");
+        var i = s.lastIndexOf("/");
+        return i >= 0 ? s.slice(i + 1) : s;
+    }
+    function updateNameUi(newName) {
+        currentName = newName;
+        saveUrl = "/api/text/" + encPath(newName);
+        fileExt = (baseName(newName).split(".").pop() || "").toLowerCase();
+        if (fileNameText) { fileNameText.textContent = baseName(newName); }
+        if (nameInput) { nameInput.value = baseName(newName); }
+        if (dlBtn) { dlBtn.href = "/" + encodeURIComponent(newName); }
+        document.title = baseName(newName) + " - 预览";
+        try { history.replaceState(null, "", "/preview/" + encPath(newName)); } catch (e) {}
+    }
+    function validateName(name) {
+        if (!name) { return "文件名不能为空"; }
+        if (name === "." || name === "..") { return "文件名不合法"; }
+        if (name.indexOf("/") >= 0 || name.indexOf(String.fromCharCode(92)) >= 0) { return "文件名不能包含路径分隔符"; }
+        if (name.length > 200) { return "文件名过长"; }
+        if (!/[.](txt|md)$/i.test(name)) { return "仅支持 .txt / .md 后缀"; }
+        return "";
+    }
+    function apiErr(r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+            throw new Error("HTTP " + r.status + (d && d.detail ? "：" + d.detail : ""));
+        });
+    }
     function enterEdit() {
         if (loadedText === null || !editorWrap || !editor) { return; }
         editor.value = loadedText;
+        if (nameInput) { nameInput.value = baseName(currentName); }
         editing = true; dirty = false;
         if (textView) { textView.style.display = "none"; }
-        editorWrap.style.display = "block";
+        editorWrap.style.display = "flex";
         editBtn.textContent = "💾 保存";
-        setSaveState("Ctrl+S 保存", "");
+        setSaveState("文件名与正文均可修改 · Ctrl+S 保存", "");
         editor.focus();
     }
     function exitEdit() {
@@ -3911,18 +3954,32 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     function saveEdit() {
         if (!editing || !editor) { return; }
         var value = editor.value;
+        var newBase = nameInput ? nameInput.value.trim() : baseName(currentName);
+        var nameErr = nameInput ? validateName(newBase) : "";
+        if (nameErr) { setSaveState(nameErr, "err"); return; }
         editBtn.disabled = true;
         setSaveState("保存中…", "");
-        fetch(saveUrl, {
-            method: "PUT",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: value
+        var renamePromise = Promise.resolve();
+        if (newBase !== baseName(currentName)) {
+            renamePromise = fetch("/api/text/" + encPath(currentName) + "/rename", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ new_name: newBase })
+            }).then(function (r) {
+                if (!r.ok) { return apiErr(r); }
+                return r.json();
+            }).then(function (data) {
+                updateNameUi(data.filename);
+            });
+        }
+        renamePromise.then(function () {
+            return fetch(saveUrl, {
+                method: "PUT",
+                headers: { "Content-Type": "text/plain;charset=utf-8" },
+                body: value
+            });
         }).then(function (r) {
-            if (!r.ok) {
-                return r.text().then(function (t) {
-                    throw new Error("HTTP " + r.status + (t ? "：" + t : ""));
-                });
-            }
+            if (!r.ok) { return apiErr(r); }
             return r.json();
         }).then(function (data) {
             loadedText = value;
@@ -3949,6 +4006,17 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
             dirty = true;
             setSaveState("未保存", "");
         });
+        if (nameInput) {
+            nameInput.addEventListener("input", function () {
+                dirty = true;
+                setSaveState("未保存", "");
+            });
+            nameInput.addEventListener("keydown", function (e) {
+                if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+                    e.preventDefault(); saveEdit();
+                }
+            });
+        }
         editor.addEventListener("keydown", function (e) {
             if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
                 e.preventDefault(); saveEdit();
@@ -4063,7 +4131,10 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
         body = '<div class="text-wrap" id="textView"><pre class="text" id="previewText">加载中…</pre></div>'
         if editable:
             # 编辑态的 textarea 与只读预览并排存在，切换时只改 display
-            body += ('<div class="editor-wrap" id="editorWrap" style="display:none">'
+            body += ('<div class="editor-wrap" id="editorWrap">'
+                     '<div class="editor-head"><span>文件名</span>'
+                     '<input id="fileNameInput" type="text" spellcheck="false" autocomplete="off">'
+                     '<span class="ext-tip">.txt / .md</span></div>'
                      '<textarea class="editor" id="editorText" spellcheck="false"></textarea></div>')
     else:
         icon = "📄" if kind == "office" else "📦"
@@ -4087,6 +4158,8 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
     html = html.replace("{{EDITABLE_JSON}}", json.dumps(bool(editable)))
     html = html.replace("{{SAVE_JSON}}", json.dumps(save_url))
     html = html.replace("{{EXT_JSON}}", json.dumps(ext))
+    # currentName 是相对路径，注入到 <script> 前转义 < > &，防止文件名里的 </script> 破坏页面
+    html = html.replace("{{FILENAME_JSON}}", json.dumps(filename).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
     return html
 
 
@@ -4176,6 +4249,67 @@ async def save_text_content(filename: str, request: Request):
         "filename": filename,
         "size": len(body),
         "url": f"{url_head}/{filename}",
+    })
+
+
+@app.post("/api/text/{filename:path}/rename")
+async def rename_text_file(filename: str, request: Request):
+    """重命名已存在的 txt/md（仅改文件名，保留所在目录）。
+
+    新文件名只允许同目录下的 basename：不含路径分隔符/NUL，后缀仍须为 txt/md，
+    且目标不能已存在（409）。源文件同样必须是已存在的 txt/md。
+    """
+    upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
+    filename = unquote(filename)
+    file_path = safe_upload_path(upload_dir, filename)
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if file_ext(filename) not in EDITABLE_TEXT_EXTS:
+        raise HTTPException(status_code=415, detail="该文件类型不支持在线重命名")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    new_name = str(payload.get("new_name") or "").strip()
+    if (not new_name or new_name in (".", "..")
+            or "/" in new_name or "\\" in new_name or "\x00" in new_name
+            or len(new_name.encode("utf-8")) > 255):
+        raise HTTPException(status_code=400, detail="文件名不合法")
+    if file_ext(new_name) not in EDITABLE_TEXT_EXTS:
+        raise HTTPException(status_code=415, detail="文件名后缀必须为 .txt 或 .md")
+
+    parent = os.path.dirname(filename)
+    new_rel = f"{parent}/{new_name}" if parent else new_name
+    new_path = safe_upload_path(upload_dir, new_rel)
+    if not new_path:
+        raise HTTPException(status_code=400, detail="文件名不合法")
+    if new_path == file_path:
+        return JSONResponse({
+            "ok": True, "filename": new_rel, "old_filename": filename,
+            "size": os.path.getsize(file_path), "url": f"{url_head}/{new_rel}",
+        })
+    if os.path.exists(new_path):
+        raise HTTPException(status_code=409, detail="目标文件名已存在")
+
+    try:
+        await asyncio.to_thread(os.rename, file_path, new_path)
+    except OSError as e:
+        log_line(f"在线重命名失败 file={filename} -> {new_rel} error={e}")
+        raise HTTPException(status_code=500, detail=f"重命名失败: {str(e)}")
+    log_line(f"在线重命名 file={filename} -> {new_rel}")
+    try:
+        size = os.path.getsize(new_path)
+    except OSError:
+        size = 0
+    return JSONResponse({
+        "ok": True,
+        "filename": new_rel,
+        "old_filename": filename,
+        "size": size,
+        "url": f"{url_head}/{new_rel}",
     })
 
 

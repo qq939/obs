@@ -483,3 +483,50 @@ def test_edit_rejects_unsupported_missing_traversal_and_binary():
     assert requests.put(f"{BASE_URL}/api/text/edit_missing.txt", data=b"x").status_code == 404
     assert requests.put(f"{BASE_URL}/api/text/..%2F..%2Fetc%2Fpasswd", data=b"x").status_code == 404
     assert requests.put(f"{BASE_URL}/api/text/edit_ui_note.txt", data=b"\xff\xfe\x00").status_code == 400
+
+def test_preview_has_filename_editor():
+    """txt/md 编辑模式应带文件名输入框，并注入当前相对路径。"""
+    filename = "rename_ui_note.txt"
+    assert requests.put(f"{BASE_URL}/{filename}", data=b"body").status_code == 201
+    resp = requests.get(f"{BASE_URL}/preview/{filename}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="fileNameInput"' in html
+    assert 'var currentName = "rename_ui_note.txt";' in html
+    assert "{{FILENAME_JSON}}" not in html
+
+def test_rename_text_file():
+    """POST /api/text/.../rename 应改名且保留正文。"""
+    old = "rename_old.txt"
+    body = "保留的正文\n".encode("utf-8")
+    assert requests.put(f"{BASE_URL}/{old}", data=body).status_code == 201
+    resp = requests.post(f"{BASE_URL}/api/text/{old}/rename", json={"new_name": "rename_new.md"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["filename"] == "rename_new.md"
+    assert data["old_filename"] == old
+    assert data["size"] == len(body)
+    assert not os.path.exists(os.path.join(TEST_DIR, old))
+    with open(os.path.join(TEST_DIR, "rename_new.md"), "rb") as f:
+        assert f.read() == body
+    assert requests.get(f"{BASE_URL}/preview/rename_new.md").status_code == 200
+
+def test_rename_validation():
+    """重命名需拒绝：目标已存在、非法名、非 txt/md、源不存在、非 JSON。"""
+    assert requests.put(f"{BASE_URL}/rename_src.txt", data=b"x").status_code == 201
+    assert requests.put(f"{BASE_URL}/rename_taken.txt", data=b"y").status_code == 201
+    assert requests.put(f"{BASE_URL}/rename_pic.png", data=b"\x89PNG").status_code == 201
+
+    url = f"{BASE_URL}/api/text/rename_src.txt/rename"
+    assert requests.post(url, json={"new_name": "rename_taken.txt"}).status_code == 409
+    for bad in ["", ".", "..", "a/b.txt", "a\\b.txt", "x" * 256 + ".txt"]:
+        assert requests.post(url, json={"new_name": bad}).status_code == 400, bad
+    assert requests.post(url, json={"new_name": "rename_src.png"}).status_code == 415
+    assert requests.post(f"{BASE_URL}/api/text/rename_pic.png/rename",
+                         json={"new_name": "rename_pic2.png"}).status_code == 415
+    assert requests.post(f"{BASE_URL}/api/text/rename_missing.txt/rename",
+                         json={"new_name": "x.txt"}).status_code == 404
+    assert requests.post(url, data="not-json",
+                         headers={"Content-Type": "application/json"}).status_code == 400
+    assert requests.post(url, json=["x"]).status_code == 400
