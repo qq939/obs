@@ -358,9 +358,11 @@
         const ctx = createSha256(); ctx.update(new Uint8Array(buffer)); return ctx.digestHex();
     }
 
-    // 上传/接口地址：先试宿主机本地 http://localhost:19082，不可达再回退域名 https://ocs.dimond.top（二者指向同一服务）
-    // 回退必须用 https：页面本身是 https，向 http 域名发请求会被浏览器按混合内容拦截。
-    const OBS_HOSTS = ['http://localhost:19082', 'https://ocs.dimond.top'];
+    // 上传/接口地址：由服务端在 /video 页面注入的 __OCS_CFG__.hosts 决定（优先宿主本地地址，失败回退对外域名）。
+    // 不再写死 localhost:19082 —— 那样换机器部署（19086 / NAS）会去拉别的机器的视频列表。
+    const OBS_HOSTS = (window.__OCS_CFG__ && Array.isArray(window.__OCS_CFG__.hosts) && window.__OCS_CFG__.hosts.length)
+        ? window.__OCS_CFG__.hosts.slice()
+        : [location.origin];
     let _obsBasePromise = null;
     function obsBase() {
         if (!_obsBasePromise) {
@@ -1427,7 +1429,7 @@
         if (!confirm('删除「' + v.name + '」及其 HLS 分片？')) return;
         if (triggerEl) triggerEl.disabled = true;
         try {
-            // 走 obsFetch：先试 http://localhost:19082，不可达再回退 https://ocs.dimond.top
+            // 走 obsFetch：先试 __OCS_CFG__.hosts[0]（宿主本地），不可达再回退下一个（对外域名）
             // 注意：v.url 是播放路径（/obs/xxx.mp4，GET 路由），删除必须用 /{文件名}
             const res = await obsFetch('/' + encodeURIComponent(v.name), { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);

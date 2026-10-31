@@ -3687,13 +3687,29 @@ async def upload_file_put(filename: str, request: Request):
 
 @app.get("/video")
 async def video_page():
-    """视频页面 - 使用静态文件"""
+    """视频页面 - 使用静态文件。
+    页面里 app.js 是静态文件，拿不到服务端模板替换，所以在这里注入 window.__OCS_CFG__：
+    hosts = 接口主机候选（优先宿主本地地址，失败回退对外域名），urlHead = 对外地址前缀。
+    不注入的话 app.js 只能写死，换机器部署就会去拉别的机器的视频列表。"""
     static_dir = get_video_static_dir()
     index_path = os.path.join(static_dir, "index.html")
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Video page not found</h1>", status_code=404)
+    if not os.path.exists(index_path):
+        return HTMLResponse(content="<h1>Video page not found</h1>", status_code=404)
+    with open(index_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    hosts = []
+    for h in (os.environ.get("OCS_LOCAL_BASE", "http://localhost:19082"), url_head):
+        h = (h or "").rstrip("/")
+        if h and h not in hosts:
+            hosts.append(h)
+    cfg = '{"hosts": %s, "urlHead": %s}' % (json.dumps(hosts), json.dumps(url_head))
+    inject = '<script>window.__OCS_CFG__ = %s;</script>' % cfg
+    if "</head>" in html:
+        html = html.replace("</head>", inject + "\n</head>", 1)
+    else:
+        html = inject + html
+    html = html.replace("__OCS_URL_HEAD__", url_head)
+    return HTMLResponse(content=html)
 
 @app.get("/video/style.css")
 async def video_css():
