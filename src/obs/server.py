@@ -2487,7 +2487,7 @@ async def homepage(request: Request, sort: str = Query("time")):
             // 下载/打开：先试宿主机本地地址 http://localhost:19082，不可用再回退域名 https://ocs.dimond.top
             // 页面文字只展示域名 https://ocs.dimond.top；本地地址仅用于加速探测（二者指向同一服务）
             // 回退必须用 https：页面本身是 https，向 http 域名发 XHR/fetch 会被浏览器按混合内容拦截。
-            var DOWNLOAD_HOST_PRIMARY = "http://localhost:19082";
+            var DOWNLOAD_HOST_PRIMARY = "__OCS_LOCAL_BASE__";
             var DOWNLOAD_HOST_FALLBACK = "https://ocs.dimond.top";
 
             // 上传/接口地址：先试 http://localhost:19082，不可达再回退域名 https://ocs.dimond.top
@@ -2747,6 +2747,8 @@ async def homepage(request: Request, sort: str = Query("time")):
     </body>
     </html>
     """
+    # 宿主机本地直连地址：默认 19082（ocs 卡片），其它卡片用自己的端口，避免把上传发到别的卡片
+    html = html.replace("__OCS_LOCAL_BASE__", os.environ.get("OCS_LOCAL_BASE", "http://localhost:19082"))
     return HTMLResponse(content=html)
 
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
