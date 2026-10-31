@@ -689,8 +689,9 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"WebSocket Handler Error: {e}", flush=True)
         manager.disconnect(websocket)
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
+    # HEAD 也要支持：面板/其它服务用 HEAD 探活，只注册 GET 会返回 405
     # 轻量健康探针：不触碰上传目录/视频解码等重资源，供 docker-compose healthcheck 探测
     return {"status": "ok"}
 
@@ -1959,11 +1960,10 @@ async def homepage(request: Request, sort: str = Query("time")):
 
             // ------------------------------------------------------------------
             // 上传文件夹的两种方式（使用位置：chooseFolderUploadMode / showFolderConfirm）
-            //   files：打散上传（原来的逐文件逻辑）
-            //   zip  ：整个文件夹打包成 .tar.gz 后当一个文件上传
+            //   flat：打散上传——遍历出每个文件，逐个直接进文件列表（不打包）
+            //   zip ：压缩上传——整个文件夹打包成 .tar.gz，作为一个文件上传（保留目录结构）
+            // 注意：拖拽/粘贴文件夹仍走原来的「暂存 → 服务端打包 zip」流程，不受这里影响。
             // ------------------------------------------------------------------
-            let folderZipOnce = false;
-
             function chooseFolderUploadMode() {
                 const m = document.getElementById('folderModeModal');
                 if (m) m.style.display = 'block';
@@ -1974,15 +1974,17 @@ async def homepage(request: Request, sort: str = Query("time")):
             }
             function pickFolderMode(mode) {
                 closeFolderMode();
-                folderZipOnce = (mode === 'zip');
-                // 复用原有选择器（原生目录选择 / webkitdirectory 回退）
-                openFolderPicker(false);
+                // 上传方式跟着选择器一起传下去（不用全局变量，避免用户取消后污染下一次上传）
+                openFolderPicker(false, mode === 'zip' ? 'zip' : 'flat');
             }
 
             // 纯 JS 生成 tar（ustar），再交给 CompressionStream('gzip') 压缩
+            // 注意：不能写 NUL 的反斜杠转义字面量——这段 JS 在 Python 字符串里，会被 Python 先解释成真正的
+            // NUL 字节，HTML 解析器再把 NUL 换成 U+FFFD，tar 头就坏了（报「不是 tar 包」）。
+            const TAR_NUL = String.fromCharCode(0);
             function tarOctal(value, len) {
                 const s = value.toString(8);
-                return s.padStart(len - 1, '0') + '\u0000';
+                return s.padStart(len - 1, '0') + TAR_NUL;
             }
             function tarHeader(name, size, mtime) {
                 const enc = new TextEncoder();
@@ -2004,13 +2006,13 @@ async def homepage(request: Request, sort: str = Query("time")):
                 put(tarOctal(mtime, 12), 136, 12);
                 for (let i = 148; i < 156; i++) buf[i] = 0x20;   // 校验和先填空格
                 buf[156] = 0x30;                                  // typeflag '0' = 普通文件
-                put('ustar\u000000', 257, 8);
+                put('ustar' + TAR_NUL + '00', 257, 8);
                 put('root', 265, 32);
                 put('root', 297, 32);
                 put(prefix, 345, 155);
                 let sum = 0;
                 for (let i = 0; i < 512; i++) sum += buf[i];
-                put(sum.toString(8).padStart(6, '0') + '\u0000 ', 148, 8);
+                put(sum.toString(8).padStart(6, '0') + TAR_NUL + ' ', 148, 8);
                 return buf;
             }
 
@@ -2056,12 +2058,47 @@ async def homepage(request: Request, sort: str = Query("time")):
                 return await uploadFiles([file], {});
             }
 
-            async function showFolderConfirm(groups, looseFiles, structureLost, append) {
-                // 用户在「上传文件夹」里选了压缩上传：不再逐文件确认，直接打包成一个 tar.gz
-                if (folderZipOnce) {
-                    folderZipOnce = false;
+            // 打散上传：把选中的文件逐个直接放进文件列表（不打包、不压缩）
+            // 同名文件自动用「目录__文件名」区分，避免互相覆盖；File 不能改名，所以包一层新 File
+            async function flatUpload(groups, looseFiles) {
+                const statusEl = document.getElementById('formUploadStatus');
+                const originals = [];
+                for (const g of (groups || [])) {
+                    for (const f of (g.files || [])) originals.push(f);
+                }
+                for (const f of (looseFiles || [])) originals.push(f);
+                if (!originals.length) return;
+                const used = new Set();
+                const files = [];
+                for (const f of originals) {
+                    const rel = (fileRelPath(f) || f.name || '').replace(/^\/+/, '');
+                    const base = rel.split('/').pop() || f.name;
+                    let name = base;
+                    if (used.has(name)) name = rel.replace(/\//g, '__');
+                    let n = 2;
+                    while (used.has(name)) name = rel.replace(/\//g, '__') + '(' + (n++) + ')';
+                    used.add(name);
+                    let nf = f;
+                    if (name !== f.name) {
+                        try { nf = new File([f], name, { type: f.type, lastModified: f.lastModified || Date.now() }); }
+                        catch (e) { nf = f; }
+                    }
+                    try { nf._relPath = name; } catch (e) {}
+                    files.push(nf);
+                }
+                if (statusEl) statusEl.textContent = '逐个上传 ' + files.length + ' 个文件…';
+                return await uploadFiles(files, {});
+            }
+
+            async function showFolderConfirm(groups, looseFiles, structureLost, append, uploadMode) {
+                // 「上传文件夹」选定方式后不再逐文件确认：压缩 → 打成一个 tar.gz；打散 → 逐个直接上传
+                if (uploadMode === 'zip') {
                     try { return await zipAndUpload(groups, looseFiles); }
                     catch (e) { alert('压缩上传失败：' + e.message); return; }
+                }
+                if (uploadMode === 'flat') {
+                    try { return await flatUpload(groups, looseFiles); }
+                    catch (e) { alert('打散上传失败：' + e.message); return; }
                 }
                 if (!append) folderPending = null;
                 addGroupsToPending(groups || [], looseFiles || [], structureLost);
@@ -2081,26 +2118,31 @@ async def homepage(request: Request, sort: str = Query("time")):
             }
             // 选择文件夹：优先用 File System Access API（https/localhost 可用，但标准规定一次只返回一个目录）；
             // 否则回退 webkitdirectory。两者都靠弹窗「＋ 继续添加文件夹」累积多个，或直接拖拽多个文件夹。
-            async function openFolderPicker(addMore) {
+            // 触发 webkitdirectory 原生选择器；上传方式挂在 input 的 dataset 上，由 onchange 带回
+            function pickFolderViaInput(addMore, uploadMode) {
+                folderPickAppend = !!addMore;
+                const inp = document.getElementById('folderInput');
+                if (!inp) return;
+                try { inp.value = ''; } catch (e) {}
+                try { inp.dataset.uploadMode = (uploadMode === 'zip') ? 'zip' : 'flat'; } catch (e) {}
+                inp.click();
+            }
+            async function openFolderPicker(addMore, uploadMode) {
                 if (!addMore) { folderPending = null; folderPickAppend = false; }
                 // 非安全上下文或浏览器不支持该 API 时，直接同步触发 input，避免丢失用户手势
                 if (!window.isSecureContext || typeof window.showDirectoryPicker !== 'function') {
-                    folderPickAppend = !!addMore;
-                    const inp = document.getElementById('folderInput');
-                    if (inp) { try { inp.value = ''; } catch (e) {} inp.click(); }
+                    pickFolderViaInput(addMore, uploadMode);
                     return;
                 }
                 const nativeHandles = await pickDirectoriesNative();
                 if (nativeHandles === null) {
-                    folderPickAppend = !!addMore;
-                    const inp = document.getElementById('folderInput');
-                    if (inp) { try { inp.value = ''; } catch (e) {} inp.click(); }
+                    pickFolderViaInput(addMore, uploadMode);
                     return;
                 }
                 if (!nativeHandles.length) return;  // 用户取消
                 let groups = [];
                 try { groups = await collectGroupsFromDirectoryHandles(nativeHandles); } catch (e) { groups = []; }
-                if (groups.length) showFolderConfirm(groups, [], false, !!addMore);
+                if (groups.length) showFolderConfirm(groups, [], false, !!addMore, uploadMode);
             }
             // webkitdirectory 回退：webkitRelativePath 已含顶层文件夹名，按首段分组
             function groupsFromFileList(fileList) {
@@ -2118,13 +2160,13 @@ async def homepage(request: Request, sort: str = Query("time")):
                 }
                 return Array.from(map.values());
             }
-            function uploadFolderFromInput(fileList) {
+            function uploadFolderFromInput(fileList, uploadMode) {
                 if (!fileList || !fileList.length) return;
                 const groups = groupsFromFileList(fileList);
-                showFolderConfirm(groups, [], false, folderPickAppend);
+                showFolderConfirm(groups, [], false, folderPickAppend, uploadMode);
                 folderPickAppend = false;
                 const inp = document.getElementById('folderInput');
-                if (inp) { try { inp.value = ''; } catch (e) {} }
+                if (inp) { try { inp.value = ''; delete inp.dataset.uploadMode; } catch (e) {} }
             }
 
             // 同一文件夹（名称/文件数/总大小/首个文件路径一致）的会话 key：刷新后可续传
@@ -2589,17 +2631,17 @@ async def homepage(request: Request, sort: str = Query("time")):
                         background:#fff; border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.28); padding:20px 22px;">
                 <div style="font-size:16px; font-weight:600; margin-bottom:6px;">上传文件夹</div>
                 <div style="font-size:13px; color:#888; line-height:1.5; margin-bottom:16px;">
-                    请选择处理方式。压缩上传会在浏览器里打包成 <code>.tar.gz</code>，只产生一个文件。
+                    请选择处理方式：打散上传把每个文件单独放进文件列表；压缩上传把整个文件夹打成一个包。
                 </div>
                 <button type="button" onclick="pickFolderMode('files')" style="display:block; width:100%; text-align:left;
                         padding:12px 14px; margin-bottom:10px; border:1px solid #dcdcdc; border-radius:8px;
                         background:#fff; cursor:pointer; font-size:14px;">
-                    <b>打散上传</b><br><span style="font-size:12px; color:#888;">遍历出每一个文件，逐个上传（保留目录结构）</span>
+                    <b>打散上传</b><br><span style="font-size:12px; color:#888;">遍历出每个文件逐个上传，文件列表里看到的是一个个文件（不打包；同名自动加目录前缀）</span>
                 </button>
                 <button type="button" onclick="pickFolderMode('zip')" style="display:block; width:100%; text-align:left;
                         padding:12px 14px; margin-bottom:14px; border:1px solid #dcdcdc; border-radius:8px;
                         background:#fff; cursor:pointer; font-size:14px;">
-                    <b>压缩上传</b><br><span style="font-size:12px; color:#888;">整个文件夹打成 <code>.tar.gz</code>，作为一个文件上传</span>
+                    <b>压缩上传</b><br><span style="font-size:12px; color:#888;">整个文件夹打成 <code>.tar.gz</code>，作为一个文件上传（保留目录结构）</span>
                 </button>
                 <div style="text-align:right;">
                     <button type="button" onclick="closeFolderMode()" style="padding:6px 16px; border:1px solid #ccc;
@@ -2623,7 +2665,7 @@ async def homepage(request: Request, sort: str = Query("time")):
             <p style="font-size: 0.8em; margin: 0 0 10px 0; color: #999;">文件托管上传： <code>curl --upload-file file.txt {url_head}/file.txt</code></p>
             <input type="file" id="formFile" onchange="uploadFiles(this.files)" style="display:none;" multiple>
             <!-- 文件夹上传：https/localhost 优先 showDirectoryPicker（一次一个目录）；webkitdirectory 为回退；弹窗内「继续添加文件夹」累积 -->
-            <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files)" style="display:none;">
+            <input type="file" id="folderInput" webkitdirectory directory multiple onchange="uploadFolderFromInput(this.files, this.dataset.uploadMode)" style="display:none;">
             <button type="button" onclick="document.getElementById('formFile').click()" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px;">上传文件</button>
             <button type="button" onclick="chooseFolderUploadMode()" title="先选上传方式：逐文件上传，或整个文件夹打包成 tar.gz" style="cursor:pointer; padding:6px 18px; border:1px solid #ccc; background:#fff; border-radius:4px; margin-left:8px;">上传文件夹</button>
             <span id="formUploadStatus" style="display:block; margin-top:8px; font-size:0.85em; color:#999;"></span>
