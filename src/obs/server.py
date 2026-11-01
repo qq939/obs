@@ -830,7 +830,7 @@ async def homepage(request: Request, sort: str = Query("time")):
     <html>
     <head>
         <meta charset="utf-8">
-        <title>文件托管服务</title>
+        <title>__SITE_NAME__</title>
         <style>
             body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
             h1 { color: #333; }
@@ -2621,7 +2621,7 @@ async def homepage(request: Request, sort: str = Query("time")):
         });
         </script>
         <!-- 页面标题：点击跳转到 /video 视频页（使用位置：.site-title 样式） -->
-        <h1 class="site-title"><a href="/video">文件托管服务</a></h1>
+        <h1 class="site-title"><a href="/video">__SITE_NAME__</a></h1>
 
 
         <!-- 上传文件夹方式选择：打散上传 / 压缩上传（使用位置：chooseFolderUploadMode） -->
@@ -2762,6 +2762,7 @@ async def homepage(request: Request, sort: str = Query("time")):
     # 宿主机本地直连地址：默认 19082（ocs 卡片），其它卡片用自己的端口，避免把上传发到别的卡片
     html = html.replace("__OCS_LOCAL_BASE__", os.environ.get("OCS_LOCAL_BASE", "http://localhost:19082"))
     html = html.replace("__OCS_FALLBACK_BASE__", os.environ.get("OCS_FALLBACK_BASE", url_head))
+    html = html.replace("__SITE_NAME__", os.environ.get("SITE_NAME", "文件托管服务"))
     # 安卓 App 下载入口：upload 目录里放了 ocs.apk 才显示
     try:
         _apk_ok = os.path.exists(os.path.join(get_upload_dir(), "ocs.apk"))
