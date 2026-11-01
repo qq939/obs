@@ -2550,8 +2550,12 @@ async def homepage(request: Request, sort: str = Query("time")):
 
         <!-- 设置入口：右上角⚙，开关「每日 HLS 分片任务」（使用位置：本文件的 #settings-fab 样式与脚本） -->
         <style>
-            /* 设置入口：贴在公告板「x」按钮正上方（小一号） */
-            #settings-anchor{position:absolute;right:5px;bottom:calc(100% + 4px);z-index:9999}
+            /* 右上角操作组：贴在公告板「x」按钮正上方（app 下载 + 设置） */
+            #settings-anchor{position:absolute;right:5px;bottom:calc(100% + 4px);z-index:9999;
+                display:flex;align-items:center;gap:8px}
+            #app-download{font-size:12px;line-height:22px;color:#2f7cf6;text-decoration:none;
+                white-space:nowrap;padding:0 3px;border-radius:4px}
+            #app-download:hover{text-decoration:underline;background:#eef4ff}
             #settings-fab{width:22px;height:22px;border-radius:50%;
                 border:1px solid #ddd;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.10);cursor:pointer;
                 font-size:13px;line-height:20px;text-align:center;user-select:none}
@@ -2648,6 +2652,7 @@ async def homepage(request: Request, sort: str = Query("time")):
         <div class="notice-board">
             <!-- 设置入口：绝对定位在「x」按钮正上方 -->
             <div id="settings-anchor">
+                __APP_DOWNLOAD__
                 <div id="settings-fab" title="设置" role="button" aria-label="设置">⚙</div>
                 <div id="settings-panel" hidden>
                     <div class="sp-title">设置</div>
@@ -2757,6 +2762,14 @@ async def homepage(request: Request, sort: str = Query("time")):
     # 宿主机本地直连地址：默认 19082（ocs 卡片），其它卡片用自己的端口，避免把上传发到别的卡片
     html = html.replace("__OCS_LOCAL_BASE__", os.environ.get("OCS_LOCAL_BASE", "http://localhost:19082"))
     html = html.replace("__OCS_FALLBACK_BASE__", os.environ.get("OCS_FALLBACK_BASE", url_head))
+    # 安卓 App 下载入口：upload 目录里放了 ocs.apk 才显示
+    try:
+        _apk_ok = os.path.exists(os.path.join(get_upload_dir(), "ocs.apk"))
+    except Exception:
+        _apk_ok = False
+    html = html.replace("__APP_DOWNLOAD__",
+                        ('<a id="app-download" href="/ocs.apk" download="ocs.apk" '
+                         'title="下载 ocs 安卓 App">app下载</a>') if _apk_ok else "")
     return HTMLResponse(content=html)
 
 def make_upload_id(filename: str, size: int, hash_algo: str, file_hash: str) -> str:
