@@ -573,7 +573,10 @@ def _save_video_index(videos: List[dict]) -> None:
 
 
 def build_video_index() -> dict:
-    """全量重建索引（会补齐所有缺时长的文件）。"""
+    """重建索引（增量）：旧索引里同名 + 同大小 + 同 mtime 的时长直接沿用，只 probe 新/改过的。
+
+    NAS 的 CPU 很弱（1457 个视频全量 ffprobe 要 80s），所以每天这次重建基本是「读一次目录 + 读旧索引」，
+    正常情况下几乎不花 CPU。"""
     global _video_index_building
     with _video_index_lock:
         if _video_index_building:
@@ -581,7 +584,13 @@ def build_video_index() -> dict:
         _video_index_building = True
     try:
         upload_dir = get_upload_dir()
+        old = {}
+        for v in (_load_video_index().get("videos") or []):
+            if isinstance(v, dict) and v.get("name"):
+                old[v["name"]] = v
+
         videos = []
+        reused = 0
         try:
             names = os.listdir(upload_dir)
         except Exception:
@@ -596,25 +605,35 @@ def build_video_index() -> dict:
                 st = os.stat(p)
             except OSError:
                 continue
+            prev = old.get(name)
+            if prev and prev.get("size") == st.st_size and prev.get("mtime") == st.st_mtime:
+                duration = float(prev.get("duration") or 0.0)
+                reused += 1
+            else:
+                duration = 0.0
             videos.append({
                 "name": name,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
-                "duration": 0.0,
+                "duration": duration,
                 "url": f"/obs/{quote(name)}",
                 "hls": f"/hls/{quote(name)}/index.m3u8",
                 "hlsReady": hls_exists(name),
+                "_probe": prev is None or prev.get("size") != st.st_size or prev.get("mtime") != st.st_mtime,
             })
-        if videos:
+
+        need = [v for v in videos if v.pop("_probe", False)]
+        if need:
             def _fill(item):
                 item["duration"] = probe_duration_sync(os.path.join(upload_dir, item["name"]), item["name"])
                 return item
             try:
-                list(duration_executor.map(_fill, videos))
+                list(duration_executor.map(_fill, need))
             except Exception:
                 pass
+
         _save_video_index(videos)
-        log_line(f"视频索引已更新：{len(videos)} 个视频")
+        log_line(f"视频索引已更新：{len(videos)} 个视频（复用 {reused}，现探测 {len(need)}）")
         return _load_video_index()
     finally:
         with _video_index_lock:
@@ -630,12 +649,22 @@ def video_index_age() -> float:
     return max(0.0, time.time() - float(ts))
 
 
+def _lower_priority() -> None:
+    """把当前线程的 CPU 优先级调低（Linux nice），别和播放/上传抢 NAS 那点算力。"""
+    try:
+        os.nice(10)
+    except Exception:
+        pass
+
+
 async def _video_index_loop() -> None:
-    """后台刷新：每 10 分钟看一次，索引缺失或超过 24h 就重建（与 HLS 开关无关）。"""
+    """后台刷新：启动后先等 30s，之后每 10 分钟看一次，索引缺失或超过 24h 就重建（与 HLS 开关无关）。"""
+    await asyncio.sleep(30)
     while True:
         try:
             age = video_index_age()
             if age < 0 or age > VIDEO_INDEX_MAX_AGE:
+                await asyncio.to_thread(_lower_priority)
                 await asyncio.to_thread(build_video_index)
         except asyncio.CancelledError:
             raise
