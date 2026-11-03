@@ -517,38 +517,197 @@ def probe_duration_sync(file_path: str, name: str = "") -> float:
             _duration_cache[key] = duration
     return duration
 
+# ============================================================================
+# 视频全量索引（logs/videos_index.json）
+#   目的：视频列表/播放列表不再每次现场全量探测（大库里 ffprobe 很慢）。
+#   刷新：后台线程每 10 分钟看一次，超过 VIDEO_INDEX_MAX_AGE（默认 24h）就重建；
+#        和「每日 HLS 分片任务」开关完全无关，HLS 关了也照常更新。
+#   自愈：list_video_files() 会把索引和真实目录合并，新文件/改过的文件才补探测。
+# ============================================================================
+VIDEO_INDEX_PATH = os.environ.get("VIDEO_INDEX_PATH", os.path.join(LOG_DIR, "videos_index.json"))
+VIDEO_INDEX_MAX_AGE = int(os.environ.get("VIDEO_INDEX_MAX_AGE", str(24 * 3600)))
+VIDEO_INDEX_TICK = int(os.environ.get("VIDEO_INDEX_TICK", "600"))
+_video_index_memo = {"mtime": None, "data": {}}
+_video_index_lock = threading.Lock()
+_video_index_building = False
+
+
+def _load_video_index() -> dict:
+    """读索引（按文件 mtime 做内存缓存）。读不到/坏了就返回 {}。"""
+    try:
+        st = os.stat(VIDEO_INDEX_PATH)
+    except OSError:
+        return {}
+    if _video_index_memo["mtime"] == st.st_mtime and _video_index_memo["data"]:
+        return _video_index_memo["data"]
+    try:
+        with open(VIDEO_INDEX_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    _video_index_memo["mtime"] = st.st_mtime
+    _video_index_memo["data"] = data
+    return data
+
+
+def _save_video_index(videos: List[dict]) -> None:
+    """原子写索引（先写 .tmp 再 rename），避免读到半截文件。"""
+    data = {
+        "generated_at": time.time(),
+        "generated_at_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "count": len(videos),
+        "videos": videos,
+    }
+    try:
+        os.makedirs(os.path.dirname(VIDEO_INDEX_PATH) or ".", exist_ok=True)
+        tmp = VIDEO_INDEX_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, VIDEO_INDEX_PATH)
+        _video_index_memo["mtime"] = None      # 下次按新文件重新读
+        _video_index_memo["data"] = data
+    except Exception as e:
+        log_line(f"视频索引写入失败: {e}")
+
+
+def build_video_index() -> dict:
+    """全量重建索引（会补齐所有缺时长的文件）。"""
+    global _video_index_building
+    with _video_index_lock:
+        if _video_index_building:
+            return _load_video_index()
+        _video_index_building = True
+    try:
+        upload_dir = get_upload_dir()
+        videos = []
+        try:
+            names = os.listdir(upload_dir)
+        except Exception:
+            names = []
+        for name in names:
+            if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
+                continue
+            p = os.path.join(upload_dir, name)
+            try:
+                if not os.path.isfile(p):
+                    continue
+                st = os.stat(p)
+            except OSError:
+                continue
+            videos.append({
+                "name": name,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "duration": 0.0,
+                "url": f"/obs/{quote(name)}",
+                "hls": f"/hls/{quote(name)}/index.m3u8",
+                "hlsReady": hls_exists(name),
+            })
+        if videos:
+            def _fill(item):
+                item["duration"] = probe_duration_sync(os.path.join(upload_dir, item["name"]), item["name"])
+                return item
+            try:
+                list(duration_executor.map(_fill, videos))
+            except Exception:
+                pass
+        _save_video_index(videos)
+        log_line(f"视频索引已更新：{len(videos)} 个视频")
+        return _load_video_index()
+    finally:
+        with _video_index_lock:
+            _video_index_building = False
+
+
+def video_index_age() -> float:
+    """索引距上次生成多少秒；没有索引返回 -1。"""
+    data = _load_video_index()
+    ts = data.get("generated_at") if isinstance(data, dict) else None
+    if not isinstance(ts, (int, float)):
+        return -1.0
+    return max(0.0, time.time() - float(ts))
+
+
+async def _video_index_loop() -> None:
+    """后台刷新：每 10 分钟看一次，索引缺失或超过 24h 就重建（与 HLS 开关无关）。"""
+    while True:
+        try:
+            age = video_index_age()
+            if age < 0 or age > VIDEO_INDEX_MAX_AGE:
+                await asyncio.to_thread(build_video_index)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_line(f"视频索引刷新失败: {e}")
+        await asyncio.sleep(VIDEO_INDEX_TICK)
+
+
 def list_video_files() -> List[dict]:
     """列出所有视频文件 - 与 obs-video-app 格式一致。
-    时长探测走缓存；未命中缓存的项用 duration_executor 并发探测（不阻塞调用线程的事件循环）。"""
+    走「全量索引」：同名 + 同大小 + 同 mtime 直接复用索引里的时长，只有新/改过的文件才 ffprobe；
+    索引与目录不一致时顺手回写，保证越用越准。"""
     upload_dir = get_upload_dir()
-    videos = []
-    try:
-        for name in os.listdir(upload_dir):
-            ext = os.path.splitext(name)[1].lower()
-            if ext in VIDEO_EXTS:
-                p = os.path.join(upload_dir, name)
-                if os.path.isfile(p):
-                    stat = os.stat(p)
-                    videos.append({
-                        "name": name,
-                        "size": stat.st_size,
-                        "mtime": stat.st_mtime,
-                        "duration": 0.0,
-                        "url": f"/obs/{quote(name)}",
-                        "hls": f"/hls/{quote(name)}/index.m3u8",
-                        "hlsReady": hls_exists(name)
-                    })
-    except Exception:
-        pass
+    idx = _load_video_index()
+    cached = {}
+    for v in (idx.get("videos") or []):
+        if isinstance(v, dict) and v.get("name"):
+            cached[v["name"]] = v
 
-    # 并发补齐时长：已缓存的会立即返回（缓存命中不启动 ffprobe）
-    if videos:
+    videos = []
+    stale = False
+    try:
+        names = os.listdir(upload_dir)
+    except Exception:
+        names = []
+    for name in names:
+        if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
+            continue
+        p = os.path.join(upload_dir, name)
+        try:
+            if not os.path.isfile(p):
+                continue
+            st = os.stat(p)
+        except OSError:
+            continue
+        old = cached.get(name)
+        if old and old.get("size") == st.st_size and old.get("mtime") == st.st_mtime:
+            duration = float(old.get("duration") or 0.0)
+        else:
+            duration = None      # 新文件/改过 → 下面补探测
+            stale = True
+        videos.append({
+            "name": name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "duration": duration,
+            "url": f"/obs/{quote(name)}",
+            "hls": f"/hls/{quote(name)}/index.m3u8",
+            "hlsReady": hls_exists(name),
+        })
+
+    if len(cached) != len(videos):
+        stale = True
+
+    need = [v for v in videos if v["duration"] is None]
+    if need:
         def _fill(item):
-            p = os.path.join(upload_dir, item["name"])
-            item["duration"] = probe_duration_sync(p, item["name"])
+            item["duration"] = probe_duration_sync(os.path.join(upload_dir, item["name"]), item["name"])
             return item
         try:
-            list(duration_executor.map(_fill, videos))
+            list(duration_executor.map(_fill, need))
+        except Exception:
+            for v in need:
+                if v["duration"] is None:
+                    v["duration"] = 0.0
+    for v in videos:
+        if v["duration"] is None:
+            v["duration"] = 0.0
+
+    if stale and not _video_index_building:
+        try:
+            _save_video_index(videos)
         except Exception:
             pass
     return videos
@@ -585,12 +744,15 @@ async def lifespan(app: FastAPI):
     log_line(f"OBS web app running on port {PORT} (obs dir: {app.state.upload_dir}, logs dir: {LOG_DIR})")
     # 启动每日 04:00 的 HLS 检查任务（每天检查缺 HLS 的视频并生成分片）
     cron_task = asyncio.create_task(_hls_cron_loop()) if HLS_CRON_ENABLED else None
+    # 视频全量索引：与 HLS 开关无关，每天必刷
+    index_task = asyncio.create_task(_video_index_loop())
     yield
     # Shutdown：取消定时任务
-    if cron_task is not None:
-        cron_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cron_task
+    for t in (cron_task, index_task):
+        if t is not None:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
     log_line("OBS web app shutting down")
 
 app = FastAPI(lifespan=lifespan)
@@ -3785,8 +3947,33 @@ async def obs_file(filename: str):
 async def videos_list():
     """获取视频列表。
     走 asyncio.to_thread：list_video_files 内部有 ffprobe 等阻塞调用，
-    放在线程池执行，避免阻塞事件循环拖慢正在播放的视频流（多客户端并发时的卡顿根因）。"""
+    放在线程池执行，避免阻塞事件循环拖慢正在播放的视频流（多客户端并发时的卡顿根因）。
+    实际数据来自「视频全量索引」（logs/videos_index.json，每天后台刷新），只有新文件才现探测。"""
     return JSONResponse({"videos": await asyncio.to_thread(list_video_files)})
+
+
+@app.get("/api/videos-index")
+async def videos_index_status():
+    """视频索引状态：给运维/客户端确认「全量表」是不是新鲜的。"""
+    idx = _load_video_index()
+    age = video_index_age()
+    return JSONResponse({
+        "exists": bool(idx),
+        "path": VIDEO_INDEX_PATH,
+        "generated_at": idx.get("generated_at_text"),
+        "age_seconds": round(age, 1),
+        "count": idx.get("count", 0),
+        "max_age_seconds": VIDEO_INDEX_MAX_AGE,
+        "building": _video_index_building,
+    })
+
+
+@app.post("/api/videos-index/rebuild")
+async def videos_index_rebuild():
+    """立刻重建视频索引（上传完一批文件后想马上看到列表可以调一下）。"""
+    data = await asyncio.to_thread(build_video_index)
+    return JSONResponse({"ok": True, "generated_at": data.get("generated_at_text"),
+                         "count": data.get("count", 0)})
 
 @app.post("/hls/generate-all")
 async def hls_generate_all(dry_run: bool = Query(False)):
