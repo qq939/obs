@@ -109,6 +109,29 @@ def get_upload_dir() -> str:
 def get_chunk_dir() -> str:
     return os.path.join(get_upload_dir(), ".chunks")
 
+# 软删除回收站目录（位于 UPLOAD_DIR 下，首页/视频列表均不展示）
+TRASH_DIRNAME = os.environ.get("TRASH_DIRNAME", "delete")
+
+def get_trash_dir() -> str:
+    return os.path.join(get_upload_dir(), TRASH_DIRNAME)
+
+def unique_trash_path(upload_dir: str, rel_name: str) -> str:
+    """在 <upload_dir>/delete/ 下算一个不冲突的目标路径（同名自动加时间戳后缀）。"""
+    trash_root = os.path.join(upload_dir, TRASH_DIRNAME)
+    rel_name = (rel_name or "").replace("\\", "/").lstrip("/")
+    target = os.path.join(trash_root, rel_name)
+    os.makedirs(os.path.dirname(target) or trash_root, exist_ok=True)
+    if not os.path.exists(target):
+        return target
+    stem, ext = os.path.splitext(target)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = f"{stem}.{stamp}{ext}"
+    n = 1
+    while os.path.exists(candidate):
+        candidate = f"{stem}.{stamp}-{n}{ext}"
+        n += 1
+    return candidate
+
 def get_hls_dir() -> str:
     return os.environ.get("HLS_DIR", HLS_DIR)
 
@@ -1003,7 +1026,11 @@ async def homepage(request: Request, sort: str = Query("time")):
     upload_dir = getattr(request.app.state, "upload_dir", get_upload_dir())
     if os.path.exists(upload_dir):
         try:
-            raw_files = [f for f in os.listdir(upload_dir) if not f.startswith('.')]
+            raw_files = [
+                f for f in os.listdir(upload_dir)
+                if not f.startswith('.') and f != TRASH_DIRNAME
+                and os.path.isfile(os.path.join(upload_dir, f))
+            ]
             
             if sort == 'ext':
                 # 按扩展名排序 (A-Z)
@@ -4936,7 +4963,8 @@ async def delete_file(filename: str, request: Request):
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        os.remove(file_path)
+        trash_path = unique_trash_path(upload_dir, filename)
+        os.replace(file_path, trash_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
@@ -4949,7 +4977,7 @@ async def delete_file(filename: str, request: Request):
             hls_removed = True
         except Exception as e:
             log_line(f"删除 HLS 目录失败 file={filename} error={e}")
-    log_line(f"删除文件 file={filename} hls_removed={hls_removed}")
+    log_line(f"软删除文件 file={filename} -> {trash_path} hls_removed={hls_removed}")
     return Response(content="Deleted", status_code=200)
 
 @app.get("/api/hls-cron")
