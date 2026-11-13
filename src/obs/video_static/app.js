@@ -1443,8 +1443,13 @@
         if (!tvWireless() || !isFinite(t)) return;
         try { tvVideo.currentTime = t; } catch (e) {}
     }
+    // 第一页（信息页）是 -3x 倒放：负速率 AirPlay 播不了，且倒放的 currentTime 一直在倒退，
+    // 硬同步会表现为「电视原地循环几帧」甚至直接断联。倒放期间只让电视自己正常播，不同步。
+    function tvSyncable() {
+        return tvWireless() && currentPage !== 0 && video.playbackRate > 0;
+    }
     function tvFollow() {
-        if (!tvWireless()) return;
+        if (!tvSyncable()) return;
         if (video.paused) { tvVideo.pause(); return; }
         tvVideo.playbackRate = video.playbackRate;
         if (Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) tvSeek(video.currentTime);
@@ -1452,8 +1457,15 @@
     }
     video.addEventListener('play', tvFollow);
     video.addEventListener('pause', () => { if (tvWireless()) tvVideo.pause(); });
-    video.addEventListener('seeked', () => tvSeek(video.currentTime));
-    video.addEventListener('ratechange', () => { if (tvWireless()) tvVideo.playbackRate = video.playbackRate; });
+    video.addEventListener('seeked', () => { if (tvSyncable()) tvSeek(video.currentTime); });
+    video.addEventListener('ratechange', () => {
+        if (!tvWireless()) return;
+        // 只在正速率时下发；倒放/冻结（0 或负数）一律不碰电视那一路
+        if (video.playbackRate > 0) {
+            tvVideo.playbackRate = video.playbackRate;
+            tvFollow();
+        }
+    });
     // 全屏兜底：有些 iOS 版本不派发 webkitplaybacktargetstatechange，
     // 靠轮询保证「一旦移交成功就把全屏收掉」，否则用户只能看到黑屏全屏。
     setInterval(() => {
@@ -1462,7 +1474,7 @@
 
     // 漂移纠正：手机是主控，每 2 秒拉一次
     setInterval(() => {
-        if (tvWireless() && Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) {
+        if (tvSyncable() && Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) {
             tvSeek(video.currentTime);
         }
     }, 2000);
