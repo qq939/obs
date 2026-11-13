@@ -64,10 +64,18 @@
                         </div>
                         <div class="setting-row" id="castRow">
                             <span>投屏</span>
-                            <div class="speed-options" style="flex-direction:column;align-items:flex-start;gap:6px;">
-                                <button class="speed-btn" id="btnCastTv" style="width:104px;text-align:center;opacity:0.4;" title="投到装了 ocs-tv 的电视：电视自己拉流，手机继续显示">投屏到电视</button>
-                                <button class="speed-btn" id="btnAirplay" style="width:104px;text-align:center;" title="AirPlay 投屏：电视独立播放，手机继续显示画面">AirPlay</button>
+                            <div class="speed-options" style="flex-direction:row;align-items:center;gap:8px;">
+                                <button class="speed-btn" id="btnCastTv" style="text-align:center;opacity:0.4;" title="投到装了 ocs-tv 的电视：电视自己拉流，手机继续显示">投屏到电视</button>
+                                <button class="speed-btn" id="btnAirplay" style="text-align:center;" title="AirPlay 投屏：电视独立播放，手机继续显示画面">AirPlay</button>
                             </div>
+                        </div>
+                        <!-- 磁力下载进度：主页 Ctrl+V 粘 magnet 链接后在这里看 -->
+                        <div class="setting-row" id="dlRow" style="display:none;flex-direction:column;align-items:stretch;gap:8px;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;">
+                                <span>下载</span>
+                                <span id="dlHint" style="font-size:12px;color:rgba(255,255,255,.45);">下完自动保留视频和字幕</span>
+                            </div>
+                            <div id="dlList"></div>
                         </div>
                     </div>
                     <!-- 进度条：固定在设置页底部，始终可见 -->
