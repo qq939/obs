@@ -1490,26 +1490,40 @@
             if (row) row.style.display = (airplayOn || tvOn) ? '' : 'none';
         }
 
-        // 电视端在线（10 秒内有轮询）就把「投屏到电视」露出来，所有平台都可用：
-        // 走 OCS 自己的 /api/cast 通道，不依赖 Cast / AirPlay，也没有子网限制。
+        // 「投屏到电视」按钮始终显示：电视不在线时变暗，点一下给出原因，
+        // 否则用户会以为功能消失。走 OCS 自己的 /api/cast 通道，不依赖 Cast/AirPlay，也没有子网限制。
+        let tvOnline = false;
+        function paintCastBtn() {
+            castTvBtn.style.display = '';
+            castTvBtn.style.opacity = tvOnline ? '' : '0.4';
+            castTvBtn.title = tvOnline ? '' : '电视 App 未连接到本服务器';
+        }
         async function refreshCastStatus() {
             if (!castTvBtn) return;
             try {
                 const r = await fetch('/api/cast/status', { cache: 'no-store' });
                 const d = await r.json();
-                castTvBtn.style.display = d.tv_online ? '' : 'none';
+                tvOnline = !!d.tv_online;
             } catch (err) {
-                castTvBtn.style.display = 'none';
+                tvOnline = false;
             }
+            paintCastBtn();
             syncCastRow();
         }
 
         if (castTvBtn) {
             castTvBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
+                if (castTvBtn.disabled) return;
+                const label = '投屏到电视';
+                if (!tvOnline) {
+                    castTvBtn.textContent = '电视不在线';
+                    setTimeout(() => { castTvBtn.textContent = label; }, 3000);
+                    refreshCastStatus();
+                    return;
+                }
                 const cur = videos[activeIndex];
                 if (!cur) return;
-                const label = castTvBtn.textContent;
                 castTvBtn.disabled = true;
                 castTvBtn.textContent = '投屏中…';
                 let ok = false;
