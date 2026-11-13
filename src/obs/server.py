@@ -4438,6 +4438,22 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
     var saveUrl = {{SAVE_JSON}};
     var fileExt = {{EXT_JSON}};
     var currentName = {{FILENAME_JSON}};
+    var prevFile = {{PREV_JSON}};
+    var nextFile = {{NEXT_JSON}};
+
+    // 方向键切换同目录下的预览文件：↑/↓ 和 ←/→ 都行。
+    // 输入框、文本编辑器、video 原生控件里不拦（那些地方方向键有自己的含义）。
+    document.addEventListener("keydown", function (e) {
+        if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) { return; }
+        var t = e.target;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "VIDEO" || t.isContentEditable)) { return; }
+        var target = null;
+        if (e.key === "ArrowDown" || e.key === "ArrowRight") { target = nextFile; }
+        else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { target = prevFile; }
+        if (!target) { return; }
+        e.preventDefault();
+        location.href = "/preview/" + target.split("/").map(encodeURIComponent).join("/");
+    });
     var editBtn = document.getElementById("editBtn");
     var saveState = document.getElementById("saveState");
     var textView = document.getElementById("textView");
@@ -4658,6 +4674,27 @@ _PREVIEW_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+def preview_neighbors(filename: str):
+    """同目录下按名字排序的前一个/后一个文件（用于方向键切换预览）。取不到就返回 (None, None)。"""
+    root = get_upload_dir()
+    target = safe_upload_path(root, filename)
+    if not target:
+        return None, None
+    folder = os.path.dirname(target)
+    try:
+        names = sorted(
+            os.path.join(os.path.dirname(filename), entry)
+            for entry in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, entry))
+        )
+    except OSError:
+        return None, None
+    if filename not in names:
+        return None, None
+    i = names.index(filename)
+    return (names[i - 1] if i > 0 else None, names[i + 1] if i + 1 < len(names) else None)
+
+
 def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = False) -> str:
     name = os.path.basename(filename) or filename
     ext = file_ext(filename)
@@ -4721,6 +4758,9 @@ def render_preview_page(filename: str, size: int, kind: str, office_ok: bool = F
     html = html.replace("{{EXT_JSON}}", json.dumps(ext))
     # currentName 是相对路径，注入到 <script> 前转义 < > &，防止文件名里的 </script> 破坏页面
     html = html.replace("{{FILENAME_JSON}}", json.dumps(filename).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+    prev_name, next_name = preview_neighbors(filename)
+    html = html.replace("{{PREV_JSON}}", json.dumps(prev_name))
+    html = html.replace("{{NEXT_JSON}}", json.dumps(next_name))
     return html
 
 
