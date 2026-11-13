@@ -1493,10 +1493,13 @@
         // 「投屏到电视」按钮始终显示：电视不在线时变暗，点一下给出原因，
         // 否则用户会以为功能消失。走 OCS 自己的 /api/cast 通道，不依赖 Cast/AirPlay，也没有子网限制。
         let tvOnline = false;
+        let tvAddr = '';
         function paintCastBtn() {
             castTvBtn.style.display = '';
             castTvBtn.style.opacity = tvOnline ? '' : '0.4';
-            castTvBtn.title = tvOnline ? '' : '电视 App 未连接到本服务器';
+            castTvBtn.title = tvOnline
+                ? ('投到 ' + (tvAddr || '电视'))
+                : '电视 App 未连接到本服务器（它现在连的是别的服务器，或者没装 v1.4）';
         }
         async function refreshCastStatus() {
             if (!castTvBtn) return;
@@ -1504,8 +1507,10 @@
                 const r = await fetch('/api/cast/status', { cache: 'no-store' });
                 const d = await r.json();
                 tvOnline = !!d.tv_online;
+                tvAddr = d.tv_ip || '';
             } catch (err) {
                 tvOnline = false;
+                tvAddr = '';
             }
             paintCastBtn();
             syncCastRow();
