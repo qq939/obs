@@ -273,6 +273,10 @@
     video.setAttribute('webkit-playsinline', '');
     video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;';
     videoContainer.appendChild(video);
+    // 主播放器禁止被 AirPlay 接管：一旦设备的音频路由是电视，Safari 会把「下一个视频」
+    // 也自动移交出去 → 手机黑屏、进度条失效。只允许隐藏的 tvVideo 移交。
+    video.setAttribute('x-webkit-airplay', 'deny');
+    try { video.disableRemotePlayback = true; } catch (e) {}
 
     // ---------------------------------------------------------------- 双播放器（AirPlay）
     // 手机端继续用上面的 video 播放；tvVideo 是隐藏的第二路，专门负责把流交给电视。
@@ -892,9 +896,15 @@
         fastSpeed = false;
         video.playbackRate = playbackSpeed;
         applyPagePlayback();
-        // 电视那一路用同一份原生 URL（HLS 优先），切源后重新挂上
+        // 切源时把 AirPlay 状态收拾干净：暂停电视那一路、清掉高亮、
+        // 主播放器解除静音（上一次移交留下的），避免切完视频就黑屏/没声音。
         const tvSrc = (v.hls && v.hlsReady) ? v.hls : v.url;
-        if (tvVideo.getAttribute('src') !== tvSrc) tvVideo.src = tvSrc;
+        if (tvVideo.getAttribute('src') !== tvSrc) {
+            try { tvVideo.pause(); } catch (e) {}
+            tvVideo.src = tvSrc;
+        }
+        if (airplayBtn) airplayBtn.classList.remove('active');
+        video.muted = false;
     }
 
     function attachHls(v) {
@@ -951,13 +961,19 @@
     // 保证 5 格队列里每一格的 t 永远反映"该视频当时被播放到的时刻"
     setInterval(() => {
         if (videos.length === 0) return;
-        if (video.duration && isFinite(video.duration) && video.duration > 0) {
-            const pct = video.currentTime / video.duration;
+        // 时长兜底：视频还没 loadedmetadata（duration=NaN）时用列表里的 duration，
+        // 否则进度条会整条冻住、拖不动。
+        const _mv = videos[activeIndex];
+        const _dur = (video.duration && isFinite(video.duration) && video.duration > 0)
+            ? video.duration
+            : ((_mv && _mv.duration) || 0);
+        if (_dur > 0) {
+            const pct = video.currentTime / _dur;
             const pctStr = Math.round(pct * 100) + '%';
             infoProgress.textContent = pctStr;
             seekFill.style.width = pctStr;
             seekThumb.style.left = pctStr;
-            seekLabel.textContent = fmtClock(video.currentTime) + ' / ' + fmtClock(video.duration);
+            seekLabel.textContent = fmtClock(video.currentTime) + ' / ' + fmtClock(_dur);
             // 实时保存当前播放进度到 playlistWindow 当前格 (uuid, t)（5 格队列，索引 2 = 当前）
             if (playlistWindow.length === WINDOW_SIZE && playlistWindow[2]) {
                 const t = video.currentTime;
@@ -1505,9 +1521,13 @@
         if (videos.length === 0 || !seekTrack) return;
         const rect = seekTrack.getBoundingClientRect();
         const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-        if (video.duration && isFinite(video.duration)) {
-            video.currentTime = ratio * video.duration;
-            tvSeek(ratio * video.duration);   // 进度条同时驱动电视那一路
+        const _mv = videos[activeIndex];
+        const _dur = (video.duration && isFinite(video.duration) && video.duration > 0)
+            ? video.duration
+            : ((_mv && _mv.duration) || 0);
+        if (_dur > 0) {
+            video.currentTime = ratio * _dur;
+            tvSeek(ratio * _dur);   // 进度条同时驱动电视那一路
         }
     }
 
