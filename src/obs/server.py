@@ -4031,6 +4031,8 @@ async def videos_index_status():
 _CAST_LOCK = threading.Lock()
 _CAST_STATE = {"seq": 0, "file": None, "at": 0.0}
 _CAST_LAST_SEEN = 0.0
+# 电视真正开始播放后回执的 seq：网页只有看到 acked >= 自己发的 seq 才显示「已投屏」
+_CAST_ACK = 0
 
 
 @app.get("/api/cast/current")
@@ -4047,13 +4049,38 @@ async def cast_current():
 
 @app.get("/api/cast/status")
 async def cast_status():
-    """网页端查询：电视端是否在线（10 秒内有轮询即视为在线）。"""
+    """网页端查询：电视端是否在线（10 秒内有轮询即视为在线）+ 最近一次回执的 seq。"""
     with _CAST_LOCK:
         seen = _CAST_LAST_SEEN
         seq = _CAST_STATE["seq"]
+        acked = _CAST_ACK
     online = bool(seen) and (time.time() - seen) < 10
-    return JSONResponse({"tv_online": online, "seq": seq,
+    return JSONResponse({"tv_online": online, "seq": seq, "acked": acked,
                          "age": round(time.time() - seen, 1) if seen else None})
+
+
+@app.post("/api/cast/ack")
+async def cast_ack(request: Request):
+    """电视端回执：播放器拿到第一帧（onPrepared）后调用，告诉服务端「真的放起来了」。
+
+    网页端拿到 /api/cast 返回的 seq 后轮询 /api/cast/status，
+    只有 acked >= seq 才显示「已投屏」；否则说明电视没接住（没开 App / 格式不支持）。"""
+    global _CAST_ACK
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    seq = 0
+    if isinstance(body, dict):
+        try:
+            seq = int(body.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+    with _CAST_LOCK:
+        if seq > _CAST_ACK:
+            _CAST_ACK = seq
+        acked = _CAST_ACK
+    return JSONResponse({"ok": True, "acked": acked})
 
 
 @app.post("/api/cast")
@@ -4069,6 +4096,7 @@ async def cast_play(request: Request):
         _CAST_STATE["file"] = name or None
         _CAST_STATE["at"] = time.time()
         state = dict(_CAST_STATE)
+        state["acked"] = _CAST_ACK
     log_line("[cast] " + ("停止" if not name else name))
     return JSONResponse(state)
 

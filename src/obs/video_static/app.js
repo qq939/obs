@@ -1509,9 +1509,10 @@
                 e.stopPropagation();
                 const cur = videos[activeIndex];
                 if (!cur) return;
-                castTvBtn.disabled = true;
                 const label = castTvBtn.textContent;
+                castTvBtn.disabled = true;
                 castTvBtn.textContent = '投屏中…';
+                let ok = false;
                 try {
                     const r = await fetch('/api/cast', {
                         method: 'POST',
@@ -1519,13 +1520,22 @@
                         body: JSON.stringify({ file: cur.name }),
                     });
                     if (!r.ok) throw new Error('HTTP ' + r.status);
-                    castTvBtn.textContent = '已投屏';
-                } catch (err) {
-                    castTvBtn.textContent = '投屏失败';
-                } finally {
-                    castTvBtn.disabled = false;
-                    setTimeout(() => { castTvBtn.textContent = label; }, 2500);
-                }
+                    const sent = await r.json();
+                    const want = Number(sent.seq) || 0;
+                    // 等电视回执：它在播放器拿到第一帧后会 POST /api/cast/ack。
+                    // 拿不到回执就说明电视没接住（没开 App / 格式不支持），不能显示成功。
+                    const deadline = Date.now() + 8000;
+                    while (Date.now() < deadline) {
+                        await new Promise((res) => setTimeout(res, 700));
+                        try {
+                            const s = await (await fetch('/api/cast/status', { cache: 'no-store' })).json();
+                            if (Number(s.acked) >= want) { ok = true; break; }
+                        } catch (err) {}
+                    }
+                } catch (err) {}
+                castTvBtn.disabled = false;
+                castTvBtn.textContent = ok ? '已投屏' : '电视没响应';
+                setTimeout(() => { castTvBtn.textContent = label; }, ok ? 3000 : 4000);
             });
         }
         refreshCastStatus();
