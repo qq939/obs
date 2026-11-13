@@ -285,6 +285,14 @@
     document.body.appendChild(tvVideo);
     function tvWireless() { return !!tvVideo.webkitCurrentPlaybackTargetIsWireless; }
 
+    // iOS 上 webkitExitFullscreen 不一定可靠，且 statechange 事件可能不触发，
+    // 所以这里用「多种方式 + 轮询」确保移交后能退回页面，否则整页会被黑屏全屏挡住。
+    function exitTvFullscreen() {
+        try { if (tvVideo.webkitDisplayingFullscreen && tvVideo.webkitExitFullscreen) tvVideo.webkitExitFullscreen(); } catch (e) {}
+        try { if (document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen(); } catch (e) {}
+        try { if (document.webkitFullscreenElement && document.webkitCancelFullScreen) document.webkitCancelFullScreen(); } catch (e) {}
+    }
+
     // ---------------------------------------------------------------- HLS
     const _probe = document.createElement('video');
     const _canNativeHls = !!(_probe.canPlayType && _probe.canPlayType('application/vnd.apple.mpegurl'));
@@ -1430,6 +1438,12 @@
     video.addEventListener('pause', () => { if (tvWireless()) tvVideo.pause(); });
     video.addEventListener('seeked', () => tvSeek(video.currentTime));
     video.addEventListener('ratechange', () => { if (tvWireless()) tvVideo.playbackRate = video.playbackRate; });
+    // 全屏兜底：有些 iOS 版本不派发 webkitplaybacktargetstatechange，
+    // 靠轮询保证「一旦移交成功就把全屏收掉」，否则用户只能看到黑屏全屏。
+    setInterval(() => {
+        if (tvWireless() && tvVideo.webkitDisplayingFullscreen) exitTvFullscreen();
+    }, 500);
+
     // 漂移纠正：手机是主控，每 2 秒拉一次
     setInterval(() => {
         if (tvWireless() && Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) {
@@ -1455,6 +1469,9 @@
                 // 必须在同一个用户手势里同步调用，setTimeout 会丢掉手势导致进不了全屏。
                 if (IS_IOS && !tvWireless()) {
                     tvVideo.controls = true;
+                    // 先把 tv 那路播起来：否则进全屏后会是一块黑屏，用户以为坏了
+                    try { tvVideo.currentTime = video.currentTime; } catch (err) {}
+                    tvVideo.play().catch(() => {});
                     try { tvVideo.webkitEnterFullscreen && tvVideo.webkitEnterFullscreen(); } catch (err) {}
                 }
             });
@@ -1467,12 +1484,17 @@
                     tvSeek(video.currentTime);
                     tvVideo.play().catch(() => {});
                     // 移交成功就收起原生全屏，回到页面（手机看主画面）
-                    try { tvVideo.webkitExitFullscreen && tvVideo.webkitExitFullscreen(); } catch (err) {}
+                    exitTvFullscreen();
+                    setTimeout(exitTvFullscreen, 300);
+                    setTimeout(exitTvFullscreen, 1200);
                 } else {
                     video.muted = false;
                 }
             });
-            tvVideo.addEventListener('webkitendfullscreen', () => { tvVideo.controls = false; });
+            tvVideo.addEventListener('webkitendfullscreen', () => {
+                tvVideo.controls = false;
+                if (!tvWireless()) tvVideo.pause();   // 没移交成功就别让第二路继续跑
+            });
         }
     }
 
