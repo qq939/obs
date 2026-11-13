@@ -20,7 +20,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager, suppress
 from typing import List, Optional, Dict
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode
+import urllib.request as urllib_request
 from concurrent.futures import ThreadPoolExecutor
 from html import escape as html_escape
 
@@ -4034,6 +4035,44 @@ _CAST_LAST_SEEN = 0.0
 # 电视真正开始播放后回执的 seq：网页只有看到 acked >= 自己发的 seq 才显示「已投屏」
 _CAST_ACK = 0
 
+# 电视注册表：ocs-tv 每 10 秒上报「我在 <局域网 IP>:<端口> 上等着收指令」。
+# 有了它，服务器可以主动把播放指令推过去 —— 手机在任意一台 OCS 上点投屏都能用，
+# 不必让电视里存的服务器地址指到这台。轮询通道只能指挥「正连着自己的那台」。
+_TV_REGISTRY: Dict[str, dict] = {}
+_TV_REGISTRY_LOCK = threading.Lock()
+_TV_TTL = 45.0           # App 每 10 秒上报一次，留 4 倍余量
+_TV_PORT_DEFAULT = 18099
+
+
+def _pick_tv() -> Optional[dict]:
+    """取最近上报过、且没超过 TTL 的那台电视。"""
+    now = time.time()
+    best = None
+    with _TV_REGISTRY_LOCK:
+        for ip, rec in list(_TV_REGISTRY.items()):
+            if now - rec.get("at", 0) > _TV_TTL:
+                continue
+            if best is None or rec.get("at", 0) > best.get("at", 0):
+                best = {"ip": ip, "port": rec.get("port") or _TV_PORT_DEFAULT,
+                        "name": rec.get("name") or "", "at": rec.get("at", 0)}
+    return best
+
+
+def _push_play(tv: dict, name: str, seq: int, base: str) -> bool:
+    """把播放指令直接 POST 到电视的常驻端口。
+
+    返回 True 只代表「电视收到了指令」，不等于「放起来了」——
+    真正播起来还是靠播放器 onPrepared 时的 /api/cast/ack，网页不会误报成功。"""
+    query = urlencode({"file": name, "seq": seq, "base": base})
+    url = "http://%s:%d/play?%s" % (tv["ip"], int(tv["port"]), query)
+    req = urllib_request.Request(url, data=b"", method="POST")
+    try:
+        with urllib_request.urlopen(req, timeout=2.5) as resp:
+            return 200 <= resp.status < 300
+    except Exception as exc:
+        log_line("[cast] 推送到 %s 失败：%s" % (tv["ip"], exc))
+        return False
+
 
 @app.get("/api/cast/current")
 async def cast_current():
@@ -4049,14 +4088,52 @@ async def cast_current():
 
 @app.get("/api/cast/status")
 async def cast_status():
-    """网页端查询：电视端是否在线（10 秒内有轮询即视为在线）+ 最近一次回执的 seq。"""
+    """网页端查询：电视端是否在线 + 最近一次回执的 seq。
+
+    在线有两条来源：电视正在轮询本机（10 秒内），或它上报过自己的局域网地址（45 秒内）。
+    后者意味着可以直接推送，网页上显示的「投屏到电视」对两者都成立。"""
     with _CAST_LOCK:
         seen = _CAST_LAST_SEEN
         seq = _CAST_STATE["seq"]
         acked = _CAST_ACK
-    online = bool(seen) and (time.time() - seen) < 10
-    return JSONResponse({"tv_online": online, "seq": seq, "acked": acked,
-                         "age": round(time.time() - seen, 1) if seen else None})
+    tv = _pick_tv()
+    polled = bool(seen) and (time.time() - seen) < 10
+    return JSONResponse({"tv_online": polled or bool(tv), "seq": seq, "acked": acked,
+                         "age": round(time.time() - seen, 1) if seen else None,
+                         "tv_ip": tv["ip"] if tv else None,
+                         "push": bool(tv)})
+
+
+@app.post("/api/tv/announce")
+async def tv_announce(request: Request):
+    """电视端上报自己的局域网地址：{"ip": "192.168.0.116", "port": 18099, "name": "..."}。
+
+    电视连的是哪台 OCS 无所谓，报了这一句，这台服务器就能直接把播放指令推过去。
+    也因此换域名/换实例都不用再去电视上改设置。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    ip = str(body.get("ip") or "").strip()
+    if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+        return JSONResponse({"ok": False, "error": "bad ip"}, status_code=400)
+    try:
+        port = int(body.get("port") or _TV_PORT_DEFAULT)
+    except (TypeError, ValueError):
+        port = _TV_PORT_DEFAULT
+    name = str(body.get("name") or "")[:64]
+    with _TV_REGISTRY_LOCK:
+        _TV_REGISTRY[ip] = {"port": port, "name": name, "at": time.time()}
+    return JSONResponse({"ok": True, "ttl": _TV_TTL, "base": url_head})
+
+
+@app.get("/api/tv/presence")
+async def tv_presence():
+    """当前已知的电视（局域网地址 + 端口），调试和网页判断都用得着。"""
+    tv = _pick_tv()
+    return JSONResponse({"tv": tv, "ttl": _TV_TTL, "server": url_head})
 
 
 @app.post("/api/cast/ack")
@@ -4097,7 +4174,15 @@ async def cast_play(request: Request):
         _CAST_STATE["at"] = time.time()
         state = dict(_CAST_STATE)
         state["acked"] = _CAST_ACK
-    log_line("[cast] " + ("停止" if not name else name))
+    # 有电视上报过地址就直接推给它（不用等它下一次轮询，也不要求它连的是本机）；
+    # 没有就走原来的轮询通道。
+    tv = _pick_tv()
+    pushed = False
+    if tv and name:
+        pushed = await asyncio.to_thread(_push_play, tv, name, state["seq"], url_head)
+    state["pushed"] = pushed
+    state["tv_ip"] = tv["ip"] if tv else None
+    log_line("[cast] " + ("停止" if not name else name) + (" → 推送 %s" % tv["ip"] if pushed else ""))
     return JSONResponse(state)
 
 
