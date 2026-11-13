@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager, suppress
 from typing import List, Optional, Dict
 from urllib.parse import quote, unquote, urlencode
+import urllib.parse as urllib_parse
 import urllib.request as urllib_request
 from concurrent.futures import ThreadPoolExecutor
 from html import escape as html_escape
@@ -4105,7 +4106,7 @@ def _ensure_aria2() -> bool:
             ["setsid", "aria2c", "--enable-rpc", "--rpc-listen-port=%d" % ARIA2_PORT,
              "--rpc-secret=" + ARIA2_SECRET, "--dir=" + DL_ROOT,
              "--seed-time=0", "--file-allocation=none", "--continue=true",
-             "--enable-dht=true", "--disable-ipv6=true", "--bt-max-peers=80",
+             "--enable-dht=true", "--bt-max-peers=80",
              "--dht-file-path=" + os.path.join(LOG_DIR or ".", "dht.dat"),
              "--dht-file-path6=" + os.path.join(LOG_DIR or ".", "dht6.dat"),
              "--console-log-level=warn", "--summary-interval=0",
@@ -4186,6 +4187,13 @@ def _refresh_tasks() -> None:
                                   "downloadSpeed", "numSeeders", "connections",
                                   "bittorrent", "errorMessage", "files", "followedBy"]])
         if not isinstance(info, dict):
+            # aria2 那边已经没有这个任务了（被 cancel / 重启过）：别再每 5 秒问一次，免得刷错误日志
+            with _DL_LOCK:
+                t = _DL_TASKS.get(gid)
+                if t:
+                    t["done"] = True
+                    t["status"] = "removed"
+                    t["error"] = "任务已不在下载引擎里"
             continue
         # 磁力链接先下一个 "[METADATA]xxx" 的元数据小任务，下完会接着起一个真正的新任务，
         # 新任务的 gid 在 followedBy 里——不跟着换，进度就永远停在元数据那一步。
@@ -4253,6 +4261,18 @@ def _refresh_tasks() -> None:
                 _DL_TASKS[gid]["done"] = True
 
 
+def _magnet_infohash(magnet: str) -> str:
+    """从 magnet 里抠出 btih（大写/小写/hex 都统一成小写）。"""
+    try:
+        query = urllib_parse.parse_qs(urllib_parse.urlparse(magnet).query)
+        xt = (query.get("xt") or [""])[0]
+        if xt.lower().startswith("urn:btih:"):
+            return xt[9:].strip().lower()
+    except Exception:
+        return ""
+    return ""
+
+
 def _dl_watcher():
     """后台线程：没人看页面时也要把下完的任务收尾；顺便看住 aria2c（挂了就拉起来）。"""
     while True:
@@ -4280,6 +4300,14 @@ async def dl_magnet(request: Request):
     if "&tr=" not in magnet and "?tr=" not in magnet:
         magnet += "".join("&tr=" + quote(t, safe="") for t in DL_DEFAULT_TRACKERS)
         log_line("[dl] 磁力链接没带 tracker，补了 %d 个公共 tracker" % len(DL_DEFAULT_TRACKERS))
+    # 同一个种子重复粘：aria2 会回 "InfoHash ... is already registered" 并且新建的任务永远没有元数据，
+    # 所以这里先按 infohash 去重，直接返回已有的那个任务。
+    infohash = _magnet_infohash(magnet)
+    if infohash:
+        with _DL_LOCK:
+            for t in _DL_TASKS.values():
+                if t.get("infohash") == infohash and not t.get("done"):
+                    return JSONResponse({"ok": True, "gid": t["gid"], "existing": True})
     if not await asyncio.to_thread(_ensure_aria2):
         return JSONResponse({"ok": False, "error": "下载引擎没起来（aria2 未安装？）"}, status_code=503)
     task_id = uuid.uuid4().hex[:16]
@@ -4293,7 +4321,7 @@ async def dl_magnet(request: Request):
         return JSONResponse({"ok": False, "error": "aria2 拒绝了这条链接"}, status_code=502)
     with _DL_LOCK:
         _DL_TASKS[gid] = {"gid": gid, "name": "", "dir": task_dir, "status": "active",
-                          "phase": "metadata",
+                          "phase": "metadata", "infohash": infohash,
                           "total": 0, "completed": 0, "speed": 0, "started": time.time(),
                           "done": False, "files": [], "fileList": [], "magnet": magnet[:200]}
     log_line("[dl] 新增磁力任务 %s" % gid)
