@@ -4142,6 +4142,18 @@ def _discover_tv(force: bool = False) -> Optional[dict]:
         return found
 
 
+def _push_ctl(tv: dict, pos: float, paused: bool, rate: float) -> bool:
+    """把「进度 / 播放暂停 / 倍速」同步给电视。投屏进行中每 0.5 秒一次；失败就算了，下一拍再来。"""
+    query = urlencode({"pos": "%.2f" % pos, "paused": "1" if paused else "0", "rate": "%.2f" % rate})
+    url = "http://%s:%d/ctl?%s" % (tv["ip"], int(tv["port"]), query)
+    req = urllib_request.Request(url, data=b"", method="POST")
+    try:
+        with urllib_request.urlopen(req, timeout=1.2) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
 def _push_play(tv: dict, name: str, seq: int, base: str) -> bool:
     """把播放指令直接 POST 到电视的常驻端口。
 
@@ -4270,6 +4282,34 @@ async def cast_play(request: Request):
     state["tv_ip"] = tv["ip"] if tv else None
     log_line("[cast] " + ("停止" if not name else name) + (" → 推送 %s" % tv["ip"] if pushed else ""))
     return JSONResponse(state)
+
+
+@app.post("/api/cast/ctl")
+async def cast_ctl(request: Request):
+    """手机端同步：{"pos": 秒, "paused": bool, "rate": 倍速}。
+
+    网页是 https、电视是 http，浏览器直连会被混合内容拦掉，所以由服务端中转。
+    手机是遥控器：位置、暂停、倍速都以手机为准。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        pos = float(body.get("pos") or 0)
+    except (TypeError, ValueError):
+        pos = 0.0
+    try:
+        rate = float(body.get("rate") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    paused = bool(body.get("paused"))
+    tv = await asyncio.to_thread(_discover_tv)
+    if not tv:
+        return JSONResponse({"ok": False, "error": "no tv"}, status_code=503)
+    ok = await asyncio.to_thread(_push_ctl, tv, pos, paused, rate)
+    return JSONResponse({"ok": ok, "tv_ip": tv["ip"]})
 
 
 @app.post("/api/videos-index/rebuild")

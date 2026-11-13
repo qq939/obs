@@ -76,6 +76,7 @@
     let castFollowTimer = 0;
     let castHint = '';
     let castHintUntil = 0;
+    let castSyncTimer = 0;
     let tvOnline = false;
     let tvAddr = '';
     // 投屏开关的创建依赖 AirPlay 按钮存在，所以真正的函数放在那个 if 块里；
@@ -1612,6 +1613,38 @@
             }, 500);
         }
 
+        // ---- 投屏同步：手机当遥控器，进度/暂停/倍速每 0.5 秒对齐一次 ----
+        // 网页是 https、电视是 http，浏览器直连会被混合内容拦掉，所以走本服务器的 /api/cast/ctl 中转。
+        function castSyncTick() {
+            if (!castOn) {
+                castSyncStop();
+                return;
+            }
+            const v = video;
+            if (!v) return;
+            // 倒放（第一页 -3x）电视放不了，这一拍不推倍速，只跟着暂停/进度
+            const rate = v.playbackRate > 0.1 ? v.playbackRate : 0;
+            fetch('/api/cast/ctl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pos: v.currentTime || 0, paused: !!v.paused, rate }),
+                cache: 'no-store',
+            }).catch(() => {});
+        }
+
+        function castSyncStart() {
+            if (castSyncTimer) return;
+            castSyncTimer = setInterval(castSyncTick, 500);
+            castSyncTick();
+        }
+
+        function castSyncStop() {
+            if (castSyncTimer) {
+                clearInterval(castSyncTimer);
+                castSyncTimer = 0;
+            }
+        }
+
         if (castTvBtn) {
             castTvBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
@@ -1621,6 +1654,7 @@
                     castOn = false;
                     castFile = '';
                     clearTimeout(castFollowTimer);
+                    castSyncStop();
                     paintCastBtn();
                     await sendCast('', false);
                     return;
@@ -1639,6 +1673,7 @@
                 if (ok) {
                     castOn = true;
                     castFile = want;
+                    castSyncStart();
                 } else {
                     hintCast('电视没响应', 4000);
                 }
