@@ -5,6 +5,7 @@
 # 使用位置：
 #   - 首页「文件托管」curl 上传示例、文件列表下载链接前缀、上传成功响应文本、启动日志示例
 import os
+import mimetypes
 
 # 可用环境变量 URL_HEAD 覆盖（部署到别的机器时指向本机地址，例如 http://192.168.0.201:8080）
 url_head = os.environ.get("URL_HEAD", "https://ocs.dimond.top").rstrip("/")
@@ -3991,14 +3992,68 @@ async def video_hls_js():
 # 视频 API（兼容 obs-video-app master 分支）
 # ============================================================================
 
+def _parse_byte_range(header: str, size: int):
+    """"bytes=0-1023" → (0, 1023)；解析不了返回 None（按整文件回）。"""
+    try:
+        units, _, spec = header.partition("=")
+        if units.strip().lower() != "bytes":
+            return None
+        spec = spec.strip()
+        if spec.startswith("-"):
+            n = int(spec[1:])
+            if n <= 0:
+                return None
+            return max(0, size - n), size - 1
+        start_s, _, end_s = spec.partition("-")
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else size - 1
+        if start > end or start >= size:
+            return None
+        return start, min(end, size - 1)
+    except Exception:
+        return None
+
+
 @app.get("/obs/{filename:path}")
-async def obs_file(filename: str):
-    """访问 obs 目录下的文件"""
+async def obs_file(filename: str, request: Request):
+    """访问 obs 目录下的文件。
+
+    必须支持 Range：电视/手机的 MediaPlayer 靠 206 分段拉流判断能不能播，
+    只回 200 整文件时（uvicorn 直连、前面没有 nginx 的部署）会一直卡在 0:00。"""
     upload_dir = getattr(app.state, "upload_dir", get_upload_dir())
     file_path = os.path.join(upload_dir, unquote(filename))
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(file_path)
+
+    size = os.path.getsize(file_path)
+    media_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    range_header = request.headers.get("range")
+    span = _parse_byte_range(range_header, size) if range_header else None
+
+    if span is None:
+        resp = FileResponse(file_path, media_type=media_type)
+        resp.headers["Accept-Ranges"] = "bytes"
+        return resp
+
+    start, end = span
+
+    async def _iter():
+        async with aiofiles.open(file_path, "rb") as f:
+            await f.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = await f.read(min(RANGE_DOWNLOAD_CHUNK_SIZE, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(_iter(), status_code=206, media_type=media_type, headers={
+        "Content-Range": "bytes %d-%d/%d" % (start, end, size),
+        "Content-Length": str(end - start + 1),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+    })
 
 @app.get("/videos")
 async def videos_list():
@@ -4064,24 +4119,40 @@ def _split_host(host: str):
     return host, _TV_PORT_DEFAULT
 
 
-def _load_saved_tv() -> Optional[str]:
+def _load_saved_tvs() -> list:
+    """记住过的电视地址（可能有几台：投影仪、手机上装的测试端）。最近的排前面。"""
     try:
         with open(_TV_STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        host = (data or {}).get("host") or ""
-        return host or None
+            data = json.load(f) or {}
     except Exception:
-        return None
+        return []
+    hosts = data.get("hosts")
+    out = []
+    if isinstance(hosts, list):
+        out = [str(h) for h in hosts if h]
+    legacy = data.get("host")
+    if legacy and legacy not in out:
+        # 旧格式（只有一个地址）也能读
+        out.insert(0, legacy)
+    return out
 
 
 def _save_tv(host: str) -> None:
-    """记住这台电视的地址，下次直接探它，免得再问电视一遍。"""
-    if not host or _load_saved_tv() == host:
+    """记住这台电视的地址并提到最前面；下次先探它，免得再问电视一遍。
+
+    存成列表是因为可能同时有多台（投影仪 + 手机测试端）。只留一台的话，
+    测试用的手机一启动就会把投影仪顶掉，投影仪就"消失"了。
+    """
+    if not host:
         return
+    hosts = _load_saved_tvs()
+    if hosts and hosts[0] == host:
+        return
+    hosts = [host] + [h for h in hosts if h != host]
     try:
         os.makedirs(os.path.dirname(_TV_STATE_PATH) or ".", exist_ok=True)
         with open(_TV_STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump({"host": host, "at": datetime.now().isoformat(timespec="seconds")}, f)
+            json.dump({"hosts": hosts[:8], "at": datetime.now().isoformat(timespec="seconds")}, f)
     except Exception as exc:
         log_line("[cast] 保存电视地址失败：%s" % exc)
 
@@ -4091,9 +4162,7 @@ def _tv_candidates() -> list:
     out = []
     for host in _TV_HOSTS_ENV:
         out.append(host)
-    saved = _load_saved_tv()
-    if saved:
-        out.append(saved)
+    out.extend(_load_saved_tvs())
     with _TV_REGISTRY_LOCK:
         for ip, rec in list(_TV_REGISTRY.items()):
             if time.time() - rec.get("at", 0) > _TV_TTL:
@@ -4232,7 +4301,7 @@ async def tv_presence():
     """电视的探测结果 + 候选地址（调试用）。"""
     tv = await asyncio.to_thread(_discover_tv)
     return JSONResponse({"tv": tv, "candidates": _tv_candidates(),
-                         "saved": _load_saved_tv(), "server": url_head})
+                         "saved": _load_saved_tvs(), "server": url_head})
 
 
 @app.post("/api/cast/ack")
