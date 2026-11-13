@@ -4195,8 +4195,12 @@ def _refresh_tasks() -> None:
                 t0 = _DL_TASKS.get(gid)
                 ih = (t0 or {}).get("infohash") or ""
             if ih:
-                for method in ("aria2.tellActive", "aria2.tellWaiting"):
-                    lst = _aria2_call(method, [0, 100, ["gid", "infoHash", "status"]]) or []
+                keys = ["gid", "infoHash", "status"]
+                # 注意参数形态不一样：tellActive 只收 keys，tellWaiting 还要 offset/num
+                lookups = [("aria2.tellActive", [keys]),
+                           ("aria2.tellWaiting", [0, 100, keys])]
+                for method, params in lookups:
+                    lst = _aria2_call(method, params) or []
                     for item in lst if isinstance(lst, list) else []:
                         if (item.get("infoHash") or "").lower() == ih:
                             moved = item.get("gid")
