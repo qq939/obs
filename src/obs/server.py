@@ -2507,7 +2507,7 @@ async def homepage(request: Request, sort: str = Query("time")):
                 return false;
             }
 
-            // 粘贴磁力链接 → 交给服务器用 aria2 下（进度在播放页的设置里看）
+            // 粘贴磁力链接 → 交给服务器用 libtorrent 下（进度和选文件在右上角「设置」里看）
             async function submitMagnet(magnet) {
                 const el = document.getElementById('formUploadStatus');
                 if (el) el.textContent = '已提交磁力任务，正在获取元数据…';
@@ -2519,8 +2519,8 @@ async def homepage(request: Request, sort: str = Query("time")):
                     });
                     const d = await r.json();
                     if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
-                    if (el) el.textContent = '已开始下载，进度在播放页「设置」里看';
-                    setTimeout(() => { if (el && el.textContent.indexOf('进度在播放页') >= 0) el.textContent = ''; }, 8000);
+                    if (el) el.textContent = '已开始取元数据，进度和选文件都在右上角「设置」里';
+                    setTimeout(() => { if (el && el.textContent.indexOf('右上角') >= 0) el.textContent = ''; }, 8000);
                 } catch (err) {
                     if (el) el.textContent = '磁力任务失败：' + err.message;
                     else alert('磁力任务失败：' + err.message);
@@ -2845,6 +2845,123 @@ async def homepage(request: Request, sort: str = Query("time")):
             });
             document.addEventListener('keydown', (e) => { if (e.key === 'Escape') panel.hidden = true; });
 
+            // ---- 磁力下载：进度 + 勾选文件，都放在这个设置面板里 ----
+            const dlSection = document.getElementById('dl-section');
+            const dlList = document.getElementById('dl-list');
+            const dlStatus = document.getElementById('dl-status');
+
+            function fmtBytes(n) {
+                if (!n) return '0 B';
+                const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let i = 0;
+                let v = n;
+                while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+                return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + ' ' + u[i];
+            }
+
+            function renderDl(tasks) {
+                if (!dlSection || !dlList) return;
+                if (!tasks || tasks.length === 0) {
+                    dlSection.hidden = true;
+                    dlList.innerHTML = '';
+                    return;
+                }
+                dlSection.hidden = false;
+                dlList.innerHTML = '';
+                for (const t of tasks) {
+                    const box = document.createElement('div');
+                    box.style.cssText = 'background:#f6f7f9;border-radius:8px;padding:8px;margin-bottom:8px;font-size:12px;color:#333;';
+
+                    const top = document.createElement('div');
+                    top.style.cssText = 'display:flex;justify-content:space-between;gap:8px;';
+                    const nm = document.createElement('span');
+                    nm.textContent = t.name || '(等待元数据)';
+                    nm.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;';
+                    const st = document.createElement('span');
+                    st.style.color = t.done ? '#1a9c56' : (t.error ? '#d33' : '#888');
+                    if (t.phase === 'choose') st.textContent = '选择文件';
+                    else st.textContent = t.done
+                        ? ('完成 · 留了 ' + ((t.files && t.files.length) || 0) + ' 个')
+                        : (t.error ? '出错' : (t.percent > 0 ? t.percent + '%' : '找资源中…'));
+                    top.appendChild(nm);
+                    top.appendChild(st);
+                    box.appendChild(top);
+
+                    if (t.phase === 'choose' && t.fileList && t.fileList.length) {
+                        const fl = document.createElement('div');
+                        fl.style.cssText = 'display:flex;flex-direction:column;gap:2px;max-height:170px;overflow:auto;margin:6px 0;';
+                        t.fileList.forEach((f) => {
+                            const lab = document.createElement('label');
+                            lab.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11px;';
+                            const cb = document.createElement('input');
+                            cb.type = 'checkbox';
+                            cb.checked = true;
+                            cb.className = 'dl-file';
+                            cb.dataset.gid = t.gid;
+                            cb.dataset.index = String(f.index);
+                            const txt = document.createElement('span');
+                            txt.textContent = f.name + '  (' + fmtBytes(f.size) + ')';
+                            txt.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                            lab.appendChild(cb);
+                            lab.appendChild(txt);
+                            fl.appendChild(lab);
+                        });
+                        box.appendChild(fl);
+                        const btn = document.createElement('button');
+                        btn.textContent = '开始下载所选';
+                        btn.style.cssText = 'width:100%;padding:6px;border:none;border-radius:6px;background:#4A90D9;color:#fff;cursor:pointer;';
+                        btn.addEventListener('click', async () => {
+                            const idx = Array.from(document.querySelectorAll('.dl-file'))
+                                .filter((c) => c.checked && c.dataset.gid === t.gid)
+                                .map((c) => Number(c.dataset.index));
+                            if (idx.length === 0) { alert('至少选一个文件'); return; }
+                            btn.disabled = true;
+                            btn.textContent = '开始中…';
+                            try {
+                                await fetch('/api/dl/start', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ gid: t.gid, indexes: idx }),
+                                });
+                            } catch (e) {}
+                            refreshDl();
+                        });
+                        box.appendChild(btn);
+                        dlList.appendChild(box);
+                        continue;
+                    }
+
+                    const bar = document.createElement('div');
+                    bar.style.cssText = 'height:4px;background:#e3e5e8;border-radius:2px;overflow:hidden;margin-top:6px;';
+                    const fill = document.createElement('div');
+                    fill.style.cssText = 'height:100%;width:' + Math.max(2, Math.min(100, t.percent || 0)) + '%;background:' + (t.done ? '#1a9c56' : '#4A90D9') + ';transition:width .3s;';
+                    bar.appendChild(fill);
+                    box.appendChild(bar);
+
+                    if (!t.done) {
+                        const info = document.createElement('div');
+                        info.style.cssText = 'font-size:11px;color:#999;margin-top:4px;';
+                        info.textContent = fmtBytes(t.completed) + ' / ' + (t.total ? fmtBytes(t.total) : '?')
+                            + '   ' + (t.speed ? fmtBytes(t.speed) + '/s' : '—')
+                            + '   种子 ' + (t.seeders || 0);
+                        box.appendChild(info);
+                    }
+                    dlList.appendChild(box);
+                }
+            }
+
+            async function refreshDl() {
+                try {
+                    const r = await fetch('/api/dl/list', { cache: 'no-store' });
+                    const d = await r.json();
+                    renderDl(d.tasks || []);
+                } catch (e) {
+                    if (dlSection) dlSection.hidden = true;
+                }
+            }
+            refreshDl();
+            setInterval(refreshDl, 3000);
+
             function render(d) {
                 toggle.checked = !!d.enabled;
                 const when = ('0' + d.hour).slice(-2) + ':' + ('0' + d.minute).slice(-2);
@@ -2917,6 +3034,12 @@ async def homepage(request: Request, sort: str = Query("time")):
                         <input type="checkbox" id="hlsCronToggle">
                     </label>
                     <div class="sp-status" id="hlsCronStatus">读取中…</div>
+                    <!-- 磁力下载进度：主页 Ctrl+V 粘链接后，进度在这里看 -->
+                    <div id="dl-section" hidden>
+                        <div class="sp-title" style="margin-top:14px">下载</div>
+                        <div id="dl-list"></div>
+                        <div class="sp-status" id="dl-status"></div>
+                    </div>
                 </div>
             </div>
             <div id="ws-status-indicator" title="Connecting..."></div>
