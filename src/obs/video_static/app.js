@@ -68,6 +68,19 @@
     let currentAbort = null;
     let longPressTimer = null;
     let longPressMoved = false;
+    // 投屏会话：打开后一直有效，翻到下一个视频会自动把新视频推给电视（castFollow）。
+    // castFile 记录电视上正在播的那个，避免同一集重复推。
+    let castOn = false;
+    let castFile = '';
+    let castBusy = false;
+    let castFollowTimer = 0;
+    let castHint = '';
+    let castHintUntil = 0;
+    let tvOnline = false;
+    let tvAddr = '';
+    // 投屏开关的创建依赖 AirPlay 按钮存在，所以真正的函数放在那个 if 块里；
+    // 这里留一个外层引用，切视频时（applyIndex）才够得着。
+    let castFollowHook = null;
     const positions = new Map();  // 内存缓存，刷新丢失
     const POS_KEY = 'obs-play-pos-v1';  // localStorage key
 
@@ -659,6 +672,8 @@
         // 5 格重新平移 + 单端补新随机 → 必须重渲染 strip，不能只调 updatePlaylistStripActive
         // （后者只更新 active 状态和时间/进度，不重建 DOM）
         renderPlaylistStrip();
+        // 投屏开着的话，电视跟着换到新视频
+        if (castFollowHook) castFollowHook();
     }
 
     // 把 playlistWindow（5 格 (uuid, t)）渲染到设置页上方的播放列表条
@@ -1492,15 +1507,39 @@
 
         // 「投屏到电视」按钮始终显示：电视不在线时变暗，点一下给出原因，
         // 否则用户会以为功能消失。走 OCS 自己的 /api/cast 通道，不依赖 Cast/AirPlay，也没有子网限制。
-        let tvOnline = false;
-        let tvAddr = '';
+        function currentCastFile() {
+            _syncActiveIndexFromWindow();
+            const cur = playlistWindow && playlistWindow[2] && playlistWindow[2].uuid;
+            if (cur) return cur;
+            const v = videos[activeIndex];
+            return v ? v.name : '';
+        }
+
+        function hintCast(text, ms) {
+            castHint = text;
+            castHintUntil = Date.now() + ms;
+            paintCastBtn();
+            setTimeout(() => {
+                if (Date.now() >= castHintUntil) {
+                    castHint = '';
+                    paintCastBtn();
+                }
+            }, ms + 30);
+        }
+
         function paintCastBtn() {
             castTvBtn.style.display = '';
-            castTvBtn.style.opacity = tvOnline ? '' : '0.4';
+            // 投屏中是持续状态：一直高亮，和 AirPlay 那种一次性按钮区分开
+            castTvBtn.classList.toggle('active', castOn);
+            castTvBtn.style.opacity = (tvOnline || castOn) ? '' : '0.4';
+            if (castBusy) castTvBtn.textContent = '投屏中…';
+            else if (castHint && Date.now() < castHintUntil) castTvBtn.textContent = castHint;
+            else castTvBtn.textContent = castOn ? '已投屏' : '投屏到电视';
             castTvBtn.title = tvOnline
-                ? ('投到 ' + (tvAddr || '电视'))
+                ? ('投到 ' + (tvAddr || '电视') + (castOn ? '（切换视频会跟着投）' : ''))
                 : '电视 App 未连接到本服务器（它现在连的是别的服务器，或者没装 v1.4）';
         }
+
         async function refreshCastStatus() {
             if (!castTvBtn) return;
             try {
@@ -1516,45 +1555,94 @@
             syncCastRow();
         }
 
+        /**
+         * 发一次投屏指令；waitAck=true 时再等电视回执（播放器拿到第一帧才 ack）。
+         * 回执是「真的播起来了」的唯一凭据，所以首次投屏必须等；切换视频时也等，但界面不锁。
+         */
+        async function sendCast(file, waitAck) {
+            let want = 0;
+            try {
+                const r = await fetch('/api/cast', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file }),
+                });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                want = Number((await r.json()).seq) || 0;
+            } catch (err) {
+                return false;
+            }
+            if (!waitAck || !want) return true;
+            // 大文件（几十 MB）电视要先缓冲才吐第一帧，8 秒不够，给 20 秒
+            const deadline = Date.now() + 20000;
+            while (Date.now() < deadline) {
+                await new Promise((res) => setTimeout(res, 700));
+                try {
+                    const s = await (await fetch('/api/cast/status', { cache: 'no-store' })).json();
+                    if (Number(s.acked) >= want) return true;
+                } catch (err) {}
+            }
+            return false;
+        }
+
+        // 换视频后把新视频推过去。连翻几页只推最后停下的那个。
+        castFollowHook = function () {
+            if (!castOn || castBusy) return;
+            const now = currentCastFile();
+            if (!now || now === castFile) return;
+            clearTimeout(castFollowTimer);
+            castFollowTimer = setTimeout(async () => {
+                if (!castOn) return;
+                const target = currentCastFile();
+                if (!target || target === castFile) return;
+                castBusy = true;
+                paintCastBtn();
+                const ok = await sendCast(target, true);
+                castBusy = false;
+                if (!castOn) { paintCastBtn(); return; }
+                if (ok) {
+                    castFile = target;
+                } else {
+                    // 电视没接住（关掉了 / 格式不支持）：退出投屏状态，别让它一直显示「已投屏」
+                    castOn = false;
+                    castFile = '';
+                    hintCast('电视没响应', 4000);
+                }
+                paintCastBtn();
+            }, 500);
+        }
+
         if (castTvBtn) {
             castTvBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                if (castTvBtn.disabled) return;
-                const label = '投屏到电视';
+                if (castBusy) return;
+                if (castOn) {
+                    // 再点一下 = 停止投屏（电视退出播放器），会话结束
+                    castOn = false;
+                    castFile = '';
+                    clearTimeout(castFollowTimer);
+                    paintCastBtn();
+                    await sendCast('', false);
+                    return;
+                }
                 if (!tvOnline) {
-                    castTvBtn.textContent = '电视不在线';
-                    setTimeout(() => { castTvBtn.textContent = label; }, 3000);
+                    hintCast('电视不在线', 3000);
                     refreshCastStatus();
                     return;
                 }
-                const cur = videos[activeIndex];
-                if (!cur) return;
-                castTvBtn.disabled = true;
-                castTvBtn.textContent = '投屏中…';
-                let ok = false;
-                try {
-                    const r = await fetch('/api/cast', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ file: cur.name }),
-                    });
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    const sent = await r.json();
-                    const want = Number(sent.seq) || 0;
-                    // 等电视回执：它在播放器拿到第一帧后会 POST /api/cast/ack。
-                    // 拿不到回执就说明电视没接住（没开 App / 格式不支持），不能显示成功。
-                    const deadline = Date.now() + 8000;
-                    while (Date.now() < deadline) {
-                        await new Promise((res) => setTimeout(res, 700));
-                        try {
-                            const s = await (await fetch('/api/cast/status', { cache: 'no-store' })).json();
-                            if (Number(s.acked) >= want) { ok = true; break; }
-                        } catch (err) {}
-                    }
-                } catch (err) {}
-                castTvBtn.disabled = false;
-                castTvBtn.textContent = ok ? '已投屏' : '电视没响应';
-                setTimeout(() => { castTvBtn.textContent = label; }, ok ? 3000 : 4000);
+                const want = currentCastFile();
+                if (!want) return;
+                castBusy = true;
+                paintCastBtn();
+                const ok = await sendCast(want, true);
+                castBusy = false;
+                if (ok) {
+                    castOn = true;
+                    castFile = want;
+                } else {
+                    hintCast('电视没响应', 4000);
+                }
+                paintCastBtn();
             });
         }
         refreshCastStatus();
