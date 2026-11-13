@@ -274,6 +274,17 @@
     video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;';
     videoContainer.appendChild(video);
 
+    // ---------------------------------------------------------------- 双播放器（AirPlay）
+    // 手机端继续用上面的 video 播放；tvVideo 是隐藏的第二路，专门负责把流交给电视。
+    // 电视由 Apple TV 自己解码，所以手机画面不受影响，两边靠时间戳同步。
+    const tvVideo = document.createElement('video');
+    tvVideo.muted = true;                 // 电视出声，手机不再重复出声
+    tvVideo.setAttribute('playsinline', '');
+    tvVideo.setAttribute('x-webkit-airplay', 'allow');
+    tvVideo.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:180px;';
+    document.body.appendChild(tvVideo);
+    function tvWireless() { return !!tvVideo.webkitCurrentPlaybackTargetIsWireless; }
+
     // ---------------------------------------------------------------- HLS
     const _probe = document.createElement('video');
     const _canNativeHls = !!(_probe.canPlayType && _probe.canPlayType('application/vnd.apple.mpegurl'));
@@ -873,6 +884,9 @@
         fastSpeed = false;
         video.playbackRate = playbackSpeed;
         applyPagePlayback();
+        // 电视那一路用同一份原生 URL（HLS 优先），切源后重新挂上
+        const tvSrc = (v.hls && v.hlsReady) ? v.hls : v.url;
+        if (tvVideo.getAttribute('src') !== tvSrc) tvVideo.src = tvSrc;
     }
 
     function attachHls(v) {
@@ -1397,6 +1411,71 @@
         if (playing && !isNaN(video.duration)) ensurePlaying();
     });
 
+    // ---------------------------------------------------------------- AirPlay 控制
+    // 只做两件事：① 把移交开起来；② 手机为主控，把进度/播放状态同步到电视那一路。
+    const airplayBtn = document.getElementById('btnAirplay');
+
+    function tvSeek(t) {
+        if (!tvWireless() || !isFinite(t)) return;
+        try { tvVideo.currentTime = t; } catch (e) {}
+    }
+    function tvFollow() {
+        if (!tvWireless()) return;
+        if (video.paused) { tvVideo.pause(); return; }
+        tvVideo.playbackRate = video.playbackRate;
+        if (Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) tvSeek(video.currentTime);
+        tvVideo.play().catch(() => {});
+    }
+    video.addEventListener('play', tvFollow);
+    video.addEventListener('pause', () => { if (tvWireless()) tvVideo.pause(); });
+    video.addEventListener('seeked', () => tvSeek(video.currentTime));
+    video.addEventListener('ratechange', () => { if (tvWireless()) tvVideo.playbackRate = video.playbackRate; });
+    // 漂移纠正：手机是主控，每 2 秒拉一次
+    setInterval(() => {
+        if (tvWireless() && Math.abs(tvVideo.currentTime - video.currentTime) > 0.5) {
+            tvSeek(video.currentTime);
+        }
+    }, 2000);
+
+    if (airplayBtn) {
+        if (!NATIVE_HLS) {
+            // 非 Safari 没有 AirPlay，整行藏掉（只藏按钮会留个空标签）
+            const row = airplayBtn.closest('.setting-row');
+            if (row) row.style.display = 'none';
+        } else {
+            const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            airplayBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                // 老版本 Safari 仍然认这个 picker；新版本它是空操作，靠下面的原生控制条兜底。
+                if (typeof tvVideo.webkitShowPlaybackTargetPicker === 'function') {
+                    try { tvVideo.webkitShowPlaybackTargetPicker(); } catch (err) {}
+                }
+                // 必须在同一个用户手势里同步调用，setTimeout 会丢掉手势导致进不了全屏。
+                if (IS_IOS && !tvWireless()) {
+                    tvVideo.controls = true;
+                    try { tvVideo.webkitEnterFullscreen && tvVideo.webkitEnterFullscreen(); } catch (err) {}
+                }
+            });
+            tvVideo.addEventListener('webkitplaybacktargetstatechange', () => {
+                const on = tvWireless();
+                airplayBtn.classList.toggle('active', on);
+                if (on) {
+                    video.muted = true;          // 避免电视和手机双声道
+                    tvVideo.playbackRate = video.playbackRate;
+                    tvSeek(video.currentTime);
+                    tvVideo.play().catch(() => {});
+                    // 移交成功就收起原生全屏，回到页面（手机看主画面）
+                    try { tvVideo.webkitExitFullscreen && tvVideo.webkitExitFullscreen(); } catch (err) {}
+                } else {
+                    video.muted = false;
+                }
+            });
+            tvVideo.addEventListener('webkitendfullscreen', () => { tvVideo.controls = false; });
+        }
+    }
+
     // Seek bar drag (touch + mouse)
     let seekDragging = false;
 
@@ -1406,6 +1485,7 @@
         const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
         if (video.duration && isFinite(video.duration)) {
             video.currentTime = ratio * video.duration;
+            tvSeek(ratio * video.duration);   // 进度条同时驱动电视那一路
         }
     }
 
@@ -1434,6 +1514,7 @@
         speedOptions.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         if (currentPage === 1 || currentPage === 2) { video.playbackRate = playbackSpeed; }
+        if (tvWireless()) tvVideo.playbackRate = playbackSpeed;
     });
 
     // Overlay buttons (only shown on settings page)
