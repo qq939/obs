@@ -4106,7 +4106,7 @@ def _ensure_aria2() -> bool:
             ["setsid", "aria2c", "--enable-rpc", "--rpc-listen-port=%d" % ARIA2_PORT,
              "--rpc-secret=" + ARIA2_SECRET, "--dir=" + DL_ROOT,
              "--seed-time=0", "--file-allocation=none", "--continue=true",
-             "--enable-dht=true", "--bt-max-peers=80",
+             "--enable-dht=true", "--disable-ipv6=true", "--bt-max-peers=80",
              "--dht-file-path=" + os.path.join(LOG_DIR or ".", "dht.dat"),
              "--dht-file-path6=" + os.path.join(LOG_DIR or ".", "dht6.dat"),
              "--console-log-level=warn", "--summary-interval=0",
@@ -4187,14 +4187,44 @@ def _refresh_tasks() -> None:
                                   "downloadSpeed", "numSeeders", "connections",
                                   "bittorrent", "errorMessage", "files", "followedBy"]])
         if not isinstance(info, dict):
-            # aria2 那边已经没有这个任务了（被 cancel / 重启过）：别再每 5 秒问一次，免得刷错误日志
+            # 查不到就按 infohash 在引擎里找一遍：元数据任务转正式任务、引擎重启、
+            # gid 变来变去的时候，靠 gid 找不回来，靠 infohash 能找回来。
+            moved = None
+            ih = ""
+            with _DL_LOCK:
+                t0 = _DL_TASKS.get(gid)
+                ih = (t0 or {}).get("infohash") or ""
+            if ih:
+                for method in ("aria2.tellActive", "aria2.tellWaiting"):
+                    lst = _aria2_call(method, [0, 100, ["gid", "infoHash", "status"]]) or []
+                    for item in lst if isinstance(lst, list) else []:
+                        if (item.get("infoHash") or "").lower() == ih:
+                            moved = item.get("gid")
+                            break
+                    if moved:
+                        break
+            if moved and moved != gid:
+                with _DL_LOCK:
+                    t = _DL_TASKS.pop(gid, None)
+                    if t:
+                        t["gid"] = moved
+                        t["misses"] = 0
+                        _DL_TASKS[moved] = t
+                log_line("[dl] gid 变了，按 infohash 重新挂上：%s → %s" % (gid, moved))
+                continue
             with _DL_LOCK:
                 t = _DL_TASKS.get(gid)
                 if t:
-                    t["done"] = True
-                    t["status"] = "removed"
-                    t["error"] = "任务已不在下载引擎里"
+                    t["misses"] = int(t.get("misses") or 0) + 1
+                    if t["misses"] >= 3:
+                        t["done"] = True
+                        t["status"] = "removed"
+                        t["error"] = "任务已不在下载引擎里"
             continue
+        with _DL_LOCK:
+            t = _DL_TASKS.get(gid)
+            if t:
+                t["misses"] = 0
         # 磁力链接先下一个 "[METADATA]xxx" 的元数据小任务，下完会接着起一个真正的新任务，
         # 新任务的 gid 在 followedBy 里——不跟着换，进度就永远停在元数据那一步。
         followed = info.get("followedBy") or []
