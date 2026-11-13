@@ -4965,6 +4965,10 @@ async def download_file(filename: str, request: Request):
             "Accept-Ranges": "bytes",
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
         }
+        # .apk 必须给安卓的 MIME：否则电视/手机浏览器只当一个未知二进制下载，
+        # 下载完点开也不会进安装器（表现为"下载了但装不了"）。
+        media_type = ("application/vnd.android.package-archive"
+                      if filename.lower().endswith(".apk") else "application/octet-stream")
         if range_header:
             try:
                 unit, rng = range_header.strip().split("=")
@@ -5001,7 +5005,7 @@ async def download_file(filename: str, request: Request):
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Content-Length": str(end - start + 1),
                 }
-                return StreamingResponse(iterfile(file_path, start, end), status_code=206, headers=headers, media_type="application/octet-stream")
+                return StreamingResponse(iterfile(file_path, start, end), status_code=206, headers=headers, media_type=media_type)
             except Exception:
                 return Response(
                     status_code=416,
@@ -5019,7 +5023,7 @@ async def download_file(filename: str, request: Request):
                 **base_headers,
                 "Content-Length": str(file_size),
             }
-            return StreamingResponse(iter_all(file_path), status_code=200, headers=headers, media_type="application/octet-stream")
+            return StreamingResponse(iter_all(file_path), status_code=200, headers=headers, media_type=media_type)
     else:
         raise HTTPException(status_code=404, detail="File not found")
 
