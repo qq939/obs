@@ -1480,39 +1480,61 @@
     }, 2000);
 
     if (airplayBtn) {
-        if (!NATIVE_HLS) {
-            const IS_ANDROID = /Android/i.test(navigator.userAgent);
-            if (!IS_ANDROID) {
-                // 非 Safari 也非安卓：没有任何投屏能力，整行藏掉
-                const row = airplayBtn.closest('.setting-row');
-                if (row) row.style.display = 'none';
-            } else {
-                // 安卓：投到装了 ocs-tv 的电视。电视自己轮询 /api/cast/current 并拉流播放，
-                // 走的是 OCS 自己的通道，不需要 Cast / AirPlay，也没有子网限制。
-                airplayBtn.textContent = '投屏';
-                airplayBtn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    const cur = videos[activeIndex];
-                    if (!cur) return;
-                    airplayBtn.disabled = true;
-                    airplayBtn.textContent = '投屏中…';
-                    try {
-                        const r = await fetch('/api/cast', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ file: cur.name }),
-                        });
-                        if (!r.ok) throw new Error('HTTP ' + r.status);
-                        airplayBtn.textContent = '已投屏';
-                        setTimeout(() => { airplayBtn.textContent = '投屏'; }, 3000);
-                    } catch (err) {
-                        airplayBtn.textContent = '投屏失败';
-                        setTimeout(() => { airplayBtn.textContent = '投屏'; }, 2500);
-                    } finally {
-                        airplayBtn.disabled = false;
-                    }
-                });
+        const castTvBtn = document.getElementById('btnCastTv');
+
+        // 行只在有按钮可见时显示（既没电视也没 AirPlay 就整行藏掉）
+        function syncCastRow() {
+            const airplayOn = airplayBtn.style.display !== 'none';
+            const tvOn = castTvBtn ? castTvBtn.style.display !== 'none' : false;
+            const row = document.getElementById('castRow');
+            if (row) row.style.display = (airplayOn || tvOn) ? '' : 'none';
+        }
+
+        // 电视端在线（10 秒内有轮询）就把「投屏到电视」露出来，所有平台都可用：
+        // 走 OCS 自己的 /api/cast 通道，不依赖 Cast / AirPlay，也没有子网限制。
+        async function refreshCastStatus() {
+            if (!castTvBtn) return;
+            try {
+                const r = await fetch('/api/cast/status', { cache: 'no-store' });
+                const d = await r.json();
+                castTvBtn.style.display = d.tv_online ? '' : 'none';
+            } catch (err) {
+                castTvBtn.style.display = 'none';
             }
+            syncCastRow();
+        }
+
+        if (castTvBtn) {
+            castTvBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const cur = videos[activeIndex];
+                if (!cur) return;
+                castTvBtn.disabled = true;
+                const label = castTvBtn.textContent;
+                castTvBtn.textContent = '投屏中…';
+                try {
+                    const r = await fetch('/api/cast', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ file: cur.name }),
+                    });
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    castTvBtn.textContent = '已投屏';
+                } catch (err) {
+                    castTvBtn.textContent = '投屏失败';
+                } finally {
+                    castTvBtn.disabled = false;
+                    setTimeout(() => { castTvBtn.textContent = label; }, 2500);
+                }
+            });
+        }
+        refreshCastStatus();
+        setInterval(refreshCastStatus, 5000);
+
+        if (!NATIVE_HLS) {
+            // 非 Safari 没有 AirPlay：只藏 AirPlay 按钮，整行由 syncCastRow 决定
+            airplayBtn.style.display = 'none';
+            syncCastRow();
         } else {
             const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);

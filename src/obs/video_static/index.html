@@ -62,10 +62,11 @@
                                 <button class="speed-btn" data-speed="7">7x</button>
                             </div>
                         </div>
-                        <div class="setting-row">
+                        <div class="setting-row" id="castRow">
                             <span>投屏</span>
-                            <div class="speed-options">
-                                <button class="speed-btn" id="btnAirplay" title="投屏到电视：电视独立播放，手机继续显示画面">AirPlay</button>
+                            <div class="speed-options" style="flex-direction:column;align-items:flex-start;gap:6px;">
+                                <button class="speed-btn" id="btnCastTv" style="display:none" title="投到装了 ocs-tv 的电视：电视自己拉流，手机继续显示">投屏到电视</button>
+                                <button class="speed-btn" id="btnAirplay" title="AirPlay 投屏：电视独立播放，手机继续显示画面">AirPlay</button>
                             </div>
                         </div>
                     </div>

@@ -4030,13 +4030,30 @@ async def videos_index_status():
 # 不走 Cast / AirPlay：两端只要能访问同一台 OCS 就行（跨网段、跨公网都可以）。
 _CAST_LOCK = threading.Lock()
 _CAST_STATE = {"seq": 0, "file": None, "at": 0.0}
+_CAST_LAST_SEEN = 0.0
 
 
 @app.get("/api/cast/current")
 async def cast_current():
-    """电视端轮询：返回当前要播的文件；seq 变化即视为新指令。"""
+    """电视端轮询：返回当前要播的文件；seq 变化即视为新指令。
+
+    顺带记一下「最近一次电视轮询的时间」——网页用它判断电视端在不在线，
+    在线就把「投屏到电视」排在 AirPlay 前面。"""
+    global _CAST_LAST_SEEN
     with _CAST_LOCK:
+        _CAST_LAST_SEEN = time.time()
         return JSONResponse(dict(_CAST_STATE))
+
+
+@app.get("/api/cast/status")
+async def cast_status():
+    """网页端查询：电视端是否在线（10 秒内有轮询即视为在线）。"""
+    with _CAST_LOCK:
+        seen = _CAST_LAST_SEEN
+        seq = _CAST_STATE["seq"]
+    online = bool(seen) and (time.time() - seen) < 10
+    return JSONResponse({"tv_online": online, "seq": seq,
+                         "age": round(time.time() - seen, 1) if seen else None})
 
 
 @app.post("/api/cast")
