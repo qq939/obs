@@ -4035,27 +4035,111 @@ _CAST_LAST_SEEN = 0.0
 # 电视真正开始播放后回执的 seq：网页只有看到 acked >= 自己发的 seq 才显示「已投屏」
 _CAST_ACK = 0
 
-# 电视注册表：ocs-tv 每 10 秒上报「我在 <局域网 IP>:<端口> 上等着收指令」。
-# 有了它，服务器可以主动把播放指令推过去 —— 手机在任意一台 OCS 上点投屏都能用，
-# 不必让电视里存的服务器地址指到这台。轮询通道只能指挥「正连着自己的那台」。
-_TV_REGISTRY: Dict[str, dict] = {}
-_TV_REGISTRY_LOCK = threading.Lock()
-_TV_TTL = 45.0           # App 每 10 秒上报一次，留 4 倍余量
+# 电视地址：服务器「按需探测」而不是让电视定时上报。
+# 电视上只开一个固定端口（18099），服务器要知道在线与否就 GET /ping 一次；待机零流量。
+# 地址来源优先级：环境变量 OCS_TV_HOSTS > 上次上报/探测成功的地址（落盘）> 旧版 App 的心跳。
 _TV_PORT_DEFAULT = 18099
+_TV_HOSTS_ENV = [h.strip() for h in os.environ.get("OCS_TV_HOSTS", "").split(",") if h.strip()]
+_TV_REGISTRY: Dict[str, dict] = {}      # 旧版 App（<=1.5）每 10 秒上报，仍然兼容
+_TV_REGISTRY_LOCK = threading.Lock()
+_TV_TTL = 45.0
+_TV_PROBE_TTL = 3.0                     # 探测结果缓存：网页 5 秒一问，实际最多 3 秒探一次
+_TV_PROBE_TIMEOUT = 0.6
+_TV_PROBE_CACHE = {"at": 0.0, "tv": None}
+_TV_PROBE_LOCK = threading.Lock()
+_TV_STATE_PATH = os.path.join(LOG_DIR or ".", "tv_address.json")
 
 
-def _pick_tv() -> Optional[dict]:
-    """取最近上报过、且没超过 TTL 的那台电视。"""
-    now = time.time()
-    best = None
+def _split_host(host: str):
+    """"192.168.0.116:18099" / "192.168.0.116" → (ip, port)"""
+    host = host.strip()
+    if not host:
+        return None
+    if ":" in host and not host.startswith("["):
+        ip, _, port = host.partition(":")
+        try:
+            return ip.strip(), int(port)
+        except ValueError:
+            return ip.strip(), _TV_PORT_DEFAULT
+    return host, _TV_PORT_DEFAULT
+
+
+def _load_saved_tv() -> Optional[str]:
+    try:
+        with open(_TV_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        host = (data or {}).get("host") or ""
+        return host or None
+    except Exception:
+        return None
+
+
+def _save_tv(host: str) -> None:
+    """记住这台电视的地址，下次直接探它，免得再问电视一遍。"""
+    if not host or _load_saved_tv() == host:
+        return
+    try:
+        os.makedirs(os.path.dirname(_TV_STATE_PATH) or ".", exist_ok=True)
+        with open(_TV_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"host": host, "at": datetime.now().isoformat(timespec="seconds")}, f)
+    except Exception as exc:
+        log_line("[cast] 保存电视地址失败：%s" % exc)
+
+
+def _tv_candidates() -> list:
+    """候选电视地址，去重后按优先级排。"""
+    out = []
+    for host in _TV_HOSTS_ENV:
+        out.append(host)
+    saved = _load_saved_tv()
+    if saved:
+        out.append(saved)
     with _TV_REGISTRY_LOCK:
         for ip, rec in list(_TV_REGISTRY.items()):
-            if now - rec.get("at", 0) > _TV_TTL:
+            if time.time() - rec.get("at", 0) > _TV_TTL:
                 continue
-            if best is None or rec.get("at", 0) > best.get("at", 0):
-                best = {"ip": ip, "port": rec.get("port") or _TV_PORT_DEFAULT,
-                        "name": rec.get("name") or "", "at": rec.get("at", 0)}
-    return best
+            out.append("%s:%s" % (ip, rec.get("port") or _TV_PORT_DEFAULT))
+    seen, unique = set(), []
+    for h in out:
+        if h and h not in seen:
+            seen.add(h)
+            unique.append(h)
+    return unique
+
+
+def _probe_one(ip: str, port: int) -> Optional[dict]:
+    url = "http://%s:%d/ping" % (ip, int(port))
+    try:
+        with urllib_request.urlopen(url, timeout=_TV_PROBE_TIMEOUT) as resp:
+            if not (200 <= resp.status < 300):
+                return None
+            info = json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    return {"ip": ip, "port": int(port), "name": info.get("name") or "",
+            "ver": info.get("ver") or "", "source": "probe"}
+
+
+def _discover_tv(force: bool = False) -> Optional[dict]:
+    """探测电视是否在线（结果缓存 3 秒）。在线返回 {ip,port,name,ver}，否则 None。"""
+    now = time.time()
+    with _TV_PROBE_LOCK:
+        if not force and now - _TV_PROBE_CACHE["at"] < _TV_PROBE_TTL:
+            return _TV_PROBE_CACHE["tv"]
+        found = None
+        for host in _tv_candidates():
+            pair = _split_host(host)
+            if not pair:
+                continue
+            found = _probe_one(*pair)
+            if found:
+                _save_tv("%s:%d" % (found["ip"], found["port"]))
+                break
+        _TV_PROBE_CACHE["at"] = time.time()
+        _TV_PROBE_CACHE["tv"] = found
+        return found
 
 
 def _push_play(tv: dict, name: str, seq: int, base: str) -> bool:
@@ -4090,26 +4174,27 @@ async def cast_current():
 async def cast_status():
     """网页端查询：电视端是否在线 + 最近一次回执的 seq。
 
-    在线有两条来源：电视正在轮询本机（10 秒内），或它上报过自己的局域网地址（45 秒内）。
-    后者意味着可以直接推送，网页上显示的「投屏到电视」对两者都成立。"""
+    在线靠「探测」：服务器自己 GET 电视的 /ping（结果缓存 3 秒），而不是等电视上报。
+    电视还在轮询本机（老版本）也算在线，那种情况走轮询通道。"""
     with _CAST_LOCK:
         seen = _CAST_LAST_SEEN
         seq = _CAST_STATE["seq"]
         acked = _CAST_ACK
-    tv = _pick_tv()
+    tv = await asyncio.to_thread(_discover_tv)
     polled = bool(seen) and (time.time() - seen) < 10
     return JSONResponse({"tv_online": polled or bool(tv), "seq": seq, "acked": acked,
                          "age": round(time.time() - seen, 1) if seen else None,
                          "tv_ip": tv["ip"] if tv else None,
+                         "tv_ver": tv["ver"] if tv else None,
                          "push": bool(tv)})
 
 
 @app.post("/api/tv/announce")
 async def tv_announce(request: Request):
-    """电视端上报自己的局域网地址：{"ip": "192.168.0.116", "port": 18099, "name": "..."}。
+    """电视端（可选的）报到：{"ip": "...", "port": 18099, "name": "..."}。
 
-    电视连的是哪台 OCS 无所谓，报了这一句，这台服务器就能直接把播放指令推过去。
-    也因此换域名/换实例都不用再去电视上改设置。"""
+    新版本只在启动时报一次，用来让服务器记住地址；之后服务器自己探测，
+    不需要电视定时汇报。老版本（<=1.5）仍然每 10 秒上报，这里照收。"""
     try:
         body = await request.json()
     except Exception:
@@ -4126,14 +4211,16 @@ async def tv_announce(request: Request):
     name = str(body.get("name") or "")[:64]
     with _TV_REGISTRY_LOCK:
         _TV_REGISTRY[ip] = {"port": port, "name": name, "at": time.time()}
-    return JSONResponse({"ok": True, "ttl": _TV_TTL, "base": url_head})
+    _save_tv("%s:%d" % (ip, port))
+    return JSONResponse({"ok": True, "base": url_head})
 
 
 @app.get("/api/tv/presence")
 async def tv_presence():
-    """当前已知的电视（局域网地址 + 端口），调试和网页判断都用得着。"""
-    tv = _pick_tv()
-    return JSONResponse({"tv": tv, "ttl": _TV_TTL, "server": url_head})
+    """电视的探测结果 + 候选地址（调试用）。"""
+    tv = await asyncio.to_thread(_discover_tv)
+    return JSONResponse({"tv": tv, "candidates": _tv_candidates(),
+                         "saved": _load_saved_tv(), "server": url_head})
 
 
 @app.post("/api/cast/ack")
@@ -4174,9 +4261,8 @@ async def cast_play(request: Request):
         _CAST_STATE["at"] = time.time()
         state = dict(_CAST_STATE)
         state["acked"] = _CAST_ACK
-    # 有电视上报过地址就直接推给它（不用等它下一次轮询，也不要求它连的是本机）；
-    # 没有就走原来的轮询通道。
-    tv = _pick_tv()
+    # 探到电视就直接推过去（不用等它轮询，也不要求它连的是本机）；探不到就走原来的轮询通道。
+    tv = await asyncio.to_thread(_discover_tv, True)
     pushed = False
     if tv and name:
         pushed = await asyncio.to_thread(_push_play, tv, name, state["seq"], url_head)

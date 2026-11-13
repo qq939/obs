@@ -1537,7 +1537,7 @@
             else castTvBtn.textContent = castOn ? '已投屏' : '投屏到电视';
             castTvBtn.title = tvOnline
                 ? ('投到 ' + (tvAddr || '电视') + (castOn ? '（切换视频会跟着投）' : ''))
-                : '电视 App 未连接到本服务器（它现在连的是别的服务器，或者没装 v1.4）';
+                : '找不到电视：没开机、不在同一网络，或者没装 ocs-tv';
         }
 
         async function refreshCastStatus() {
