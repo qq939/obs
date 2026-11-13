@@ -36,6 +36,7 @@ import uvicorn
 import aiofiles
 from contextlib import asynccontextmanager
 import hashlib
+import downloader            # 同目录模块（server.py 是脚本启动，目录本身就在 sys.path 上）
 import base64
 
 # 视频相关配置
@@ -801,8 +802,10 @@ async def lifespan(app: FastAPI):
     cron_task = asyncio.create_task(_hls_cron_loop()) if HLS_CRON_ENABLED else None
     # 视频全量索引：与 HLS 开关无关，每天必刷
     index_task = asyncio.create_task(_video_index_loop())
-    # 磁力下载的收尾线程：没人开页面时也要把下完的任务搬进 obs 目录
-    threading.Thread(target=_dl_watcher, daemon=True, name="dl-watcher").start()
+    # 磁力下载：libtorrent 跑在进程内（不再依赖外部 aria2 守护进程）
+    downloader.configure(DL_ROOT, app.state.upload_dir)
+    downloader.set_logger(log_line)
+    downloader.start_loop()
     yield
     # Shutdown：取消定时任务
     for t in (cron_task, index_task):
@@ -4057,6 +4060,7 @@ ARIA2_PORT = 6800
 _DL_LOCK = threading.Lock()
 _DL_TASKS: Dict[str, dict] = {}       # gid -> {gid, name, dir, started, done, result}
 _ARIA2_SPAWN_AT = 0.0
+_ARIA2 = {"pid": 0}                   # 我们拉起来的 aria2c 进程号
 DL_VIDEO_EXT = {".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts", ".flv", ".wmv", ".mpg", ".mpeg"}
 DL_SUB_EXT = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup"}
 # 只给了 infohash、没带 tracker 的磁力链接，光靠 DHT 常常一个 peer 都找不到。
@@ -4083,38 +4087,79 @@ def _aria2_call(method: str, params=None, timeout: float = 4.0):
         return None
 
 
-def _ensure_aria2() -> bool:
-    """确保 aria2c 在跑：没跑就用 setsid 拉起来（容器里没有 systemd，只能这样托管）。"""
+def _aria2_alive() -> bool:
+    """看我们拉起来的那个 aria2c 进程还在不在（别用 RPC 判断：RPC 忙的时候会误判成挂了）。"""
+    pid = _ARIA2["pid"]
+    if not pid:
+        return False
+    return os.path.exists("/proc/%d" % pid)
+
+
+def _kill_stale_aria2() -> None:
+    """杀掉历史遗留的 aria2c（这个容器里既没有 pkill 也没有 ps，只能自己翻 /proc）。"""
+    me = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % entry, "rb") as f:
+                cmd = f.read().decode("utf-8", "ignore")
+        except OSError:
+            continue
+        if "aria2c" in cmd:
+            try:
+                os.kill(int(entry), 9)
+            except OSError:
+                pass
+
+
+def _ensure_aria2(force: bool = False) -> bool:
+    """确保 aria2c 在跑：进程没了才用 setsid 拉起来（容器里没有 systemd，只能这样托管）。
+
+    force=True 用于服务启动时接管：先清掉上一代进程，再起自己的，免得两个实例抢 6800 端口。"""
     global _ARIA2_SPAWN_AT
-    if _aria2_call("aria2.getVersion", timeout=2) is not None:
-        return True
+    if not force:
+        if _aria2_alive():
+            return True
+        if _aria2_call("aria2.getVersion", timeout=2) is not None:
+            return True                  # 有别的实例在跑（比如手工起的），直接用
     now = time.time()
     if now - _ARIA2_SPAWN_AT < 10:      # 刚拉过就别刷屏
         return False
     _ARIA2_SPAWN_AT = now
     try:
         os.makedirs(DL_ROOT, exist_ok=True)
-        # dht.dat 只要格式不对（被别的 aria2 版本写过、或者上次没写完整），aria2 会直接抛异常退出。
-        # 那点 DHT 缓存不值钱，每次起之前删掉最省事。
+        # 先把历史遗留的 aria2c 清干净：服务重启后老进程还占着 6800，新拉起来的绑不上就退出，
+        # 结果两个实例轮流写 dht.dat、互相顶掉任务（日志里 "InfoHash already registered" 就是这么来的）。
+        try:
+            _kill_stale_aria2()
+            time.sleep(1.0)
+        except Exception:
+            pass
+        # dht.dat 放内存盘：aria2 每次重启都会反序列化它，读到一次坏文件就直接退出，
+        # 而重启后 /dev/shm 是空的，天然干净。上次写坏的也一并删掉。
+        dht_dir = "/dev/shm" if os.path.isdir("/dev/shm") else (LOG_DIR or ".")
         for name in ("dht.dat", "dht6.dat"):
-            try:
-                os.unlink(os.path.join(LOG_DIR or ".", name))
-            except OSError:
-                pass
+            for base in (dht_dir, LOG_DIR or "."):
+                try:
+                    os.unlink(os.path.join(base, name))
+                except OSError:
+                    pass
         out = open(os.path.join(LOG_DIR or ".", "aria2.out"), "ab")
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["setsid", "aria2c", "--enable-rpc", "--rpc-listen-port=%d" % ARIA2_PORT,
              "--rpc-secret=" + ARIA2_SECRET, "--dir=" + DL_ROOT,
              "--seed-time=0", "--file-allocation=none", "--continue=true",
              "--enable-dht=true", "--disable-ipv6=true", "--bt-max-peers=80",
-             "--dht-file-path=" + os.path.join(LOG_DIR or ".", "dht.dat"),
-             "--dht-file-path6=" + os.path.join(LOG_DIR or ".", "dht6.dat"),
+             "--dht-file-path=" + os.path.join(dht_dir, "dht.dat"),
+             "--dht-file-path6=" + os.path.join(dht_dir, "dht6.dat"),
              "--console-log-level=warn", "--summary-interval=0",
              "--log=" + os.path.join(LOG_DIR or ".", "aria2.log")],
             stdout=out, stderr=out, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-        log_line("[dl] 已启动 aria2c")
+        _ARIA2["pid"] = proc.pid
+        log_line("[dl] 已启动 aria2c（pid %d）" % proc.pid)
     except Exception as exc:
         log_line("[dl] 启动 aria2c 失败：%s" % exc)
         return False
@@ -4323,7 +4368,7 @@ def _dl_watcher():
 
 @app.post("/api/dl/magnet")
 async def dl_magnet(request: Request):
-    """网页粘一个 magnet 链接：加进 aria2 开始下载。"""
+    """网页粘一个 magnet 链接：交给进程内的 libtorrent 抓元数据。"""
     try:
         body = await request.json()
     except Exception:
@@ -4334,39 +4379,21 @@ async def dl_magnet(request: Request):
     if "&tr=" not in magnet and "?tr=" not in magnet:
         magnet += "".join("&tr=" + quote(t, safe="") for t in DL_DEFAULT_TRACKERS)
         log_line("[dl] 磁力链接没带 tracker，补了 %d 个公共 tracker" % len(DL_DEFAULT_TRACKERS))
-    # 同一个种子重复粘：aria2 会回 "InfoHash ... is already registered" 并且新建的任务永远没有元数据，
-    # 所以这里先按 infohash 去重，直接返回已有的那个任务。
-    infohash = _magnet_infohash(magnet)
-    if infohash:
-        with _DL_LOCK:
-            for t in _DL_TASKS.values():
-                if t.get("infohash") == infohash and not t.get("done"):
-                    return JSONResponse({"ok": True, "gid": t["gid"], "existing": True})
-    if not await asyncio.to_thread(_ensure_aria2):
-        return JSONResponse({"ok": False, "error": "下载引擎没起来（aria2 未安装？）"}, status_code=503)
-    task_id = uuid.uuid4().hex[:16]
-    task_dir = os.path.join(DL_ROOT, task_id)
-    os.makedirs(task_dir, exist_ok=True)
-    # 注意：gid 必须用 aria2 返回的那个，不能自己编——aria2 不会采纳 options 里的 gid，
-    # 自己编的话后面 tellStatus 全部查不到（进度永远是 0）。
-    gid = await asyncio.to_thread(_aria2_call, "aria2.addUri",
-                                  [[magnet], {"dir": task_dir, "pause-metadata": "true"}])
-    if not gid or not isinstance(gid, str):
-        return JSONResponse({"ok": False, "error": "aria2 拒绝了这条链接"}, status_code=502)
-    with _DL_LOCK:
-        _DL_TASKS[gid] = {"gid": gid, "name": "", "dir": task_dir, "status": "active",
-                          "phase": "metadata", "infohash": infohash,
-                          "total": 0, "completed": 0, "speed": 0, "started": time.time(),
-                          "done": False, "files": [], "fileList": [], "magnet": magnet[:200]}
-    log_line("[dl] 新增磁力任务 %s" % gid)
-    return JSONResponse({"ok": True, "gid": gid})
+    try:
+        res = await asyncio.to_thread(downloader.add, magnet)
+    except Exception as exc:
+        log_line("[dl] 添加失败：%s" % exc)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if not res.get("ok"):
+        return JSONResponse(res, status_code=502)
+    return JSONResponse(res)
 
 
 @app.post("/api/dl/start")
 async def dl_start(request: Request):
     """用户在设置里勾好文件后开始下载。
 
-    select-file 用的是 aria2 的文件序号（从 1 开始）；不选就全下。"""
+    indexes 是文件序号（从 1 开始）；不选就全下。"""
     try:
         body = await request.json()
     except Exception:
@@ -4377,51 +4404,16 @@ async def dl_start(request: Request):
     indexes = body.get("indexes") or []
     if not gid:
         return JSONResponse({"ok": False, "error": "缺 gid"}, status_code=400)
-    with _DL_LOCK:
-        task = _DL_TASKS.get(gid)
-    if not task:
-        return JSONResponse({"ok": False, "error": "没有这个任务"}, status_code=404)
-
-    picked = sorted({int(i) for i in indexes if str(i).isdigit()}) if indexes else []
-    if picked:
-        opt = {"select-file": ",".join(str(i) for i in picked)}
-        await asyncio.to_thread(_aria2_call, "aria2.changeOption", [gid, opt])
-    await asyncio.to_thread(_aria2_call, "aria2.unpause", [gid])
-    with _DL_LOCK:
-        if gid in _DL_TASKS:
-            _DL_TASKS[gid]["phase"] = "active"
-            _DL_TASKS[gid]["picked"] = picked
-    log_line("[dl] 开始下载 %s，选中文件 %s" % (gid, picked or "全部"))
-    return JSONResponse({"ok": True, "gid": gid, "indexes": picked})
+    res = await asyncio.to_thread(downloader.start, gid, indexes)
+    if not res.get("ok"):
+        return JSONResponse(res, status_code=404)
+    return JSONResponse(res)
 
 
 @app.get("/api/dl/list")
 async def dl_list():
-    """下载进度：给设置页轮询。完成的只留最近几条，避免越积越多。"""
-    await asyncio.to_thread(_refresh_tasks)
-    with _DL_LOCK:
-        items = sorted(_DL_TASKS.values(), key=lambda t: t.get("started", 0), reverse=True)
-        out = []
-        for t in items[:12]:
-            total = t.get("total") or 0
-            out.append({
-                "gid": t["gid"],
-                "name": t.get("name") or "(等待元数据)",
-                "status": t.get("status"),
-                "phase": t.get("phase") or ("done" if t.get("done") else "active"),
-                "fileList": t.get("fileList") or [],
-                "done": bool(t.get("done")),
-                "percent": round(100.0 * (t.get("completed") or 0) / total, 1) if total else 0,
-                "total": total,
-                "completed": t.get("completed") or 0,
-                "speed": t.get("speed") or 0,
-                "seeders": t.get("seeders") or 0,
-                "connections": t.get("connections") or 0,
-                "error": t.get("error") or "",
-                "files": t.get("files") or [],
-                "dropped": t.get("dropped") or 0,
-            })
-    return JSONResponse({"ok": True, "tasks": out})
+    """下载进度：给设置页轮询（状态由下载线程实时维护）。"""
+    return JSONResponse(await asyncio.to_thread(downloader.list_tasks))
 
 
 @app.post("/api/dl/cancel")
@@ -4434,12 +4426,7 @@ async def dl_cancel(request: Request):
     gid = (body.get("gid") or "").strip() if isinstance(body, dict) else ""
     if not gid:
         return JSONResponse({"ok": False, "error": "缺 gid"}, status_code=400)
-    await asyncio.to_thread(_aria2_call, "aria2.forceRemove", [gid])
-    with _DL_LOCK:
-        task = _DL_TASKS.pop(gid, None)
-    if task:
-        shutil.rmtree(task.get("dir") or "", ignore_errors=True)
-    log_line("[dl] 取消 %s" % gid)
+    await asyncio.to_thread(downloader.cancel, gid)
     return JSONResponse({"ok": True})
 
 
