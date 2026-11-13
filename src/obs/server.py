@@ -4024,6 +4024,38 @@ async def videos_index_status():
     })
 
 
+# ── 投屏（手机 → 电视）────────────────────────────────────────────────────
+# 手机在 OCS 里点「投屏」时 POST 一个文件名；电视上装的 ocs-tv 每 3 秒轮询
+# /api/cast/current，发现 seq 变了就自己拉 /obs/<file> 播放。
+# 不走 Cast / AirPlay：两端只要能访问同一台 OCS 就行（跨网段、跨公网都可以）。
+_CAST_LOCK = threading.Lock()
+_CAST_STATE = {"seq": 0, "file": None, "at": 0.0}
+
+
+@app.get("/api/cast/current")
+async def cast_current():
+    """电视端轮询：返回当前要播的文件；seq 变化即视为新指令。"""
+    with _CAST_LOCK:
+        return JSONResponse(dict(_CAST_STATE))
+
+
+@app.post("/api/cast")
+async def cast_play(request: Request):
+    """手机端投屏：body {"file": "xxx.mp4"}；file 为空表示停止投屏。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = (body.get("file") or "").strip() if isinstance(body, dict) else ""
+    with _CAST_LOCK:
+        _CAST_STATE["seq"] += 1
+        _CAST_STATE["file"] = name or None
+        _CAST_STATE["at"] = time.time()
+        state = dict(_CAST_STATE)
+    log_line("[cast] " + ("停止" if not name else name))
+    return JSONResponse(state)
+
+
 @app.post("/api/videos-index/rebuild")
 async def videos_index_rebuild():
     """立刻重建视频索引（上传完一批文件后想马上看到列表可以调一下）。"""
