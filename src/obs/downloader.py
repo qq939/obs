@@ -66,6 +66,10 @@ def _get_session():
     settings = {
         "listen_interfaces": "0.0.0.0:6881-6890",
         "enable_dht": True,
+        # LSD / UPnP / NAT-PMP 全关。UPnP 在 bridge 网络里够不到路由器（SSDP 组播出不了
+        # docker 网桥），实测打开后连接数从 20+ 掉到 1~2、速度从 30MB/s 掉到 0.1MB/s，
+        # 纯副作用；要用得先把容器改成 host 网络并把 6881-6890 端口放出去。
+        # 连接数上限也保持默认：调高了反而更慢。
         "enable_lsd": False,
         "enable_upnp": False,
         "enable_natpmp": False,
