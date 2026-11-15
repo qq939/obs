@@ -5920,6 +5920,22 @@ async def delete_file(filename: str, request: Request):
     log_line(f"软删除文件 file={filename} -> {trash_path} hls_removed={hls_removed}")
     return Response(content="Deleted", status_code=200)
 
+@app.post("/api/hls/build")
+async def hls_build(request: Request):
+    """给单个视频补生成 HLS 分片（浏览器放不了 mkv 这类容器，只能靠 HLS 转一道）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = (body.get("name") or "").strip() if isinstance(body, dict) else ""
+    if not name:
+        return JSONResponse({"ok": False, "error": "缺 name"}, status_code=400)
+    if hls_exists(name):
+        return JSONResponse({"ok": True, "ready": True})
+    ok = await generate_hls(name)
+    return JSONResponse({"ok": bool(ok), "ready": bool(ok)})
+
+
 @app.get("/api/hls-cron")
 async def get_hls_cron():
     """查询每日 HLS 分片任务的开关状态（默认关闭）。"""

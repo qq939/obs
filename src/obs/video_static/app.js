@@ -317,6 +317,8 @@
     const HAS_HLSJS = !!(window.Hls && window.Hls.isSupported && window.Hls.isSupported());
     const NATIVE_HLS = _canNativeHls && /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(navigator.userAgent);
     function hlsCapable(v) { return !!(v && v.hls && v.hlsReady) && (NATIVE_HLS || HAS_HLSJS); }
+    // 浏览器能直接播的容器；其余一律走 HLS 转码
+    const BROWSER_OK_EXT = new Set(['mp4', 'm4v', 'webm']);
     let hlsInstance = null;
 
     const EMPTY_HTML =
@@ -904,6 +906,23 @@
             sDirect.type = ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : ext === 'mkv' ? 'video/x-matroska' : ext === 'm4v' ? 'video/x-m4v' : ext === 'ogv' ? 'video/ogg' : 'video/mp4';
             video.appendChild(sDirect);
             video.src = v.url;
+            // 浏览器放不了的容器（mkv / avi / ts …）：让服务器转一份 HLS，转好再切过去。
+            // 不这么做的话，用户只会看到「格式不支持」。
+            if (!BROWSER_OK_EXT.has(ext) && !v._hlsTried) {
+                v._hlsTried = true;
+                videoLabel.textContent = escapeHtml(v.name) + '  ·  转码中，稍等…';
+                fetch('/api/hls/build', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: v.name }),
+                }).then(r => r.json()).then(d => {
+                    if (d && d.ready) {
+                        v.hlsReady = true;
+                        v.hls = '/hls/' + encodeURIComponent(v.name) + '/index.m3u8';
+                        loadVideoForIndex(activeIndex);   // 转好了重新加载这一集（这次走 HLS）
+                    }
+                }).catch(() => {});
+            }
         }
 
         videoLabel.textContent = escapeHtml(v.name) + '  ·  ' + fmtSize(v.size);
@@ -1034,10 +1053,22 @@
         }
     }
 
+    // 名称顺序：按「数字感知 + 中文拼音」比较，VisionQuest.S01E10 会排在 E09 之后而不是 E01 之后
+    function sortByName(list) {
+        try {
+            const coll = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+            list.sort((a, b) => coll.compare(a.name || '', b.name || ''));
+        } catch (err) {
+            list.sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true }));
+        }
+    }
+
     // ---------------------------------------------------------------- load
     async function loadFeed() {
         const data = await jsonFetch('/videos');
         let list = data.videos || [];
+        // 先按名字排好（/videos 的顺序是目录顺序，不可靠），随机模式再在这基础上打乱
+        sortByName(list);
         if (random) shuffle(list);
         videos = list;
         activeIndex = 0;
