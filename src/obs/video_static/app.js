@@ -926,6 +926,26 @@
         }
 
         videoLabel.textContent = escapeHtml(v.name) + '  ·  ' + fmtSize(v.size);
+
+        // 字幕：服务器找同名 srt/ass 或从 mkv 里抽内嵌文本轨，转成 WebVTT 后挂到 video 上
+        (function attachSubs() {
+            if (video._subsFor === v.name) return;      // 同一集只挂一次
+            video._subsFor = v.name;
+            fetch('/api/subs?name=' + encodeURIComponent(v.name), { cache: 'no-store' })
+                .then(r => r.json())
+                .then(d => {
+                    if (!d || !d.ok || !d.tracks || !d.tracks.length) return;
+                    const t = d.tracks[0];
+                    const track = document.createElement('track');
+                    track.kind = 'subtitles';
+                    track.label = t.label || '字幕';
+                    track.srclang = t.lang || 'und';
+                    track.src = t.url;
+                    track.default = true;
+                    video.appendChild(track);
+                })
+                .catch(() => {});
+        })();
         video.preload = 'metadata';
         // 切源后保持用户选择的 playbackSpeed（不继承上一源的 5x 长按残留）
         fastSpeed = false;

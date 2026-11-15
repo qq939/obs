@@ -4553,6 +4553,107 @@ async def dl_cancel(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _subs_dir() -> str:
+    d = os.path.join(get_hls_dir(), "_subs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _find_sidecar_subs(name: str) -> str:
+    """找同名/同前缀的字幕文件（xxx.srt、xxx.en.srt 这种）。"""
+    upload_dir = get_upload_dir()
+    base = os.path.splitext(name)[0]
+    try:
+        entries = os.listdir(upload_dir)
+    except OSError:
+        return ""
+    wanted = (".srt", ".ass", ".ssa", ".vtt")
+    for fn in entries:
+        low = fn.lower()
+        if not low.endswith(wanted):
+            continue
+        stem = os.path.splitext(fn)[0]
+        if stem == base or stem.startswith(base + "."):
+            return os.path.join(upload_dir, fn)
+    return ""
+
+
+async def _extract_embedded_subs(name: str, src_path: str) -> bool:
+    """从 mkv 里把第一条文本字幕轨抽成 WebVTT（图形字幕 PGS 抽不出来，直接放弃）。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "s",
+            "-show_entries", "stream=index,codec_name", "-of", "csv=p=0", src_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except Exception:
+        return False
+    text_codecs = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+    idx = None
+    for line in (out or b"").decode("utf-8", "ignore").splitlines():
+        parts = line.strip().split(",")
+        if len(parts) >= 2 and parts[1].strip().lower() in text_codecs:
+            try:
+                idx = int(parts[0])
+            except ValueError:
+                idx = None
+            if idx is not None:
+                break
+    if idx is None:
+        return False
+    dst = os.path.join(_subs_dir(), "%s.vtt" % name)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-v", "error", "-i", src_path,
+            "-map", "0:%d" % idx, "-c:s", "webvtt", dst,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=600)
+        return os.path.isfile(dst) and os.path.getsize(dst) > 0
+    except Exception:
+        return False
+
+
+@app.get("/api/subs")
+async def api_subs(name: str = ""):
+    """有没有字幕：先找同名 srt/ass，再从 mkv 里抽内嵌文本轨，统一转成 WebVTT 给浏览器。"""
+    name = (name or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "tracks": []})
+    cached = os.path.join(_subs_dir(), "%s.vtt" % name)
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        return JSONResponse({"ok": True, "tracks": [{"label": "字幕", "lang": "und",
+                                                     "url": "/subs/" + quote(name) + ".vtt"}]})
+    src_path = os.path.abspath(os.path.join(get_upload_dir(), name))
+    if not os.path.isfile(src_path):
+        return JSONResponse({"ok": False, "tracks": []})
+    sidecar = _find_sidecar_subs(name)
+    if sidecar:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-v", "error", "-i", sidecar, "-c:s", "webvtt", cached,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=300)
+        except Exception:
+            pass
+    if not (os.path.isfile(cached) and os.path.getsize(cached) > 0):
+        if not await _extract_embedded_subs(name, src_path):
+            return JSONResponse({"ok": False, "tracks": []})
+    return JSONResponse({"ok": True, "tracks": [{"label": "字幕", "lang": "und",
+                                                 "url": "/subs/" + quote(name) + ".vtt"}]})
+
+
+@app.get("/subs/{filename:path}")
+async def subs_file(filename: str, request: Request):
+    """给浏览器用的 WebVTT（HLS 目录下 _subs/ 里的缓存）。"""
+    path = os.path.join(_subs_dir(), unquote(filename))
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+    return FileResponse(path, media_type="text/vtt; charset=utf-8")
+
+
 @app.get("/obs/{filename:path}")
 async def obs_file(filename: str, request: Request):
     """访问 obs 目录下的文件。
